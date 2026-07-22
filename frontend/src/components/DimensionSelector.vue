@@ -1,0 +1,379 @@
+<script setup>
+/**
+ * 模块化提示词 8 维度选择器
+ * 用法：v-model="dimensions" 双向绑定 { role, mode, rules, output, content_type, depth, tone, word_count }
+ *
+ * 特性：
+ * 1. 高对比度按钮样式（深色背景白字）
+ * 2. 每个维度末尾的「+ 自定义」按钮（弹文本框写自定义指引）
+ * 3. 顶部的「完全自定义提示词」总开关（开启后覆盖一切维度拼装）
+ * 4. 已被 TemplatesView 编辑器覆盖的模块显示「已自定义」标记
+ */
+import { computed, watch, ref, nextTick } from 'vue'
+import { useRouter } from 'vue-router'
+import { useSettingsStore } from '../stores/settingsStore'
+import { summaryApi } from '../utils/api'
+import { Edit } from '@element-plus/icons-vue'
+
+const props = defineProps({
+  modelValue: { type: Object, default: () => ({}) },
+  compact: { type: Boolean, default: false },
+  showRecipes: { type: Boolean, default: true },
+  showPreview: { type: Boolean, default: true },
+})
+
+const emit = defineEmits(['update:modelValue'])
+
+const settings = useSettingsStore()
+const router = useRouter()
+
+// 当前选择（与 modelValue 同步）
+const selected = computed({
+  get: () => props.modelValue,
+  set: (v) => emit('update:modelValue', v),
+})
+
+// 维度列表（带顺序，mode 放在 rules 之前）
+const dimensionKeys = ['role', 'mode', 'content_type', 'rules', 'depth', 'output', 'tone', 'word_count']
+
+const dimensionList = computed(() => {
+  const dims = settings.promptDimensions || {}
+  return dimensionKeys
+    .map(key => ({ key, ...dims[key] }))
+    .filter(d => d.modules)
+})
+
+function selectModule(dimKey, moduleKey) {
+  const next = { ...selected.value, [dimKey]: moduleKey }
+  selected.value = next
+}
+
+function isSelected(dimKey, moduleKey) {
+  return selected.value[dimKey] === moduleKey
+}
+
+// ============ 维度级自定义 ============
+const customDialogVisible = ref(false)
+const customDimKey = ref('')
+const customText = ref('')
+
+function openCustomDialog(dimKey) {
+  customDimKey.value = dimKey
+  customText.value = settings.customDimensions[dimKey] || ''
+  customDialogVisible.value = true
+}
+
+function saveCustomDimension() {
+  settings.setCustomDimension(customDimKey.value, customText.value)
+  customDialogVisible.value = false
+}
+
+function clearCustomDimension() {
+  settings.setCustomDimension(customDimKey.value, '')
+  customDialogVisible.value = false
+}
+
+function hasCustomDimension(dimKey) {
+  return !!settings.customDimensions[dimKey]
+}
+
+// ============ 预设配方应用条（紧凑下拉，选即应用） ============
+const appliedRecipeKey = ref('')
+
+// 监听维度选择变化：若与某配方完全一致则高亮该配方，否则清空（用户手动改了维度）
+watch(() => selected.value, (cur) => {
+  const match = settings.recipes.find(r =>
+    r.dimensions && dimensionKeys.every(k => (r.dimensions[k] || '') === (cur[k] || ''))
+  )
+  appliedRecipeKey.value = match ? match.key : ''
+}, { deep: true })
+
+function onRecipePick(key) {
+  const recipe = settings.recipes.find(r => r.key === key)
+  if (recipe) {
+    settings.applyRecipe(recipe)
+    appliedRecipeKey.value = key
+  }
+}
+
+// 跳转到模板页编辑配方
+function goToTemplates() {
+  router.push('/templates')
+}
+
+// ============ Prompt 预览（自动加载） ============
+const promptPreview = ref('')
+const previewLoading = ref(false)
+let previewTimer = null
+
+watch(() => selected.value, () => {
+  if (!props.showPreview) return
+  if (previewTimer) clearTimeout(previewTimer)
+  previewTimer = setTimeout(loadPreview, 300)
+}, { deep: true })
+
+async function loadPreview() {
+  if (!Object.keys(selected.value).length) return
+  previewLoading.value = true
+  try {
+    const payload = { dimensions: selected.value }
+    const customPrompt = settings.buildCustomPrompt()
+    if (customPrompt) payload.custom_prompt = customPrompt
+    const res = await summaryApi.promptPreview(payload)
+    promptPreview.value = res.prompt || ''
+  } catch (e) {
+    promptPreview.value = '预览加载失败'
+  } finally {
+    previewLoading.value = false
+  }
+}
+</script>
+
+<template>
+  <div class="dimension-selector" :class="{ compact }">
+    <!-- 预设配方应用条（紧凑下拉，选即应用，不展开内容） -->
+    <div v-if="showRecipes && settings.recipes?.length" class="recipes-bar">
+      <span class="dim-label recipes-bar-label">预设配方</span>
+      <el-select
+        :model-value="appliedRecipeKey"
+        placeholder="选择预设配方，一键应用"
+        size="small"
+        filterable
+        style="flex: 1; min-width: 0;"
+        @change="onRecipePick"
+      >
+        <el-option
+          v-for="r in settings.recipes"
+          :key="r.key"
+          :label="r.name"
+          :value="r.key"
+        >
+          <span style="float: left;">{{ r.name }}</span>
+          <span style="float: right; color: var(--app-text-secondary); font-size: 12px; margin-left: 12px;">
+            {{ r.desc || (r.key && r.key.startsWith('usr_') ? '自定义' : '内置') }}
+          </span>
+        </el-option>
+      </el-select>
+      <el-button
+        size="small"
+        text
+        type="primary"
+        title="到「模板」页编辑预设配方"
+        @click="goToTemplates"
+      >编辑</el-button>
+    </div>
+
+    <el-divider v-if="showRecipes && settings.recipes?.length" style="margin: 8px 0;" />
+
+    <!-- 8 维度选择器 -->
+    <div v-for="dim in dimensionList" :key="dim.key" class="dim-row">
+      <div class="dim-header">
+        <span class="dim-label">{{ dim.label }}</span>
+        <span class="dim-desc">{{ dim.desc }}</span>
+        <el-tag v-if="hasCustomDimension(dim.key)" type="success" size="small" style="margin-left: 6px;">含自定义</el-tag>
+      </div>
+      <div class="module-chips">
+        <div
+          v-for="m in dim.modules"
+          :key="m.key"
+          class="module-chip"
+          :class="{ active: isSelected(dim.key, m.key) }"
+          :title="m.desc"
+          @click="selectModule(dim.key, m.key)"
+        >
+          <span class="module-name">{{ m.name }}</span>
+          <el-icon v-if="m.is_customized" class="customized-badge" title="此模块已在模板编辑器中自定义"><Edit /></el-icon>
+        </div>
+        <!-- + 自定义按钮 -->
+        <div
+          class="module-chip custom-add"
+          :class="{ active: hasCustomDimension(dim.key) }"
+          @click="openCustomDialog(dim.key)"
+          title="为该维度添加自定义指引"
+        >
+          <span class="module-name">+ 自定义</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompt 预览 -->
+    <template v-if="showPreview">
+      <el-divider style="margin: 12px 0 8px;" />
+      <div class="preview-section">
+        <div class="dim-label">
+          提示词预览
+          <span v-if="previewLoading" style="font-size: 11px; color: var(--app-text-secondary);">加载中...</span>
+        </div>
+        <pre class="prompt-preview">{{ promptPreview || '选择维度后将显示拼装后的提示词...' }}</pre>
+      </div>
+    </template>
+
+    <!-- 维度级自定义弹窗 -->
+    <el-dialog
+      v-model="customDialogVisible"
+      :title="`「${dimensionList.find(d => d.key === customDimKey)?.label || customDimKey}」自定义指引`"
+      width="600px"
+      destroy-on-close
+    >
+      <div style="font-size: 12px; color: var(--app-text-secondary); margin-bottom: 8px;">
+        此文本将作为该维度的额外指引追加到 prompt 中（不影响其他维度）。
+        留空并保存可清除该维度的自定义。
+      </div>
+      <el-input
+        v-model="customText"
+        type="textarea"
+        :rows="8"
+        placeholder="例如：请特别关注视频中对XX概念的定义演变，逐阶段记录..."
+      />
+      <template #footer>
+        <el-button v-if="hasCustomDimension(customDimKey)" type="danger" @click="clearCustomDimension">清除自定义</el-button>
+        <el-button @click="customDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveCustomDimension">保存</el-button>
+      </template>
+    </el-dialog>
+  </div>
+</template>
+
+<style scoped>
+.dimension-selector {
+  width: 100%;
+}
+.dimension-selector.compact .dim-row {
+  margin-bottom: 6px;
+}
+
+/* 顶部完全自定义 bar（用主题变量） */
+.full-override-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--app-override-bar-bg);
+  border: 1px solid var(--app-override-bar-border);
+  border-radius: 6px;
+  transition: background 0.25s, border-color 0.25s;
+}
+.full-override-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.recipes-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.recipes-bar-label {
+  margin-bottom: 0;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.dim-label {
+  font-size: 12px;
+  color: var(--app-text);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.dim-desc {
+  font-size: 11px;
+  color: var(--app-text-secondary);
+  margin-left: 8px;
+  font-weight: normal;
+}
+.dim-row {
+  margin-bottom: 9px;
+}
+.dim-header {
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.module-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+/* ★ 高对比度按钮：用主题变量驱动，日间/夜间都清晰 */
+.module-chip {
+  padding: 4px 8px;
+  border: 1px solid var(--app-chip-border);
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 11px;
+  transition: all 0.15s;
+  background: var(--app-chip-bg);
+  color: var(--app-chip-text);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  user-select: none;
+}
+.module-chip:hover {
+  border-color: var(--app-chip-active-bg);
+  background: var(--app-chip-hover-bg);
+  color: var(--app-text);
+}
+.module-chip.active {
+  border-color: var(--app-chip-active-bg);
+  background: var(--app-chip-active-bg);
+  color: #fff;
+  font-weight: 500;
+  box-shadow: 0 2px 6px rgba(64, 158, 255, 0.35);
+}
+
+/* 自定义按钮特殊样式 */
+.module-chip.custom-add {
+  border-style: dashed;
+  border-color: var(--app-text-secondary);
+  background: transparent;
+  color: var(--app-text-secondary);
+}
+.module-chip.custom-add:hover {
+  border-color: #67c23a;
+  color: #67c23a;
+  background: rgba(103, 194, 58, 0.1);
+}
+.module-chip.custom-add.active {
+  border-color: #67c23a;
+  background: #67c23a;
+  color: #fff;
+  border-style: solid;
+}
+
+/* 已自定义标记 */
+.customized-badge {
+  font-size: 11px;
+  color: #e6a23c;
+}
+.module-chip.active .customized-badge {
+  color: #fff;
+}
+
+.module-name {
+  white-space: nowrap;
+}
+
+.preview-section {
+  margin-top: 4px;
+}
+.prompt-preview {
+  font-size: 11px;
+  background: var(--app-preview-bg);
+  color: var(--app-preview-text);
+  border-left: 3px solid #409eff;
+  padding: 10px 12px;
+  border-radius: 0 4px 4px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+  margin: 4px 0 0;
+  line-height: 1.5;
+  font-family: 'Consolas', 'Monaco', monospace;
+  transition: background 0.25s, color 0.25s;
+}
+</style>

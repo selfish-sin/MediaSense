@@ -1,0 +1,718 @@
+"""
+YouTube Tool V2 - AI 处理服务
+核心：标准AI总结 + 字幕翻译 + 自动打标签 + Token统计
+使用 httpx AsyncClient 替代旧代码的 requests.post
+"""
+import asyncio
+import json
+import logging
+import re
+import time
+from pathlib import Path
+from typing import Optional, Tuple, Dict, Any, List
+
+import httpx
+
+from config import DEFAULT_MODEL, PROXY, DATA_DIR
+from db.model_repo import get_model_by_key
+from db.database import get_connection
+from services.prompts import (
+    SUMMARY_PROMPTS, ORG_STRATEGY_DESCS,
+    build_prompt_vars, CATEGORY_PROMPTS,
+)
+
+logger = logging.getLogger(__name__)
+
+# 检查点目录
+CHECKPOINT_DIR = DATA_DIR / "checkpoints"
+
+
+class TaskCancelledError(Exception):
+    """任务被用户取消时抛出的异常"""
+    pass
+
+
+def _check_cancelled(job_id: str):
+    """检查任务是否已被取消，是则抛出 TaskCancelledError"""
+    if job_id:
+        from socket_handlers import check_cancelled
+        if check_cancelled(job_id):
+            raise TaskCancelledError(f"任务 {job_id} 已被用户取消")
+
+
+# ============ HTTP 重试包装 ============
+async def _http_post(url: str, **kwargs) -> httpx.Response:
+    """带重试的异步HTTP POST"""
+    max_retries = 2
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=kwargs.pop('timeout', 120.0)) as client:
+                resp = await client.post(url, **kwargs)
+                if resp.status_code < 500 or attempt == max_retries:
+                    return resp
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            last_exc = e
+            if attempt == max_retries:
+                raise
+        if attempt < max_retries:
+            await asyncio.sleep(1.5 * (attempt + 1))
+    raise last_exc
+
+
+def _build_headers(model_cfg: Dict[str, Any]) -> Dict[str, str]:
+    """构建API请求头"""
+    headers = {'Content-Type': 'application/json'}
+    auth_type = model_cfg.get('auth_type', 'bearer')
+    api_key = model_cfg.get('api_key', '')
+    if auth_type == 'bearer' and api_key:
+        headers['Authorization'] = f"Bearer {api_key}"
+    elif auth_type == 'direct' and api_key:
+        headers['Authorization'] = api_key
+    return headers
+
+
+# ============ 核心 AI 调用 ============
+async def _call_ai(
+    model_cfg: Dict[str, Any],
+    prompt: str,
+    timeout: float = 120.0,
+    sio=None,
+    job_id: str = '',
+    round_label: str = '',
+    final: bool = True,
+    max_retries: int = 3,
+) -> Tuple[str, int, int]:
+    """单次AI调用（支持流式输出+批量推送+断连重试），返回(content, input_tokens, output_tokens)
+    
+    max_retries: 流式断连时最大重试次数（指数退避: 2s → 4s → 8s）
+    """
+    headers = _build_headers(model_cfg)
+    payload = {
+        "model": model_cfg.get('model_id', model_cfg.get('key', DEFAULT_MODEL)),
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": model_cfg.get('temperature', 0.3),
+        "stream": True,  # 启用流式输出
+    }
+    max_tokens = model_cfg.get('max_tokens')
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
+
+    try:
+        async def _stream():
+            """在带总超时的协程内完成流式读取，避免 API 半死不活时永久挂起"""
+            content_parts = []
+            in_tok = 0
+            out_tok = 0
+            token_count = 0
+
+            # ★ 批量推送缓冲区：每 BATCH_TOKENS 个 token 或每 BATCH_INTERVAL 秒发送一次
+            _BATCH_TOKENS = 10
+            _BATCH_INTERVAL = 0.05  # 50ms
+            token_buffer = []
+            thinking_buffer = []
+            last_flush_time = time.monotonic()
+            batch_flush_count = 0
+
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream("POST", model_cfg['endpoint'], headers=headers, json=payload) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        data_str = line[6:]
+                        if data_str.strip() == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            delta = chunk.get('choices', [{}])[0].get('delta', {})
+                            text_piece = delta.get('content', '')
+                            reasoning_piece = delta.get('reasoning_content', '')
+                            if reasoning_piece and sio:
+                                thinking_buffer.append(reasoning_piece)
+                                if len(thinking_buffer) >= _BATCH_TOKENS:
+                                    from socket_handlers import emit_ai_thinking
+                                    await emit_ai_thinking(sio, job_id, ''.join(thinking_buffer), done=False)
+                                    thinking_buffer = []
+                            if text_piece:
+                                content_parts.append(text_piece)
+                                token_count += 1
+                                # ★ 每 20 个 token 检查一次取消标记（避免高频检查影响性能）
+                                if token_count % 20 == 0:
+                                    _check_cancelled(job_id)
+
+                                # ★ 批量推送：累积 token，满足条件时批量发送
+                                # 注意：前端只认 data.token（字符串），故每次 flush 拼接成字符串发出
+                                if sio:
+                                    token_buffer.append(text_piece)
+                                    now = time.monotonic()
+                                    should_flush = (
+                                        len(token_buffer) >= _BATCH_TOKENS
+                                        or (now - last_flush_time) >= _BATCH_INTERVAL
+                                    )
+                                    if should_flush:
+                                        from socket_handlers import emit_ai_token
+                                        await emit_ai_token(sio, job_id, ''.join(token_buffer), done=False)
+                                        batch_flush_count += 1
+                                        token_buffer = []
+                                        last_flush_time = now
+                            # 从最后一个 chunk 提取 usage
+                            usage = chunk.get('usage')
+                            if usage:
+                                in_tok = usage.get('prompt_tokens', 0)
+                                out_tok = usage.get('completion_tokens', 0)
+                        except json.JSONDecodeError:
+                            continue
+
+            # ★ 冲刷剩余缓冲区（可能还有不足批量的 token）
+            if sio and token_buffer:
+                from socket_handlers import emit_ai_token
+                await emit_ai_token(sio, job_id, ''.join(token_buffer), done=False)
+                batch_flush_count += 1
+            if sio and thinking_buffer:
+                from socket_handlers import emit_ai_thinking
+                await emit_ai_thinking(sio, job_id, ''.join(thinking_buffer), done=True)
+                thinking_buffer = []
+            return content_parts, in_tok, out_tok, batch_flush_count
+
+        # ★ 流式调用 + 断连重试（指数退避: 2s → 4s → 8s）
+        last_error = None
+        for retry in range(max_retries + 1):
+            try:
+                content_parts, in_tok, out_tok, batch_flush_count = await asyncio.wait_for(_stream(), timeout=600.0)
+                last_error = None
+                break  # 成功
+            except asyncio.TimeoutError:
+                logger.error('AI调用超时（单轮总超时 600s）')
+                if sio:
+                    from socket_handlers import emit_log
+                    await emit_log(sio, job_id, 'AI处理超时（已自动终止，请重试）')
+                return '[处理失败: 超时]', 0, 0
+            except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.ReadTimeout, ConnectionError) as e:
+                last_error = e
+                if retry < max_retries:
+                    wait = 2 ** retry  # 1, 2, 4 (retry 0: 1s, retry 1: 2s, retry 2: 4s)
+                    logger.warning(f'AI流式断连，{wait}s后重试 ({retry+1}/{max_retries}): {e}')
+                    if sio:
+                        from socket_handlers import emit_log
+                        await emit_log(sio, job_id, f'⚠ AI连接断开，{wait}秒后重试 ({retry+1}/{max_retries})')
+                    await asyncio.sleep(wait)
+                    continue
+                else:
+                    logger.error(f'AI调用失败（已重试{max_retries}次）: {e}')
+                    if sio:
+                        from socket_handlers import emit_log
+                        await emit_log(sio, job_id, f'❌ AI连接失败（已重试{max_retries}次）: {e}')
+                    return '[处理失败: 连接断开]', 0, 0
+            except TaskCancelledError:
+                # ★ 用户取消必须向上抛，不能被下面的通用 except 吞成
+                #   '[处理失败: ...]' 哨兵串（否则 main.py 会把 cancelled 记成 failed）
+                raise
+            except Exception as e:
+                # 非网络错误（如 JSON 解析失败等），不重试
+                logger.error(f'AI调用失败: {e}')
+                if sio:
+                    from socket_handlers import emit_log
+                    await emit_log(sio, job_id, f'AI处理失败: {e}')
+                return f'[处理失败: {e}]', 0, 0
+
+        content = ''.join(content_parts)
+
+
+        # 如果 usage 没拿到，估算
+        if not out_tok:
+            out_tok = len(content) // 2  # 粗略估算
+
+        # 推送完成信号（附带完整内容，前端用作最终校准）
+        if sio:
+            from socket_handlers import emit_ai_token, emit_log
+            if final:
+                await emit_ai_token(sio, job_id, content, done=True)
+            if round_label:
+                await emit_log(sio, job_id, f'{round_label} 完成 | token: in={in_tok} out={out_tok} (批量推送{batch_flush_count}次)')
+
+        return content, in_tok, out_tok
+    except TaskCancelledError:
+        # ★ 用户取消：透传给上层（_process_job_impl 会把任务标记为 cancelled）
+        raise
+    except Exception as e:
+        logger.error(f'AI调用失败: {e}')
+        if sio:
+            from socket_handlers import emit_log
+            await emit_log(sio, job_id, f'AI处理失败: {e}')
+        return f'[处理失败: {e}]', 0, 0
+
+
+# ============ 标准 AI 处理 ============
+async def ai_process(
+    text: str,
+    summary_type: str = 'summary',
+    custom_prompt: str = '',
+    model: str = DEFAULT_MODEL,
+    sio=None,
+    job_id: str = '',
+    summary_options: Optional[Dict[str, Any]] = None,
+    dimensions: Optional[Dict[str, str]] = None,
+) -> Tuple[str, int, int]:
+    """
+    标准单轮/分批AI处理
+    返回：(result_text, input_tokens, output_tokens)
+
+    支持两种提示词模式：
+    1. 模块化（推荐）：传入 dimensions 字典（7维），由 prompt_builder 拼装
+    2. 回退：使用 summary_type 查找 SUMMARY_PROMPTS（保留兼容）
+    """
+    model_cfg = get_model_by_key(model) or get_model_by_key(DEFAULT_MODEL)
+    if not model_cfg:
+        raise Exception(f'模型 {model} 不存在')
+
+    opts = summary_options or {}
+
+    # ★ 决定 prompt 构建方式：模块化优先
+    use_modular = bool(dimensions)
+
+    if use_modular:
+        from services.prompt_builder import build_modular_prompt, dimensions_to_legacy_summary_type
+        # 兼容 custom_prompt：作为额外指引传入
+        user_custom = custom_prompt or opts.get("custom_prompt", "")
+        # 兼容 edited_prompt：用户可能直接编辑了完整 prompt
+        edited_prompt = opts.get("edited_prompt", "")
+        # ★ 完全自定义提示词库（来自 TemplatesView 的 full_override 模板）
+        full_override = opts.get("full_override", "")
+        if edited_prompt:
+            prompt_template = edited_prompt
+            # 仍需注入 CONTENT
+            prompt = prompt_template.replace('{{CONTENT}}', text)
+        else:
+            prompt = build_modular_prompt(
+                dimensions=dimensions,
+                content=text,
+                custom_prompt=user_custom,
+                full_override=full_override,
+            )
+        if sio:
+            from socket_handlers import emit_progress, emit_log
+            await emit_progress(sio, job_id, 'ai', 0, f'正在调用 AI ({model})...')
+            legacy_label = dimensions_to_legacy_summary_type(dimensions)
+            await emit_log(sio, job_id, f'模块化提示词 | 等效类型: {legacy_label}')
+    else:
+        if sio:
+            from socket_handlers import emit_progress, emit_log
+            await emit_progress(sio, job_id, 'ai', 0, f'正在调用 AI ({model})...')
+            await emit_log(sio, job_id, f'总结类型: {summary_type}')
+
+        # 旧路径：从 SUMMARY_PROMPTS 查找（保留兼容）
+        type_prompt = SUMMARY_PROMPTS.get(summary_type, SUMMARY_PROMPTS['summary'])
+        edited_prompt = opts.get("edited_prompt", "")
+        if summary_type == 'custom' and custom_prompt:
+            prompt_template = type_prompt.replace('{{CUSTOM_PROMPT}}', custom_prompt)
+        elif edited_prompt:
+            prompt_template = edited_prompt
+        else:
+            prompt_template = type_prompt
+
+        # 注入模板变量
+        vars_map = build_prompt_vars(opts)
+        for var, val in vars_map.items():
+            prompt_template = prompt_template.replace(var, val)
+
+        # 替换内容占位符
+        prompt = prompt_template.replace('{{CONTENT}}', text)
+
+    # ★ full_override 模式：提示词设计为整文处理（如"书记员全文记录"），分块会破坏连贯性
+    _has_full_override = bool(opts and isinstance(opts, dict) and str(opts.get("full_override", "")).strip())
+    if _has_full_override:
+        chunks = [text]
+        if sio and len(text) > 80000:
+            from socket_handlers import emit_log
+            await emit_log(sio, job_id, f'full_override 模式：整文送入（{len(text)} 字符），不分块')
+    else:
+        # 分批处理（自适应 chunk 大小：根据目标字数调整，避免小目标浪费 token 或大目标截断）
+        word_count_raw = None
+        if dimensions and isinstance(dimensions, dict):
+            word_count_raw = dimensions.get("word_count")
+        if not word_count_raw and opts and isinstance(opts, dict):
+            word_count_raw = opts.get("word_count")
+        # 不限 / 无效 → 兜底 150000；其他按映射表
+        _WC_MAP = {"500": 20000, "1000": 30000, "3000": 40000, "5000": 60000, "10000": 80000, "20000": 120000}
+        try:
+            max_chars = _WC_MAP.get(str(word_count_raw).strip(), 80000)
+        except Exception:
+            max_chars = 80000
+        if len(text) > max_chars:
+            chunks = [text[i:i+max_chars] for i in range(0, len(text), max_chars)]
+            if sio:
+                from socket_handlers import emit_log
+                await emit_log(sio, job_id, f'文本较长，分 {len(chunks)} 批处理')
+        else:
+            chunks = [text]
+
+    results = []
+    total_in = 0
+    total_out = 0
+
+    for i, chunk in enumerate(chunks):
+        # ★ 每批开始前检查取消标记
+        _check_cancelled(job_id)
+        
+        pct = int(10 + (i + 1) / len(chunks) * 80)
+        if sio:
+            from socket_handlers import emit_progress
+            await emit_progress(sio, job_id, 'ai', pct, f'AI处理中... ({i+1}/{len(chunks)})')
+
+        # 分批时每批只传入部分内容
+        if len(chunks) > 1:
+            if use_modular:
+                from services.prompt_builder import build_modular_prompt
+                chunk_prompt = build_modular_prompt(
+                    dimensions=dimensions,
+                    content=f'[第 {i+1}/{len(chunks)} 部分]\n\n{chunk}',
+                    custom_prompt=custom_prompt or opts.get("custom_prompt", ""),
+                    full_override=opts.get("full_override", ""),
+                )
+            else:
+                chunk_prompt = prompt_template.replace('{{CONTENT}}', f'[第 {i+1}/{len(chunks)} 部分]\n\n{chunk}')
+        else:
+            chunk_prompt = prompt
+
+        content, in_tok, out_tok = await _call_ai(
+            model_cfg, chunk_prompt, timeout=120.0,
+            sio=sio, job_id=job_id, round_label=f'批次 {i+1}/{len(chunks)}', final=False
+        )
+        results.append(content)
+        total_in += in_tok
+        total_out += out_tok
+
+    # 合并结果
+    if len(chunks) > 1:
+        full_result = f'# 分批处理结果\n\n已分 {len(chunks)} 批处理：\n\n---\n\n' + '\n\n---\n\n'.join(results)
+    else:
+        full_result = '\n\n'.join(results)
+
+    if sio:
+        from socket_handlers import emit_ai_token, emit_progress, emit_log
+        # 最终校准信号（完整内容），前端据此停止 append
+        await emit_ai_token(sio, job_id, full_result, done=True)
+        await emit_progress(sio, job_id, 'ai', 100, 'AI处理完成！')
+        await emit_log(sio, job_id, f'AI结果: {len(full_result)} 字符')
+        await emit_log(sio, job_id, f'累计token: in={total_in} out={total_out}')
+
+    # 更新Token统计到数据库
+    _record_token_usage(model, total_in, total_out, job_id)
+
+    return full_result, total_in, total_out
+
+
+# ============ 字幕翻译 ============
+async def translate_subtitles(
+    srt_path: str,
+    target_lang: str = 'zh-CN',
+    model: str = DEFAULT_MODEL,
+    category: str = 'auto',
+    sio=None,
+    job_id: str = '',
+) -> str:
+    """翻译SRT字幕，返回翻译后的SRT路径"""
+    model_cfg = get_model_by_key(model) or get_model_by_key(DEFAULT_MODEL)
+    headers = _build_headers(model_cfg)
+
+    from config import TRANSLATE_LANGS
+    lang_name = TRANSLATE_LANGS.get(target_lang, {}).get("name", target_lang)
+
+    if sio:
+        from socket_handlers import emit_progress, emit_log
+        await emit_progress(sio, job_id, 'translate', 0, f'正在翻译字幕 → {lang_name}...')
+
+    with open(srt_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    blocks = content.strip().split('\n\n')
+    batch_size = 80
+    batches = [blocks[i:i+batch_size] for i in range(0, len(blocks), batch_size)]
+
+    cat_cfg = CATEGORY_PROMPTS.get(category, CATEGORY_PROMPTS['auto'])
+
+    translated = []
+    for i, batch in enumerate(batches):
+        pct = int((i + 1) / len(batches) * 90)
+        if sio:
+            from socket_handlers import emit_progress
+            await emit_progress(sio, job_id, 'translate', pct, f'翻译中... ({i+1}/{len(batches)}) → {lang_name}')
+
+        batch_text = '\n\n'.join(batch)
+        prompt = f"""请将以下{cat_cfg['name']}相关的字幕翻译成{lang_name}。
+
+要求：
+1. 序号和时间戳格式保持原样
+2. 使用自然流畅的{lang_name}
+3. 专有名词可保留原文并附翻译
+4. 保持字幕的简洁性
+
+字幕内容：
+""" + batch_text
+
+        payload = {
+            "model": model_cfg.get('model_id', model),
+            "messages": [
+                {"role": "system", "content": "你是专业的字幕翻译助手，同时具备基础学术素养，对思想史关键术语保持警觉。\n\n翻译协议：\n1. 序号和时间戳格式严格保持原样\n2. 同一原文术语全文使用统一译名，思想史术语优先采用学界约定俗成的译法\n3. 专有名词保留原文并附翻译\n4. 保持字幕简洁性，但不牺牲概念精确性\n5. 转录有歧义处，标注 [译注：原文此处可能为……]"},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.3,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(model_cfg['endpoint'], headers=headers, json=payload)
+                resp.raise_for_status()
+                result = resp.json()
+                translated_text = result['choices'][0]['message']['content']
+                translated.append(translated_text)
+        except Exception as e:
+            logger.warning(f'字幕翻译失败 (批次 {i+1}): {e}')
+            translated.append(batch_text)
+
+    # 生成翻译文件
+    lang_suffix = target_lang.replace('-', '_')
+    cn_srt_path = srt_path.replace('.srt', f'__{lang_suffix}.srt')
+    with open(cn_srt_path, 'w', encoding='utf-8') as f:
+        f.write('\n\n'.join(translated))
+
+    if sio:
+        from socket_handlers import emit_progress
+        await emit_progress(sio, job_id, 'translate', 100, '字幕翻译完成！')
+
+    return cn_srt_path
+
+
+# ============ 转录文本 AI 校正 ============
+async def correct_transcript(
+    text: str,
+    model: str = DEFAULT_MODEL,
+    sio=None,
+    job_id: str = '',
+) -> Tuple[str, int, int]:
+    """
+    用云端模型校正语音转写文本。
+
+    针对语音转写常见错误：同音错字、专有名词误识别、标点缺失、断句不当。
+    保持原意与时间戳标记，只修正明显错误，不增删内容。
+
+    返回：(校正后文本, input_tokens, output_tokens)
+    """
+    model_cfg = get_model_by_key(model) or get_model_by_key(DEFAULT_MODEL)
+    if not model_cfg:
+        raise Exception(f'模型 {model} 不存在')
+
+    if sio:
+        from socket_handlers import emit_progress, emit_log
+        await emit_progress(sio, job_id, 'correct', 0, f'AI 校正转录文本（{model}）...')
+        await emit_log(sio, job_id, f'🔧 开始 AI 校正（模型: {model}）')
+
+    # 分批处理（GLM-4.5-Air 128K上下文，8万字符一段已可覆盖绝大多数场景）
+    max_chars = 80000  # 单批最大字符数，一次处理更多内容减少API调用次数
+    if len(text) > max_chars:
+        chunks = [text[i:i+max_chars] for i in range(0, len(text), max_chars)]
+        if sio:
+            from socket_handlers import emit_log
+            await emit_log(sio, job_id, f'转录文本较长（{len(text)}字符），分 {len(chunks)} 批校正')
+    else:
+        chunks = [text]
+
+    corrected_parts = []
+    total_in = 0
+    total_out = 0
+
+    for i, chunk in enumerate(chunks):
+        pct = int((i + 1) / len(chunks) * 100)
+        if sio:
+            from socket_handlers import emit_progress
+            await emit_progress(sio, job_id, 'correct', pct, f'AI 校正中... ({i+1}/{len(chunks)})')
+
+        prompt = f"""以下是语音识别（ASR）转录的文本。请校正其中的明显错误：
+
+【校正要求】
+1. 修正同音错字、形近字误识别（如"终南山"→"钟南山"、".Rectifier"→纠正上下文）
+2. 修正专有名词错误（人名、地名、术语、品牌、技术名词）
+3. 补全缺失的标点（句号、逗号、问号等），保持中文标点规范
+4. 修正明显的断句错误，但不改变原意
+5. 保留所有时间戳标记（如 [MM:SS - MM:SS] 格式），不修改时间戳本身
+6. 保留 [说话人X] 等说话人标记
+7. 不要增删实质内容，不要添加解释、注释
+8. 直接输出校正后的纯文本，不要加任何前后缀说明
+
+【待校正文本】
+{chunk}"""
+
+        content, in_tok, out_tok = await _call_ai(
+            model_cfg, prompt, timeout=120.0,
+            sio=sio, job_id=job_id, round_label=f'校正批次 {i+1}/{len(chunks)}'
+        )
+        # 去掉可能的失败标记
+        if content.startswith('[处理失败'):
+            content = chunk  # 校正失败则保留原文
+            if sio:
+                from socket_handlers import emit_log
+                await emit_log(sio, job_id, f'⚠ 批次 {i+1} 校正失败，保留原文')
+        corrected_parts.append(content)
+        total_in += in_tok
+        total_out += out_tok
+
+    full_corrected = '\n'.join(corrected_parts)
+
+    if sio:
+        from socket_handlers import emit_progress, emit_log
+        await emit_progress(sio, job_id, 'correct', 100, 'AI 校正完成')
+        await emit_log(sio, job_id, f'✅ 校正完成 | 原文 {len(text)} 字符 → 校正后 {len(full_corrected)} 字符 | token in={total_in} out={total_out}')
+
+    _record_token_usage(model, total_in, total_out, job_id)
+    return full_corrected, total_in, total_out
+
+
+# ============ 思维导图 ============
+
+async def generate_mindmap(
+    result_text: str,
+    title: str = '',
+    model: str = DEFAULT_MODEL,
+    sio=None,
+    job_id: str = '',
+) -> str:
+    """基于总结结果生成 markmap 兼容的 Markdown 思维导图
+
+    调用一次 LLM，把总结文本转为层级化 Markdown。
+    返回可直接传给 markmap 渲染的 Markdown 字符串。
+    """
+    model_cfg = get_model_by_key(model) or get_model_by_key(DEFAULT_MODEL)
+    if not model_cfg:
+        raise Exception(f'模型 {model} 不存在')
+
+    # 截断过长的输入，思维导图不需要完整总结
+    text_snippet = result_text[:8000] if len(result_text) > 8000 else result_text
+
+    prompt = f"""你是一个思维导图生成专家。请根据以下视频总结内容，生成一个结构清晰的思维导图（纯 Markdown 格式，用于 markmap 渲染）。
+
+视频标题：{title or '未命名'}
+
+总结内容：
+{text_snippet}
+
+请严格按以下规则输出：
+1. 第一行必须是 # 标题（作为根节点）
+2. 使用 ## 作为一级分支（如：内容概要、章节要点、核心观点、关键概念）
+3. 使用 ### 作为二级分支
+4. 使用 - 作为叶子节点（具体要点）
+5. 每个叶子节点不超过 20 个中文字，简洁有力
+6. 层级不超过 4 层
+7. 只输出 Markdown 内容，不要加任何解释、前言、后记"""
+
+    # ★ 非流式调用：导图 prompt 短，不走流式，避免智谱断连
+    import httpx
+    headers = _build_headers(model_cfg)
+    payload = {
+        "model": model_cfg.get('model_id', model_cfg.get('key', '')),
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+        "max_tokens": 4096,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(model_cfg['endpoint'], headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+            in_tok = data.get('usage', {}).get('prompt_tokens', 0)
+            out_tok = data.get('usage', {}).get('completion_tokens', 0)
+            _record_token_usage(model, in_tok, out_tok, job_id)
+            return content or ''
+    except Exception as e:
+        logger.error(f'思维导图生成失败: {e}')
+        return ''
+
+
+# ============ 自动打标签 ============
+async def generate_tags(
+    text: str,
+    model: str = DEFAULT_MODEL,
+    sio=None,
+    job_id: str = '',
+) -> List[str]:
+    """用AI分析文本生成3-5个分类标签"""
+    model_cfg = get_model_by_key(model) or get_model_by_key(DEFAULT_MODEL)
+    headers = _build_headers(model_cfg)
+
+    prompt = f"""请分析以下视频转录文本的内容主题，返回 3-5 个分类标签。
+标签要求：
+- 每个标签 2-5 个字
+- 覆盖：学科领域、内容类型、关键主题
+- 可包含思想史、学派、思想家相关标签
+- 示例：哲学、现象学、黑格尔、学术讲座
+- 只输出 JSON 数组，不要其他内容：["标签1","标签2","标签3"]
+
+转录文本（前 3000 字）：
+{text[:3000]}"""
+
+    payload = {
+        "model": model_cfg.get('model_id', model),
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1,
+        "max_tokens": 100,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(model_cfg['endpoint'], headers=headers, json=payload)
+            resp.raise_for_status()
+            content = resp.json()['choices'][0]['message']['content']
+            # 清理 markdown 代码块包裹
+            cleaned = content.strip()
+            if cleaned.startswith('```'):
+                cleaned = re.sub(r'^```\w*\n?', '', cleaned)
+                cleaned = re.sub(r'\n?```$', '', cleaned)
+            # 提取 JSON 数组
+            match = re.search(r'\[.*?\]', cleaned, re.DOTALL)
+            if match:
+                tags = json.loads(match.group())
+                return [t for t in tags if isinstance(t, str)][:5]
+            return []
+    except Exception as e:
+        logger.warning(f'自动打标签失败: {e}')
+        return []
+
+
+# ============ Token 统计 ============
+def _record_token_usage(model_key: str, input_tokens: int, output_tokens: int, job_id: str = ''):
+    """记录Token使用到数据库"""
+    conn = get_connection()
+    try:
+        conn.execute("""
+            INSERT INTO token_usage (job_id, model_key, input_tokens, output_tokens)
+            VALUES (?, ?, ?, ?)
+        """, (job_id, model_key, input_tokens, output_tokens))
+        conn.commit()
+    except Exception as e:
+        logger.warning(f'Token统计写入失败: {e}')
+    finally:
+        conn.close()
+
+
+# ============ 断点续传 ============
+def _save_checkpoint(cp_dir: Path, round_name: str, output: str, in_tok: int, out_tok: int):
+    """保存深度模式轮次检查点"""
+    cp = {
+        "round": round_name,
+        "output": output,
+        "input_tokens": in_tok,
+        "output_tokens": out_tok,
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    with open(cp_dir / f"{round_name}.json", "w", encoding="utf-8") as f:
+        json.dump(cp, f, ensure_ascii=False, indent=2)
+
+
+def _load_checkpoint(cp_dir: Path, round_name: str) -> Optional[Dict]:
+    """加载检查点"""
+    cp_file = cp_dir / f"{round_name}.json"
+    if cp_file.exists():
+        with open(cp_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None

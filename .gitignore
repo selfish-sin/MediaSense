@@ -1,0 +1,109 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Database files (不进 Git)
+backend/data/*.db
+backend/data/*.db-journal
+backend/data/*.db-wal
+backend/data/*.db-shm
+
+# Backend runtime data
+backend/data/downloads/
+backend/data/exports/
+backend/data/bilibili_cookies.json
+backend/data/token_usage.json
+backend/data/custom_models.json
+
+# Whisper models (3.6GB, 共享旧目录)
+models/
+
+# Binaries
+bin/
+*.exe
+*.zip
+*.ico
+
+# Node.js
+node_modules/
+frontend/node_modules/
+
+# Build output (由 Vite 生成)
+backend/static/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test artifacts
+.pytest-tmp/
+.coverage
+htmlcov/
+
+# Internal project tracking
+projects/
+restart.bat
+
+# Temp & backups
+*.tmp
+*.bak
+*.bak.*
+*.bak-*
+*.bak_*
+
+# AI tool directories
+.trellis/
+.codex/
+.claude/
+.codebuddy/
+.agents/
+.agent/
+.workbuddy/
+.codegraph/
+openspec/
+AGENTS.md
+CLAUDE.md
+
+# Runtime logs
+backend/uvicorn.err
+
+# Internal docs
+workspace.yaml
+
+backend/services/downloader_v2_temp.py
+backend/routers/books.py.deleted
+backend/data/checkpoints/
+
+# 数据文件
+backend/data/subtitles/
+backend/data/uploads/
+backend/data/converter/
+
+# 敏感配置（含 API Key，勿上传）
+backend/config.py
+backend/data/test_*

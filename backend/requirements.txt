@@ -1,0 +1,13 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+python-socketio[asyncio]>=5.11.0
+pydantic>=2.10.0
+httpx>=0.28.0
+python-multipart>=0.0.18
+aiofiles>=24.1.0
+yt-dlp>=2024.12.0
+faster-whisper>=1.1.0
+pdfkit>=1.0.0
+python-docx>=1.1.0
+bilibili-api-python>=17.4.0
+pillow>=10.4.0

@@ -1,0 +1,750 @@
+"""
+MediaSense - 模块化提示词构建引擎
+8 维度可组合：角色 + 认知模式 + 内容类型 + 认知规则 + 深度 + 输出格式 + 语气 + 字数
+支持 DB 覆盖（prompt_module_overrides 表）和完全自定义（full_override）
+"""
+from typing import Dict, Any, List, Optional
+
+# ============ 维度元数据（供前端渲染选择器） ============
+# 每个维度包含若干模块，每个模块: {key, name, desc, template}
+
+PROMPT_DIMENSIONS = {
+    # ────────────── 1. 角色 ──────────────
+    "role": {
+        "label": "角色",
+        "desc": "AI 扮演的分析师人设，决定视角和专长",
+        "default": "general",
+        "modules": [
+            {
+                "key": "general",
+                "name": "通用助手",
+                "desc": "均衡适配，适合大多数视频",
+                "template": "你是一位经验丰富的内容分析助手。你的任务是准确理解视频内容，提炼关键信息，用清晰有条理的方式呈现给用户。你擅长快速抓住重点，不遗漏重要细节，也不过度解读。",
+            },
+            {
+                "key": "academic",
+                "name": "学术研究员",
+                "desc": "严谨论证，挖掘思想脉络",
+                "template": "你是一位受过系统学术训练的研究员，擅长人文社科领域的文本分析。你注重论证结构的梳理、核心概念的辨析、以及观点之间逻辑关系的把握。你会标注信息的来源层级（原文明确陈述 / 合理推断 / 缺乏依据），但不会过度学术化。",
+            },
+            {
+                "key": "tech",
+                "name": "技术审稿人",
+                "desc": "注重可操作性和技术细节",
+                "template": "你是一位技术审稿人，擅长从实操角度审视内容。你关注步骤的可执行性、技术细节的准确性、以及潜在的操作风险。你倾向于把抽象描述转化为具体步骤，并指出哪些是必须的、哪些是可选的。",
+            },
+            {
+                "key": "journalist",
+                "name": "新闻编辑",
+                "desc": "事实优先，区分事实与观点",
+                "template": "你是一位新闻编辑，习惯用 5W1H 框架快速提取核心事实。你严格区分事实陈述、推测、评论和宣传话术，对信息来源的可靠性敏感。你的表达简洁客观，避免主观渲染。",
+            },
+            {
+                "key": "creative",
+                "name": "创意写手",
+                "desc": "生动有趣，善于捕捉亮点",
+                "template": "你是一位创意写手，善于捕捉视频中的精彩瞬间和有趣细节。你的表达生动有画面感，能还原对话的氛围和情绪。你会在保证信息准确的前提下，让总结读起来有吸引力。",
+            },
+        ],
+    },
+
+    # ────────────── 2. 认知规则 ──────────────
+    "rules": {
+        "label": "认知规则",
+        "desc": "分析的深度和原则，决定 AI 如何思考内容",
+        "default": "standard",
+        "modules": [
+            {
+                "key": "standard",
+                "name": "标准提炼",
+                "desc": "忠实提取，不发挥",
+                "template": """【分析原则】
+1. 忠实于原文内容，不添加视频中未提及的信息
+2. 区分核心论点和支撑细节，优先呈现核心
+3. 保留说话者的原始用词和立场，不替它做价值判断
+4. 如遇模糊或矛盾之处，如实标注，不强作解人""",
+            },
+            {
+                "key": "deep",
+                "name": "深度分析",
+                "desc": "梳理论证结构，挖掘隐含逻辑",
+                "template": """【分析原则】
+1. 不仅提取信息，还要梳理论证结构：前提→推理→结论
+2. 标注信息的确定性层级：[原文] 明确陈述 / [推断] 合理推测 / [存疑] 证据不足
+3. 识别隐含前提和未明说的假设
+4. 注意概念在不同语境中的含义差异
+5. 保留复杂性和张力，不做过度简化""",
+            },
+            {
+                "key": "critical",
+                "name": "批判审视",
+                "desc": "评估论据质量，指出强弱",
+                "template": """【分析原则】
+1. 区分"论证"与"断言"——有证据支撑的才是论证
+2. 评估每个论据的说服力：证据是否充分、逻辑是否自洽
+3. 指出内容的亮点和不足，给出具体理由
+4. 识别可能的偏见、逻辑谬误或信息选择性
+5. 对可以改进或需补充的方面给出建议
+6. 保持中立，不因个人立场而褒贬""",
+            },
+        ],
+    },
+
+    # ────────────── 3. 输出格式 ──────────────
+    "output": {
+        "label": "输出格式",
+        "desc": "总结的结构和呈现方式",
+        "default": "summary",
+        "modules": [
+            {
+                "key": "summary",
+                "name": "综合摘要",
+                "desc": "结构化摘要，含核心主题和要点",
+                "template": """【输出格式】
+按以下结构输出（各部分按需调整，不要硬凑）：
+
+## 核心主题
+用 1-2 句话概括视频的核心内容。
+
+## 主要内容
+分条梳理视频的关键信息点，每条一个完整观点，保持逻辑顺序。重要处标注时间戳 [MM:SS]。
+
+## 关键细节
+补充重要的数据、案例、引用或操作细节。
+
+## 一句话总结
+用一句话收束。""",},
+            {
+                "key": "bullets",
+                "name": "要点列表",
+                "desc": "精炼的要点清单",
+                "template": """【输出格式】
+以要点列表为主，每条不超过 2 句话：
+- 第一条：视频讲的是什么（1 句话）
+- 后续条目：按重要性或时间顺序列出关键要点
+- 最后一条：值得记住的一句话
+
+要求精炼，不要展开论述。关键处可标注 [MM:SS]。""",},
+            {
+                "key": "qa",
+                "name": "问答对",
+                "desc": "以问答形式组织内容",
+                "template": """【输出格式】
+以问答形式呈现，提出 6-10 个问题并作答：
+- 问题应覆盖视频的核心内容，而非细枝末节
+- 答案基于视频内容，简洁准确
+- 格式：**Q：问题** \\n A：答案
+
+不要编造视频中未涉及的问题。""",},
+            {
+                "key": "mindmap",
+                "name": "思维导图",
+                "desc": "Markdown 树状结构",
+                "template": """【输出格式】
+用 Markdown 缩进层级输出思维导图结构：
+- 根节点是视频核心主题
+- 一级分支是主要内容板块
+- 二级及以下是具体要点
+- 每个节点简洁，不超过 1 句话
+
+示例：
+# 核心主题
+## 分支1
+- 要点1
+- 要点2
+  - 细节
+## 分支2
+- 要点""",},
+            {
+                "key": "timeline",
+                "name": "时间线",
+                "desc": "按时间/逻辑顺序串联",
+                "template": """【输出格式】
+按视频的展开顺序（时间线或逻辑线）梳理：
+
+## 内容走向
+1-2 句话说明视频的整体脉络。
+
+## 时间线
+| 时间 | 内容要点 |
+|------|----------|
+| [MM:SS] | ... |
+| [MM:SS] | ... |
+
+## 关键转折
+标出视频中重要的转折点或观点切换。""",},
+            {
+                "key": "chapters",
+                "name": "章节分析",
+                "desc": "按内容板块逐段分析",
+                "template": """【输出格式】
+按内容的逻辑板块分章节（不是机械的时间分段，而是按话题/论点切换）：
+
+## 整体脉络
+1-2 句话概括。
+
+### 第一章 [MM:SS-MM:SS] 章节标题
+- 本章要点
+- 核心观点
+
+### 第二章 ...
+（依此类推）
+
+## 逻辑关系
+简要说明各章节之间的递进或转折关系。""",},
+            {
+                "key": "comparison",
+                "name": "对比表格",
+                "desc": "以表格对比不同观点/方案",
+                "template": """【输出格式】
+如果视频涉及多个观点、方案或对象的对比，用表格呈现：
+
+## 对比维度
+| 维度 | 观点A | 观点B | ... |
+|------|-------|-------|-----|
+| ... | ... | ... | ... |
+
+## 补充说明
+表格之外的背景信息和重要细节。
+
+如果视频内容不适合表格对比，改为分类要点列表。""",},
+            {
+                "key": "freeform",
+                "name": "自由格式",
+                "desc": "AI 根据内容自行决定结构",
+                "template": """【输出格式】
+根据视频内容的性质，自行选择最合适的呈现结构。不拘泥于固定模板，以让读者高效获取信息为原则。可以用标题、列表、表格等 Markdown 元素。""",},
+        ],
+    },
+
+    # ────────────── 4. 内容类型 ──────────────
+    "content_type": {
+        "label": "内容类型",
+        "desc": "针对不同类型视频的理解方式",
+        "default": "general",
+        "modules": [
+            {
+                "key": "general",
+                "name": "通用视频",
+                "desc": "不做类型预设",
+                "template": "",  # 空模板，不添加额外约束
+            },
+            {
+                "key": "tutorial",
+                "name": "教程/操作",
+                "desc": "提取可执行步骤",
+                "template": """【内容理解】
+这是一个教程或操作演示类视频。请特别关注：
+- 最终目标是什么
+- 需要哪些工具、环境或前置条件
+- 具体操作步骤（按顺序，区分必须和可选）
+- 常见问题和注意事项
+目标：让读者不看视频也能独立完成操作。""",
+            },
+            {
+                "key": "news",
+                "name": "新闻资讯",
+                "desc": "5W1H 分离事实与观点",
+                "template": """【内容理解】
+这是新闻或资讯类内容。请特别关注：
+- 5W1H：谁、什么事、何时、何地、为什么、如何
+- 区分已确认事实、相关方声称、分析推测、评论观点
+- 注意信息来源的可靠性
+- 标注尚未证实或存在争议的部分""",
+            },
+            {
+                "key": "interview",
+                "name": "访谈/对话",
+                "desc": "区分不同发言者的立场",
+                "template": """【内容理解】
+这是访谈或对话类内容。请特别关注：
+- 区分不同发言者及其立场
+- 提炼每位发言者的核心观点
+- 标注观点之间的交锋、共识或分歧
+- 保留有价值的原话引用
+- 不要把不同人的观点混为一谈""",
+            },
+            {
+                "key": "lecture",
+                "name": "演讲/讲座",
+                "desc": "梳理论证结构和核心概念",
+                "template": """【内容理解】
+这是演讲或讲座类内容。请特别关注：
+- 演讲者的核心论点是什么
+- 论证结构：用了哪些论据、案例、推理
+- 关键概念的定义和用法
+- 演讲者立场和可能的预设
+- 现场互动中有价值的问题""",
+            },
+            {
+                "key": "entertainment",
+                "name": "休闲/娱乐",
+                "desc": "捕捉亮点和氛围",
+                "template": """【内容理解】
+这是休闲或娱乐类内容。请特别关注：
+- 视频的亮点和精彩片段（标注时间戳）
+- 传达的核心信息或情绪
+- 有笑点、有梗、有名场面的地方
+- 是否有值得了解的背景知识
+不必强行提炼深层意义，轻松内容轻松总结。""",
+            },
+        ],
+    },
+
+    # ────────────── 5. 深度 ──────────────
+    "depth": {
+        "label": "深度",
+        "desc": "分析的细粒度，影响篇幅和详略",
+        "default": "standard",
+        "modules": [
+            {
+                "key": "quick",
+                "name": "快速浏览",
+                "desc": "500字以内，只抓核心",
+                "template": """【深度要求】
+快速浏览模式：只提取最核心的信息，帮助用户在 30 秒内决定是否值得深入看。
+- 聚焦"视频讲什么"和"值不值得看"
+- 不展开细节和论证
+- 总字数控制在 500 字以内""",
+            },
+            {
+                "key": "standard",
+                "name": "标准总结",
+                "desc": "3000字左右，平衡详略",
+                "template": """【深度要求】
+标准总结模式：在信息完整性和简洁性之间取得平衡。
+- 覆盖视频的所有主要要点，但不逐句复述
+- 重要细节保留，次要细节省略
+- 篇幅适中，不堆砌也不遗漏""",
+            },
+            {
+                "key": "deep",
+                "name": "深度拆解",
+                "desc": "10000字+，详尽分析",
+                "template": """【深度要求】
+深度拆解模式：尽可能详尽地分析内容。
+- 不遗漏任何有信息量的观点、论据、案例
+- 对关键段落可以做较详细的展开
+- 标注时间戳方便回看原文
+- 适合需要反复研读的场景""",
+            },
+            {
+                "key": "textbook",
+                "name": "教科书模式",
+                "desc": "章→节→知识点三层结构，配练习",
+                "template": """【深度要求】
+教科书模式：生成结构化教材，章→节→知识点三层递进。
+- 自动分析视频结构，划分章节
+- 每节包含：概述、核心概念表、知识点详解（400-600字/个）、注意事项、思考练习
+- 知识点旁保留原视频时间戳
+- 适合需要脱离视频系统学习的场景""",
+            },
+            {
+                "key": "research",
+                "name": "深度研究",
+                "desc": "提取主题→网页搜索→逐主题扩展→研究博文",
+                "template": """【深度要求】
+深度研究模式：基于视频内容做深度扩展研究，输出比原视频更饱满的研究博文。
+- 自动提取 3-8 个研究主题
+- 实时网页搜索补充资料
+- 每个主题 800-1500 字深度分析
+- 包含背景脉络、不同观点、延伸思考
+- 适合需要深度学习的学术场景""",
+            },
+        ],
+    },
+
+    # ────────────── 6. 语气（复用 prompts.py 的 TONE_DESCS） ──────────────
+    "tone": {
+        "label": "语气",
+        "desc": "总结的表达风格",
+        "default": "学术严谨",
+        "modules": [
+            {"key": "学术严谨", "name": "学术严谨", "desc": "术语精确、论证严密"},
+            {"key": "通俗科普", "name": "通俗科普", "desc": "用日常比喻帮助理解"},
+            {"key": "口语化", "name": "口语化", "desc": "自然口语，像跟同学讨论"},
+            {"key": "新闻客观", "name": "新闻客观", "desc": "事实优先、立场标注"},
+            {"key": "正式商务", "name": "正式商务", "desc": "结构清晰、结论明确"},
+        ],
+    },
+
+    # ────────────── 7. 字数（复用 prompts.py 的 WORD_COUNT_DESCS） ──────────────
+    "word_count": {
+        "label": "字数",
+        "desc": "总结的字数控制",
+        "default": "3000",
+        "modules": [
+            {"key": "不限", "name": "不限", "desc": "按内容需要自由发挥"},
+            {"key": "500", "name": "500字", "desc": "极简"},
+            {"key": "3000", "name": "3000字", "desc": "标准"},
+            {"key": "5000", "name": "5000字", "desc": "详细"},
+            {"key": "10000", "name": "10000字", "desc": "深度"},
+            {"key": "20000", "name": "20000字", "desc": "极详尽"},
+        ],
+    },
+
+    # ────────────── 8. 模式（通用 / 社科深度特化） ──────────────
+    # 控制整体认知框架：通用=精简忠实提取；社科深度特化=注入旧15种提示词的精华
+    "mode": {
+        "label": "认知模式",
+        "desc": "整体认知框架（通用精简 vs 社科深度特化）",
+        "default": "general",
+        "modules": [
+            {
+                "key": "general",
+                "name": "通用",
+                "desc": "精简忠实提取，适合日常视频",
+                "template": "",  # 空模板，不添加额外认知约束
+            },
+            {
+                "key": "social_science",
+                "name": "社科深度特化",
+                "desc": "四层认知+置信度标注+思想史定位，适合学术内容",
+                "template": """【社科深度特化·认知框架】
+1. 四层认知标准：事实准确复述 → 深层结构揭示 → 理论坐标系定位 → 临界自反思辨
+2. 置信度标注：所有论断须标注 [原文]可定位时间戳 / [推断]附推导逻辑 / [假设]声明置信度 / [真空]明确告知无相关信息
+3. 概念精确性：关键概念须给出精确学术定义，标注定义来源（自定义/引用/约定）；同一概念的多次不同表述需分别记录，不得合并
+4. 思想史定位：在适用处标注内容与思想传统/学术谱系的关系（继承/批评/修正/并列），并区分作者明确表达 vs 基于文本的合理推断
+5. 描述 vs 规范：严格区分描述性内容与规范性内容；保留作者的方法论自觉表述
+6. 辩证保留：保留论证的辩证推进关系，不得将正反环节简化为并列分支""",
+            },
+        ],
+    },
+}
+
+
+# ============ 预设配方（一键填充所有维度） ============
+RECIPES = [
+    {
+        "key": "quick_watch",
+        "name": "📺 视频速看",
+        "desc": "快速判断视频值不值得看",
+        "dimensions": {
+            "role": "general",
+            "mode": "general",
+            "rules": "standard",
+            "output": "bullets",
+            "content_type": "general",
+            "depth": "quick",
+            "tone": "口语化",
+            "word_count": "500",
+        },
+    },
+    {
+        "key": "course_notes",
+        "name": "📝 课程笔记",
+        "desc": "学术讲座的深度学习笔记",
+        "dimensions": {
+            "role": "academic",
+            "mode": "social_science",
+            "rules": "deep",
+            "output": "chapters",
+            "content_type": "lecture",
+            "depth": "deep",
+            "tone": "学术严谨",
+            "word_count": "10000",
+        },
+    },
+    {
+        "key": "news_brief",
+        "name": "📰 新闻要点",
+        "desc": "快速获取新闻核心事实",
+        "dimensions": {
+            "role": "journalist",
+            "mode": "general",
+            "rules": "standard",
+            "output": "summary",
+            "content_type": "news",
+            "depth": "standard",
+            "tone": "新闻客观",
+            "word_count": "3000",
+        },
+    },
+    {
+        "key": "tutorial_steps",
+        "name": "🔧 教程步骤",
+        "desc": "提取可执行的操作步骤",
+        "dimensions": {
+            "role": "tech",
+            "mode": "general",
+            "rules": "standard",
+            "output": "bullets",
+            "content_type": "tutorial",
+            "depth": "standard",
+            "tone": "通俗科普",
+            "word_count": "3000",
+        },
+    },
+    {
+        "key": "talk_digest",
+        "name": "🎙️ 对话整理",
+        "desc": "访谈对话的观点整理",
+        "dimensions": {
+            "role": "general",
+            "mode": "general",
+            "rules": "standard",
+            "output": "qa",
+            "content_type": "interview",
+            "depth": "standard",
+            "tone": "口语化",
+            "word_count": "3000",
+        },
+    },
+    {
+        "key": "deep_research",
+        "name": "🧠 深度研究",
+        "desc": "批判性深度分析",
+        "dimensions": {
+            "role": "academic",
+            "mode": "social_science",
+            "rules": "critical",
+            "output": "summary",
+            "content_type": "general",
+            "depth": "deep",
+            "tone": "学术严谨",
+            "word_count": "10000",
+        },
+    },
+    {
+        "key": "textbook_mode",
+        "name": "📖 教科书模式",
+        "desc": "章→节→知识点三层结构，配练习",
+        "dimensions": {
+            "role": "academic",
+            "mode": "social_science",
+            "rules": "deep",
+            "output": "chapters",
+            "content_type": "lecture",
+            "depth": "textbook",
+            "tone": "学术严谨",
+            "word_count": "20000",
+        },
+    },
+    {
+        "key": "deep_research_web",
+        "name": "🔬 深度研究（联网搜索）",
+        "desc": "提取主题→网页搜索→逐主题扩展→研究博文",
+        "dimensions": {
+            "role": "academic",
+            "mode": "social_science",
+            "rules": "critical",
+            "output": "summary",
+            "content_type": "general",
+            "depth": "research",
+            "tone": "学术严谨",
+            "word_count": "不限",
+        },
+    },
+    {
+        "key": "fun_highlights",
+        "name": "🎮 精彩看点",
+        "desc": "娱乐视频的亮点速览",
+        "dimensions": {
+            "role": "creative",
+            "mode": "general",
+            "rules": "standard",
+            "output": "timeline",
+            "content_type": "entertainment",
+            "depth": "quick",
+            "tone": "口语化",
+            "word_count": "500",
+        },
+    },
+]
+
+
+# ============ 维度默认值（用于初始化） ============
+def get_default_dimensions() -> Dict[str, str]:
+    """返回所有维度的默认选择"""
+    return {dim_key: dim_cfg["default"] for dim_key, dim_cfg in PROMPT_DIMENSIONS.items()}
+
+
+# ============ DB 覆盖层（prompt_module_overrides 表） ============
+def _load_module_overrides() -> Dict[str, Dict[str, str]]:
+    """
+    从数据库加载模块文本覆盖（dimension_key → {module_key → custom_text}）
+    如果 DB 不可用或表不存在，返回空 dict（降级到代码默认）
+    """
+    try:
+        from db.database import get_connection
+        conn = get_connection()
+        rows = conn.execute(
+            "SELECT dimension_key, module_key, custom_text FROM prompt_module_overrides"
+        ).fetchall()
+        conn.close()
+        overrides: Dict[str, Dict[str, str]] = {}
+        for r in rows:
+            dim = r["dimension_key"]
+            mod = r["module_key"]
+            txt = r["custom_text"] or ""
+            if dim not in overrides:
+                overrides[dim] = {}
+            overrides[dim][mod] = txt
+        return overrides
+    except Exception:
+        # 表不存在或 DB 异常：降级到代码默认
+        return {}
+
+
+def _get_module_template(dim_key: str, module_key: str,
+                         overrides: Optional[Dict[str, Dict[str, str]]] = None) -> str:
+    """
+    获取某个维度下某个模块的 template 文本
+    优先级：DB 覆盖 > 代码默认
+    """
+    # 1. 先查 DB 覆盖
+    if overrides and dim_key in overrides and module_key in overrides[dim_key]:
+        return overrides[dim_key][module_key]
+    # 2. 回退到代码默认
+    dim = PROMPT_DIMENSIONS.get(dim_key, {})
+    for m in dim.get("modules", []):
+        if m["key"] == module_key:
+            return m.get("template", "")
+    return ""
+
+
+def get_dimensions_with_overrides() -> dict:
+    """
+    返回带 DB 覆盖文本的完整维度定义（供前端 /dimensions API）
+    标注每个模块是否被自定义覆盖
+    """
+    overrides = _load_module_overrides()
+    result = {}
+    for dim_key, dim_cfg in PROMPT_DIMENSIONS.items():
+        dim_copy = {
+            "label": dim_cfg["label"],
+            "desc": dim_cfg["desc"],
+            "default": dim_cfg["default"],
+            "modules": [],
+        }
+        dim_overrides = overrides.get(dim_key, {})
+        for m in dim_cfg["modules"]:
+            m_copy = dict(m)
+            if m["key"] in dim_overrides:
+                m_copy["template"] = dim_overrides[m["key"]]
+                m_copy["is_customized"] = True
+            else:
+                m_copy["is_customized"] = False
+            dim_copy["modules"].append(m_copy)
+        result[dim_key] = dim_copy
+    return result
+
+
+# ============ 语气和字数描述（复用 prompts.py 的映射） ============
+def _get_tone_desc(tone: str) -> str:
+    from services.prompts import TONE_DESCS
+    return TONE_DESCS.get(tone, f"使用{tone}语气")
+
+
+def _get_word_count_desc(word_count: str) -> str:
+    from services.prompts import WORD_COUNT_DESCS
+    return WORD_COUNT_DESCS.get(word_count, f"请务必输出至少{word_count}字，宁多勿少，绝对不允许少于{word_count}字。")
+
+
+# ============ 核心：拼装完整 prompt ============
+def build_modular_prompt(dimensions: Dict[str, str], content: str,
+                         custom_prompt: str = "",
+                         full_override: str = "") -> str:
+    """
+    根据 8 维选择拼装完整 prompt
+    dimensions: {role, rules, output, content_type, depth, tone, word_count, mode}
+    content: 待总结的转录文本
+    custom_prompt: 用户维度级自定义指令（作为额外指引追加）
+    full_override: 完全自定义提示词（非空时直接覆盖一切维度拼装，仅注入 content）
+    """
+    # ★ 完全自定义模式：覆盖一切维度拼装
+    if full_override and full_override.strip():
+        prompt = full_override.strip()
+        # 仅做内容注入（支持 {{CONTENT}} 占位符或直接追加）
+        if "{{CONTENT}}" in prompt:
+            return prompt.replace("{{CONTENT}}", content or "")
+        return prompt + "\n\n【待处理内容】\n" + (content or "")
+
+    # 合并默认值，防止缺维度
+    dims = get_default_dimensions()
+    if dimensions:
+        dims.update(dimensions)
+
+    # 加载 DB 覆盖（一次性加载，避免多次查询）
+    overrides = _load_module_overrides()
+
+    # 收集各维度模块文本（跳过空模板）
+    sections = []
+
+    # 1. 角色
+    role_tpl = _get_module_template("role", dims["role"], overrides)
+    if role_tpl:
+        sections.append(role_tpl)
+
+    # 2. 认知模式（社科深度特化注入四层认知+置信度标注）
+    mode_tpl = _get_module_template("mode", dims["mode"], overrides)
+    if mode_tpl:
+        sections.append(mode_tpl)
+
+    # 3. 内容类型
+    ct_tpl = _get_module_template("content_type", dims["content_type"], overrides)
+    if ct_tpl:
+        sections.append(ct_tpl)
+
+    # 4. 认知规则
+    rules_tpl = _get_module_template("rules", dims["rules"], overrides)
+    if rules_tpl:
+        sections.append(rules_tpl)
+
+    # 5. 深度
+    depth_tpl = _get_module_template("depth", dims["depth"], overrides)
+    if depth_tpl:
+        sections.append(depth_tpl)
+
+    # 6. 输出格式
+    output_tpl = _get_module_template("output", dims["output"], overrides)
+    if output_tpl:
+        sections.append(output_tpl)
+
+    # 7. 维度级自定义指令（如果有）
+    if custom_prompt and custom_prompt.strip():
+        sections.append(f"【自定义指引】\n{custom_prompt.strip()}")
+
+    # 8. 语气 + 字数
+    tone_desc = _get_tone_desc(dims["tone"])
+    word_count_desc = _get_word_count_desc(dims["word_count"])
+    option_block = ""
+    if tone_desc:
+        option_block += f"语气：{tone_desc}。\n"
+    if word_count_desc:
+        option_block += word_count_desc
+    if option_block:
+        sections.append(option_block.strip())
+
+    # 8. 内容（直接注入到 prompt 中）
+    if content:
+        sections.append(f"【待处理内容】\n{content}")
+    else:
+        sections.append("【待处理内容】\n{{CONTENT}}")
+
+    return "\n\n---\n\n".join(sections)
+
+
+def dimensions_to_legacy_summary_type(dimensions: Dict[str, str]) -> str:
+    """
+    将 dimensions 映射回旧的 summary_type（用于数据库兼容和日志）
+    仅用于日志显示，不影响实际 prompt 构建
+    """
+    if not dimensions:
+        return "modular"
+    output = dimensions.get("output", "summary")
+    depth = dimensions.get("depth", "standard")
+    # 简单映射：快速浏览+要点 → quick, 深度+章节 → chapter, 等
+    if depth == "quick":
+        return "quick"
+    if output == "chapters":
+        return "chapter"
+    if output == "qa":
+        return "qa"
+    if output == "mindmap":
+        return "mindmap"
+    if output == "timeline":
+        return "timeline"
+    if output == "comparison":
+        return "comparison"
+    return "summary"
