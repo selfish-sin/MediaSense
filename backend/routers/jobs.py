@@ -15,6 +15,7 @@ from models.schemas import (
 )
 from db.job_repo import create_job, get_job, get_jobs, get_running_jobs, delete_job, clear_jobs, clear_jobs_by_status, update_job, get_jobs_by_batch, get_batch_summary, find_job_by_url, save_summary_version, get_summary_history, get_summary_version, get_latest_summary_version, delete_jobs_batch, get_jobs_disk_info, claim_staged_upload, get_cleanup_jobs
 from config import DOWNLOAD_DIR, DEFAULT_MODEL
+from services.downloader import sanitize_input_url
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -742,6 +743,7 @@ async def batch_submit(request: Request):
         do_summary, do_translate, do_subtitle = True, False, False
         preview_before_summary = True
         dimensions = None
+        force_new = False  # 旧前端 list 格式无法表达 force_new，保守不去重
     else:
         urls = body.get("urls", [])
         opts = body.get("options", {}) or {}
@@ -751,6 +753,8 @@ async def batch_submit(request: Request):
         do_translate = body.get("do_translate", False)
         do_subtitle = body.get("do_subtitle", False)
         preview_before_summary = body.get("preview_before_summary", True)
+        # ★ 与单 URL 路径对齐：默认 force_new=True（用户主动批量提交即意图处理）
+        force_new = body.get("force_new", True)
 
     if not isinstance(urls, list):
         raise HTTPException(status_code=400, detail='urls 必须是数组')
@@ -773,32 +777,32 @@ async def batch_submit(request: Request):
         if not isinstance(url, str):
             skipped += 1
             continue
-        # ★ 智能提取：从混合文本中提取干净 URL（如 "3. https://..." → "https://..."）
-        extracted = extract_urls(url)
-        if not extracted:
+        # ★ 用 sanitize_input_url 处理：支持裸 BV 号 / 裸短链(b23.tv) / 包裹符号 / 尾部标点
+        #   与单 URL 路径(process_job)用同一函数，保证两条路径对裸链接的处理一致
+        u = sanitize_input_url(url)
+        if not u:
             # 无有效 URL，跳过（可能是纯文字行）
             skipped += 1
             continue
-        # 取第一个 URL（一行一个 URL 的场景）
-        u = extracted[0]
         nu = normalize_url(u)
         if nu in seen_norm or u in seen_raw:
             skipped += 1
             continue
         seen_raw.add(u)
         seen_norm.add(nu)
-        # ★ 跨历史任务 URL 去重：检查是否已有同 URL 的任务
-        existing = find_job_by_url(u)
-        if existing and existing.get('status') in ('pending', 'completed', 'preview', 'downloading', 'transcribing', 'summarizing'):
-            # 已完成/进行中的任务，跳过并返回已有任务信息
-            skipped += 1
-            duplicates.append({
-                'url': u,
-                'existing_job_id': existing['id'],
-                'existing_status': existing['status'],
-                'existing_title': existing.get('title', ''),
-            })
-            continue
+        # ★ 跨历史任务 URL 去重：force_new=True 时跳过（与单 URL 路径 submit_job 对齐）
+        if not force_new:
+            existing = find_job_by_url(u)
+            if existing and existing.get('status') in ('pending', 'completed', 'preview', 'downloading', 'transcribing', 'summarizing'):
+                # 已完成/进行中的任务，跳过并返回已有任务信息
+                skipped += 1
+                duplicates.append({
+                    'url': u,
+                    'existing_job_id': existing['id'],
+                    'existing_status': existing['status'],
+                    'existing_title': existing.get('title', ''),
+                })
+                continue
         clean_urls.append(u)
 
     if not clean_urls:

@@ -7,6 +7,7 @@ import sqlite3
 import json
 from unittest.mock import patch, MagicMock
 
+from config import DEFAULT_MODEL
 from db.job_repo import (
     create_job, get_job, get_jobs, get_running_jobs,
     get_jobs_by_batch, get_batch_summary,
@@ -82,7 +83,7 @@ class TestCreateJob:
         job = get_job(jid)
         assert job["status"] == "pending"
         assert job["input_url"] == "https://example.com"
-        assert job["model"] == "glm-4.5-air"
+        assert job["model"] == DEFAULT_MODEL
 
     def test_create_text(self):
         jid = create_job(input_type="text", input_text="hello world")

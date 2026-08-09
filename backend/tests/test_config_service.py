@@ -4,6 +4,7 @@ config_service 配置服务测试
 import pytest
 from unittest.mock import patch
 import services.config_service as cs
+from config import DEFAULT_MODEL
 
 
 class TestLoadConfig:
@@ -24,12 +25,12 @@ class TestGetConfig:
     def test_get_by_uppercase(self):
         cs._config_module = None
         val = cs.get_config("default_model")
-        assert val == "glm-4.5-air"
+        assert val == DEFAULT_MODEL
 
     def test_get_by_original(self):
         cs._config_module = None
         val = cs.get_config("DEFAULT_MODEL")
-        assert val == "glm-4.5-air"
+        assert val == DEFAULT_MODEL
 
     def test_get_with_default(self):
         cs._config_module = None

@@ -267,6 +267,54 @@ class TestJobsRouter:
         assert resp.status_code == 400
         assert "options" in resp.json()["detail"]
 
+    @patch("routers.jobs.create_job", return_value="job-1")
+    @patch("main.start_job")
+    @patch("routers.jobs.find_job_by_url")
+    def test_batch_force_new_skips_history_dedup(self, mock_find, mock_start, mock_create, client):
+        """force_new=True 时跳过 find_job_by_url 跨历史去重，允许重跑已处理过的 URL"""
+        resp = client.post("/api/jobs/batch", json={
+            "urls": ["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+            "force_new": True,
+        })
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 1
+        assert body["skipped"] == 0
+        mock_find.assert_not_called()  # force_new=True 不查历史
+        mock_create.assert_called_once()
+        mock_start.assert_called_once_with("job-1")
+
+    @patch("routers.jobs.create_job", return_value="job-2")
+    @patch("main.start_job")
+    @patch("routers.jobs.find_job_by_url")
+    def test_batch_force_new_false_dedups_existing(self, mock_find, mock_start, mock_create, client):
+        """force_new=False 时已有 completed 任务的 URL 被跳过，返回 duplicates"""
+        mock_find.return_value = {"id": "old-job", "status": "completed", "title": "旧任务"}
+        resp = client.post("/api/jobs/batch", json={
+            "urls": ["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+            "force_new": False,
+        })
+        # 全部 URL 都被判重复 → 400
+        assert resp.status_code == 400
+        assert "重复" in resp.json()["detail"]
+        mock_find.assert_called_once()
+        mock_create.assert_not_called()
+
+    @patch("routers.jobs.create_job", return_value="job-bv")
+    @patch("main.start_job")
+    def test_batch_accepts_bare_bv(self, mock_start, mock_create, client):
+        """裸 BV 号（无 https:// 前缀）经 sanitize_input_url 补全后能提交"""
+        resp = client.post("/api/jobs/batch", json={
+            "urls": ["BV1RGN462EBs"],
+            "force_new": True,
+        })
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 1
+        # create_job 收到的应是补全后的完整 URL（含 https://）
+        submitted_url = mock_create.call_args.kwargs.get("input_url", "")
+        assert submitted_url.startswith("https://"), f"裸 BV 应被补全为完整 URL, got: {submitted_url}"
+
 
 # ── Models ──
 class TestModelsRouter:
