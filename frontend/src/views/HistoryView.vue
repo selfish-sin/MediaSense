@@ -313,31 +313,24 @@ onMounted(() => {
 
 <template>
   <div style="max-width: 1200px; margin: 0 auto; padding: 24px;">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-      <h2 style="margin: 0;">任务历史</h2>
-      <div style="display: flex; gap: 8px;">
-        <el-button type="success" plain @click="handleClearByStatus('completed', '成功')">清空成功</el-button>
-        <el-button type="danger" plain @click="handleClearFailed">清空失败/取消</el-button>
-        <el-button type="danger" plain @click="handleClearAll">清空全部</el-button>
-      </div>
+    <!-- 标题 + 搜索 + 清空：合并成一个工具条 -->
+    <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap;">
+      <h2 style="margin: 0; margin-right: auto;">任务历史</h2>
+      <el-input
+        v-model="searchQuery"
+        placeholder="按标题或 URL 过滤"
+        clearable
+        @keyup.enter="doSearch"
+        @clear="clearSearch"
+        style="width: 260px;"
+      >
+        <template #prefix><el-icon><Search /></el-icon></template>
+      </el-input>
+      <el-button type="primary" :loading="searching" @click="doSearch">搜索</el-button>
+      <el-button type="success" plain size="small" @click="handleClearByStatus('completed', '成功')">清空成功</el-button>
+      <el-button type="danger" plain size="small" @click="handleClearFailed">清空失败/取消</el-button>
+      <el-button type="danger" plain size="small" @click="handleClearAll">清空全部</el-button>
     </div>
-
-    <!-- 历史列表关键词过滤 -->
-    <el-card shadow="never" style="margin-bottom: 16px;">
-      <div style="display: flex; gap: 8px; align-items: center;">
-        <el-input
-          v-model="searchQuery"
-          placeholder="按标题或 URL 关键词过滤历史记录"
-          clearable
-          @keyup.enter="doSearch"
-          @clear="clearSearch"
-          style="flex: 1;"
-        >
-          <template #prefix><el-icon><Search /></el-icon></template>
-        </el-input>
-        <el-button type="primary" :loading="searching" @click="doSearch">搜索</el-button>
-      </div>
-    </el-card>
 
     <!-- 任务列表（搜索时按 keyword 过滤） -->
     <!-- 批量操作栏（选中任务时显示） -->
@@ -356,7 +349,7 @@ onMounted(() => {
         <el-table-column prop="platform" label="平台" width="90" />
         <el-table-column label="状态" width="90">
           <template #default="{ row }">
-            <el-tag :type="jobStatusTagType(row.status)" size="small" effect="dark">
+            <el-tag :type="jobStatusTagType(row.status)" size="small" effect="plain" round>
               {{ jobStatusLabel(row.status) }}
             </el-tag>
           </template>
@@ -365,7 +358,7 @@ onMounted(() => {
         <el-table-column label="创建时间" width="170">
           <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="330" fixed="right">
+        <el-table-column label="操作" width="340" fixed="right">
           <template #default="{ row }">
             <el-button size="small" type="primary" link :icon="Eye" @click="handlePrimaryAction(row)">
               {{ actionFor(row).primaryLabel }}
@@ -378,17 +371,17 @@ onMounted(() => {
               @click="handleSecondaryAction(row)"
             >{{ actionFor(row).secondaryLabel }}</el-button>
             <el-button
-              v-if="row.status === 'failed' || row.status === 'cancelled'"
-              size="small"
-              link
-              @click="viewResult(row.id)"
-            >查看详情</el-button>
-            <el-button
               v-if="actionFor(row).canCancel"
               size="small" type="danger" link
               @click="handleCancel(row.id)"
             >取消</el-button>
             <el-button size="small" type="danger" link :icon="Trash2" @click="handleDelete(row.id)">删除</el-button>
+            <el-button
+              v-if="row.status === 'failed' || row.status === 'cancelled'"
+              size="small"
+              link
+              @click="viewResult(row.id)"
+            >查看详情</el-button>
           </template>
         </el-table-column>
       </el-table>
