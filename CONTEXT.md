@@ -56,5 +56,5 @@ python main.py
 - 已实现：下载/导入、字幕/Whisper、任务并发、Socket.IO 进度、摘要/翻译、导出、token 用量和受保护的存储清理。
 - 运行数据默认落在 `backend/data`；服务重启不会继续执行内存中的 Python 任务，但会处理启动时的中断记录。
 - 治理基础设施（2026-08-09 bootstrap）：`.trellis/`（scripts/config/workflow/spec/tasks 已入库）+ CodeGraph 索引已 init（不入库）+ `.agents/skills/`（9 个 trellis skill 入库）。
-- 已知 WIP-FAIL：`backend/tests/test_job_repo.py::test_create_basic_url`、`test_config_service.py::test_get_by_{uppercase,original}` 因 `DEFAULT_MODEL` 从 `glm-4.5-air` 漂移到 `deepseek-v4-flash` 失败，待修。
-- 待办 bug（已建档未修）：批量 URL 因 `find_job_by_url` 无条件去重被全量跳过（`jobs.py:791-805`）；历史记录搜索无效（待诊断）。
+- 批量 URL 已修（2026-08-09，task 08-09-fix-batch-url-dedup 已归档）：`batch_submit` 读取 `force_new`（默认 True，与单 URL 路径对齐），裸 BV/短链经 `sanitize_input_url` 补全；backend pytest 351 全绿。
+- 待办 bug（已建档）：历史记录搜索无效——确认期望为「按标题/URL 过滤列表」（该功能从未实现，prd 已就绪，task 08-09-fix-history-search 待 start）。

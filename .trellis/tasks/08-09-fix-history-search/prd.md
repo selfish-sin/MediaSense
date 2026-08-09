@@ -15,33 +15,37 @@
 - 搜索框 → `searchTranscript(q)` → `/api/jobs/search/transcript?q=...` → `search_transcripts()`（`jobs.py:849-961`）：端到端接线正确，但 `jobs.py:906` 会跳过无 txt 文件的任务——若历史任务无 on-disk txt，`total_jobs_searched=0`，用户看到「未找到匹配内容」。
 - 历史列表 → `loadJobs()` 只发 `{limit, offset}` → `/api/jobs` → `list_jobs()`（`jobs.py:251-259`）只读 `status/limit/offset` → `get_jobs()`（`job_repo.py:87-103`）只按 `status` 过滤。**没有任何 title/url 关键词过滤**，前后端都没有。
 
-## 待用户确认（阻塞本任务）
+## 用户确认的期望（2026-08-09）
 
-用户说的「搜索没用」指的是哪种期望？
+用户确认期望 = **路径1：按标题/URL 过滤历史列表**。即：在历史记录页输入关键词，列表只显示标题或 URL 含该词的任务。
 
-1. 期望「按标题/URL 过滤历史列表」→ 该功能从未实现，需新增 list 端点的 keyword 参数 + `get_jobs` 的 `WHERE title LIKE / input_url LIKE` + 前端把搜索框接 to list。
-2. 期望「转录全文搜索有结果」但看到「未找到」→ 接线正确，问题在 on-disk txt 缺失（环境问题），需排查为何 jobs 无 txt 文件。
-3. 期望搜索框同时过滤列表 + 搜转录 → 需明确产品行为。
+注意：HistoryView.vue 当前的搜索框接的是转录全文搜索（`searchTranscript`），placeholder 也是"搜索所有任务的转录文本内容"。本任务要把搜索行为改为列表过滤。需考虑：是替换转录搜索，还是新增一个列表过滤框？默认按"替换"处理（当前转录搜索因 on-disk txt 缺失实际也无结果），若用户要保留转录搜索再调整。
 
 ## 验收标准
 
-- [ ] 待用户确认期望行为后补全
-- [ ] 若为路径1（列表过滤）：新增 `keyword` 参数贯穿前端→`/api/jobs`→`get_jobs`，覆盖有结果/无结果/特殊字符
-- [ ] 若为路径2（转录搜索）：修复 on-disk txt 缺失或给出明确提示
-- [ ] 相关测试通过
+- [ ] `get_jobs`（`job_repo.py:87`）加 `keyword` 参数，`WHERE title LIKE ? OR input_url LIKE ?` 过滤，total 计数同步
+- [ ] `list_jobs`（`jobs.py:251`）加 `keyword` 查询参数，透传给 `get_jobs`
+- [ ] 前端 `loadJobs`（`HistoryView.vue:24`）把搜索框关键词作为 `keyword` 传给 `jobsApi.list`
+- [ ] 搜索框触发方式：输入即过滤（debounce）或回车/按钮触发（与现有 doSearch 行为一致）
+- [ ] 空关键词时恢复完整列表
+- [ ] 覆盖测试：有结果 / 无结果 / 特殊字符（如 `%`、`_` 需转义，防 SQL LIKE 通配符注入）
+- [ ] backend pytest + frontend vitest/build 全绿
 
 ## 不做项
 
-- 待确认期望行为后定
+- 不改转录全文搜索端点（`search_transcripts`）本身——它接线正确，本任务不碰
+- 不改 `find_job_by_url` 等其他查询
 
 ## 影响范围
 
 - `frontend/src/views/HistoryView.vue`（搜索框 320-330、`doSearch` 141-153、`loadJobs` 24-35）
-- `frontend/src/utils/api.js`（`list` 40、`searchTranscript` 55-56）
-- `backend/routers/jobs.py`（`list_jobs` 251-259、`search_transcripts` 849-961）
+- `frontend/src/utils/api.js`（`list` 40）
+- `backend/routers/jobs.py`（`list_jobs` 251-259）
 - `backend/db/job_repo.py`（`get_jobs` 87-103）
+- `backend/tests/test_routers.py` / `test_job_repo.py`（新增 keyword 过滤测试）
 
 ## 风险与回滚
 
-- 风险等级：M0-M1（视确认的期望行为而定）
+- 风险等级：M1（跨前后端 4 文件 + 测试，但方案清晰、无 schema 变化）
+- 不可逆操作：无
 - 回滚方式：revert commit
