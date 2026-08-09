@@ -553,6 +553,8 @@ async function handleSubmit() {
         do_translate: settings.doTranslate,
         do_subtitle: settings.doSubtitle,
         preview_before_summary: settings.previewBeforeSummary,
+        // ★ 与单 URL 路径对齐：force_new=true 跳过跨历史去重，允许重跑已处理过的 URL
+        force_new: true,
       })
       batchResult.value = {
         batch_id: res.batch_id,
