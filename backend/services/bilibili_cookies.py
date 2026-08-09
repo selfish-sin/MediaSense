@@ -5,6 +5,7 @@ bilibili.py 和 downloader.py 共用同一份 cookie 存储
 """
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Dict, Optional, Any
 
@@ -63,11 +64,40 @@ def clear_cookies():
     logger.info('B站cookies已清除')
 
 
+def _parse_sessdata_expiry(sessdata: str) -> Optional[float]:
+    """
+    解析 SESSDATA 的过期时间戳（毫秒）→ 秒级 float
+    B 站 SESSDATA 格式: <token>,<expires_at_ms> （逗号后是毫秒时间戳）
+    解析失败返回 None（无法判断，视为未过期）
+    """
+    if not sessdata:
+        return None
+    try:
+        from urllib.parse import unquote
+        raw = unquote(sessdata)
+        parts = raw.split(',')
+        if len(parts) == 2 and parts[1].strip().isdigit():
+            return int(parts[1].strip()) / 1000.0
+    except Exception:
+        pass
+    return None
+
+
 def get_status() -> Dict[str, Any]:
-    """查询B站登录状态"""
+    """
+    查询B站登录状态
+    增强：本地解析 SESSDATA 过期时间戳，判断 cookie 是否已失效（无需网络调用）
+    """
+    sessdata = _bilibili_cookies.get('SESSDATA', '')
+    expires_at = _parse_sessdata_expiry(sessdata)
+    now = time.time()
+    expired = bool(expires_at) and expires_at <= now
     return {
         "logged_in": bool(_bilibili_cookies),
         "cookies_count": len(_bilibili_cookies),
+        "has_sessdata": bool(sessdata),
+        "sessdata_expired": expired,
+        "expires_at": expires_at,
     }
 
 

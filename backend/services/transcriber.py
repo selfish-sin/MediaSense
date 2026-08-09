@@ -191,11 +191,20 @@ def _transcribe_with_model(model, audio_path, language, progress_callback, speak
 
             if should_emit or i == 0:
                 elapsed = time.time() - transcribe_start
+                # 实时倍率：已处理音频秒数 / 墙钟秒数（>1 表示快于实时）
+                speed_x = (seg.end / elapsed) if elapsed > 0.5 and seg.end > 0 else 0.0
                 eta = None
                 if time_pct > 0.5 and elapsed > 2:
                     eta = _format_duration(elapsed / time_pct * (100 - time_pct))
 
-                msg = f'转录中... {_format_mmss(seg.end)} / {_format_mmss(total_duration)} | 第 {i+1} 段'
+                msg = (
+                    f'转录中 {progress_pct}% | '
+                    f'{_format_mmss(seg.end)} / {_format_mmss(total_duration)} | '
+                    f'第 {i+1} 段 | '
+                    f'已用 {_format_duration(elapsed)}'
+                )
+                if speed_x > 0:
+                    msg += f' | 速度 {speed_x:.1f}x'
                 if eta:
                     msg += f' | 预计剩余 {eta}'
                 if progress_callback:
@@ -205,12 +214,17 @@ def _transcribe_with_model(model, audio_path, language, progress_callback, speak
                 last_emit_pct = progress_pct
 
     total = len(segments)
-    logger.info(f'转录完成: {total} 段')
+    elapsed = time.time() - transcribe_start
+    speed_x = (total_duration / elapsed) if elapsed > 0 and total_duration > 0 else 0.0
+    logger.info(f'转录完成: {total} 段, 耗时 {_format_duration(elapsed)}')
     logger.info(f'SRT: {Path(srt_path).name}')
     logger.info(f'TXT: {Path(txt_path).name}')
 
     if progress_callback:
-        progress_callback(99, f'转录完成，共 {total} 段，正在保存文件...')
+        done_msg = f'转录完成，共 {total} 段 | 音频 {_format_duration(total_duration)} | 耗时 {_format_duration(elapsed)}'
+        if speed_x > 0:
+            done_msg += f' | 均速 {speed_x:.1f}x'
+        progress_callback(99, done_msg + '，正在保存文件...')
         progress_callback(100, '转录完成！')
 
     return srt_path, txt_path, total
@@ -313,7 +327,11 @@ def _transcribe_chunked(
     device = 'cuda' if use_cuda else 'cpu'
     compute_type = 'int8_float16' if use_cuda else 'int8'
     if progress_callback:
-        progress_callback(5, f'加载模型 {actual_size}（{device}），请等待...')
+        progress_callback(
+            5,
+            f'加载模型 {actual_size} | 设备: {device} | 计算: {compute_type} | '
+            f'请等待（大模型首次加载可能数十秒）...'
+        )
     try:
         from faster_whisper import WhisperModel
         model = WhisperModel(
@@ -340,12 +358,24 @@ def _transcribe_chunked(
     segment_idx = 0
     transcribe_start = time.time()
 
+    # 估算总音频时长（末片偏移 + 片长），用于整体进度与 ETA
+    last_offset = chunks[-1][1] if chunks else 0.0
+    estimated_total = last_offset + CHUNK_SECONDS
+    try:
+        probed = _get_audio_duration_seconds(audio_path)
+        if probed and probed > 0:
+            estimated_total = probed
+    except Exception:
+        pass
+
     for ci, (chunk_path, offset) in enumerate(chunks):
-        chunk_pct = int(10 + ci / total_chunks * 85)
+        chunk_base_pct = int(10 + ci / total_chunks * 85)
         if progress_callback:
+            elapsed0 = time.time() - transcribe_start
             progress_callback(
-                chunk_pct,
-                f'转录分段 {ci+1}/{total_chunks}（偏移 {_format_mmss(offset)}，{_format_duration(offset)}处）...'
+                chunk_base_pct,
+                f'分片转录 {ci+1}/{total_chunks} | 偏移 {_format_mmss(offset)} | '
+                f'设备 {device} | 已用 {_format_duration(elapsed0)} | 开始本片...'
             )
         logger.info(f'转录分段 [{ci+1}/{total_chunks}] 偏移 {offset:.0f}s')
 
@@ -366,6 +396,7 @@ def _transcribe_chunked(
 
         current_speaker = 0
         last_seg_end = 0
+        last_emit_time = 0.0
         for seg in segs:
             seg_start = seg.start + offset
             seg_end_val = seg.end + offset
@@ -388,6 +419,33 @@ def _transcribe_chunked(
                 f"[{_format_mmss(seg_start)} - {_format_mmss(seg_end_val)}] {seg.text}{speaker_label}\n"
             )
 
+            # 片内实时进度（足量信息：进度/位置/速度/ETA）
+            now = time.time()
+            if segment_idx == 1 or (now - last_emit_time) >= 1.2 or segment_idx % 8 == 0:
+                elapsed = now - transcribe_start
+                if estimated_total > 0:
+                    time_pct = min(seg_end_val / estimated_total * 100, 99)
+                    progress_pct = int(10 + time_pct * 0.88)
+                else:
+                    time_pct = 0
+                    progress_pct = chunk_base_pct
+                speed_x = (seg_end_val / elapsed) if elapsed > 0.5 and seg_end_val > 0 else 0.0
+                eta = None
+                if time_pct > 0.5 and elapsed > 2:
+                    eta = _format_duration(elapsed / time_pct * (100 - time_pct))
+                msg = (
+                    f'分片转录 {ci+1}/{total_chunks} | {progress_pct}% | '
+                    f'{_format_mmss(seg_end_val)} / {_format_mmss(estimated_total)} | '
+                    f'第 {segment_idx} 段 | 已用 {_format_duration(elapsed)}'
+                )
+                if speed_x > 0:
+                    msg += f' | 速度 {speed_x:.1f}x'
+                if eta:
+                    msg += f' | 预计剩余 {eta}'
+                if progress_callback:
+                    progress_callback(progress_pct, msg)
+                last_emit_time = now
+
         # 清理临时 chunk 文件
         if chunk_path != audio_path:
             try:
@@ -405,9 +463,13 @@ def _transcribe_chunked(
 
     total = segment_idx
     elapsed = time.time() - transcribe_start
+    speed_x = (estimated_total / elapsed) if elapsed > 0 and estimated_total > 0 else 0.0
     logger.info(f'分片转录完成: {total} 段, {total_chunks} 段音频, 耗时 {_format_duration(elapsed)}')
     if progress_callback:
-        progress_callback(99, f'转录完成，共 {total} 段')
+        done_msg = f'转录完成，共 {total} 段 | 耗时 {_format_duration(elapsed)}'
+        if speed_x > 0:
+            done_msg += f' | 均速 {speed_x:.1f}x'
+        progress_callback(99, done_msg)
         progress_callback(100, '转录完成！')
     return srt_path, txt_path, total
 
@@ -451,7 +513,7 @@ def _transcribe_sync_single(
     """
     # ★ 阶段1：选择模型
     if progress_callback:
-        progress_callback(2, f'选择Whisper模型（请求: {model_size}）...')
+        progress_callback(2, f'选择 Whisper 模型（请求: {model_size}，平台: {platform or "通用"}）...')
     # 选择模型
     model_path, actual_size, local_only = _select_model(model_size, platform)
     logger.info(f'使用模型: {actual_size} (路径: {model_path})')
@@ -482,7 +544,11 @@ def _transcribe_sync_single(
     device_label = f'GPU (CUDA, {compute_type})' if use_cuda else f'CPU ({compute_type})'
 
     if progress_callback:
-        progress_callback(5, f'加载Whisper模型: {actual_size}（{device_label}，稍候...）')
+        progress_callback(
+            5,
+            f'加载 Whisper 模型: {actual_size} | 设备: {device_label} | '
+            f'计算: {compute_type} | 路径: {Path(model_path).name} | 请等待（大模型首次加载可能数十秒）...'
+        )
 
     logger.info(f'加载模型: {actual_size} | device={device}, compute_type={compute_type}')
     try:
@@ -561,58 +627,91 @@ async def transcribe_audio(
         await emit_log(sio, job_id, f'🎬 开始转录 | 音频: {Path(audio_path).name} | 模型: {model_size} | 语言: {language or "自动检测"}')
 
     # 跨线程进度桥接：线程 → Queue → async emit
-    progress_queue: asyncio.Queue = asyncio.Queue()
+    # 队列容量放大，避免密集进度回调丢消息
+    progress_queue: asyncio.Queue = asyncio.Queue(maxsize=256)
 
     def progress_callback(pct, msg):
-        """同步回调 → 将进度推入asyncio.Queue"""
+        """同步回调 → 将进度推入asyncio.Queue（满时丢弃最旧再写）"""
         try:
             progress_queue.put_nowait((pct, msg))
-        except Exception:
-            pass  # Queue满或已关闭时静默忽略
-
-    # 启动异步进度读取器，从Queue取数据并emit
-    # ★ 关键改进：除了 emit_progress 还要 emit_log，让用户在日志面板看到转录进度
-    async def _progress_reader():
-        last_log_msg = ''
-        try:
-            while True:
-                pct, msg = await asyncio.wait_for(progress_queue.get(), timeout=0.5)
-                if sio and job_id:
-                    from socket_handlers import emit_progress, emit_log
-                    await emit_progress(sio, job_id, 'transcribe', pct, msg)
-                    # ★ 关键阶段也输出到日志面板（不是每次都输出，避免刷屏）
-                    # 只在消息变化较大或关键节点输出
-                    if msg != last_log_msg and (
-                        pct <= 10  # 加载阶段
-                        or pct >= 99  # 完成阶段
-                        or (pct % 20 == 0)  # 每20%一次
-                    ):
-                        await emit_log(sio, job_id, f'📊 {msg}')
-                        last_log_msg = msg
-        except asyncio.TimeoutError:
-            pass  # 正常超时退出
+        except asyncio.QueueFull:
+            try:
+                progress_queue.get_nowait()
+            except Exception:
+                pass
+            try:
+                progress_queue.put_nowait((pct, msg))
+            except Exception:
+                pass
         except Exception:
             pass
 
+    # 启动异步进度读取器：Timeout 只 continue，绝不能退出（模型加载常 >0.5s）
+    # 工作台日志即进度条：足量推送进度到 emit_log（节流防刷屏，但不抽稀到失真）
+    async def _progress_reader():
+        last_log_msg = ''
+        last_log_time = 0.0
+        last_log_pct = -1
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(progress_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    # 模型加载/静默阶段：保持等待，不退出
+                    continue
+                if item is None:
+                    break  # 哨兵：转录线程结束
+                pct, msg = item
+                if not (sio and job_id):
+                    continue
+                from socket_handlers import emit_progress, emit_log
+                await emit_progress(sio, job_id, 'transcribe', pct, msg)
+
+                now = time.monotonic()
+                # 日志策略（日志=进度条）：
+                # - 加载/完成阶段：每条都记
+                # - 进行中：消息变化 且 (间隔≥1s 或 进度前进≥2%) 就记，保证速度/ETA 实时可见
+                msg_changed = msg != last_log_msg
+                pct_jump = abs(pct - last_log_pct) >= 2
+                time_ok = (now - last_log_time) >= 1.0
+                force = pct <= 10 or pct >= 99 or pct == 0
+                if msg_changed and (force or time_ok or pct_jump):
+                    await emit_log(sio, job_id, f'📊 {msg}')
+                    last_log_msg = msg
+                    last_log_time = now
+                    last_log_pct = pct
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception('转录进度读取器异常')
+
     reader_task = asyncio.create_task(_progress_reader())
 
-    # 在线程池中运行同步转录
-    result = await asyncio.to_thread(
-        _transcribe_sync,
-        audio_path=audio_path,
-        model_size=model_size,
-        platform=platform,
-        speaker_diarization=speaker_diarization,
-        language=language,
-        progress_callback=progress_callback,
-    )
-
-    # 等进度读取器处理完残余消息
-    reader_task.cancel()
     try:
-        await reader_task
-    except asyncio.CancelledError:
-        pass
+        # 在线程池中运行同步转录
+        result = await asyncio.to_thread(
+            _transcribe_sync,
+            audio_path=audio_path,
+            model_size=model_size,
+            platform=platform,
+            speaker_diarization=speaker_diarization,
+            language=language,
+            progress_callback=progress_callback,
+        )
+    finally:
+        # 通知 reader 排空后退出；超时则 cancel 兜底
+        try:
+            progress_queue.put_nowait(None)
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(reader_task, timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            reader_task.cancel()
+            try:
+                await reader_task
+            except asyncio.CancelledError:
+                pass
 
     if sio:
         from socket_handlers import emit_progress, emit_log

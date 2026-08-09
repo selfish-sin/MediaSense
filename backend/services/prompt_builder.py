@@ -288,6 +288,61 @@ PROMPT_DIMENSIONS = {
 - 是否有值得了解的背景知识
 不必强行提炼深层意义，轻松内容轻松总结。""",
             },
+            {
+                "key": "academic_study",
+                "name": "学术研究整理",
+                "desc": "侧重学术整理：概念、文献、谱系",
+                "template": """【内容理解】
+这是学术研究或理论讲授类内容。请特别侧重学术整理，关注：
+- 核心概念的精确定义、来源与边界（自定义/引用/约定）
+- 理论的脉络：提出了什么问题、回应了什么争论、修正了什么观点
+- 学术谱系定位：与哪些学派/思想家/文本存在继承、批评或对话关系
+- 论证链条：从问题意识→核心命题→论据→结论的完整路径
+- 证据与材料：引用的文献、数据、案例、思想实验
+- 研究的边界与局限：作者承认了什么、回避了什么
+目标：产出一份可作为学术笔记/读书报告直接使用的整理稿。""",
+            },
+            {
+                "key": "argument",
+                "name": "论述观点整理",
+                "desc": "专注论述整理：论点、论据、论证",
+                "template": """【内容理解】
+这是论述或观点表达类内容。请专注论述整理，关注：
+- 核心论点（作者试图主张什么）与分论点
+- 论据类型：事实数据、权威引用、逻辑推理、类比、案例
+- 论证结构：归纳/演绎/类比，前提与结论如何衔接
+- 对反驳的处理：作者如何回应可能的质疑
+- 立场与预设：作者的立场、前提假设、可能的偏见
+- 概念的滑移或偷换（如有）
+目标：把"说了什么、凭什么这么说、说得成不成立"梳理清楚。""",
+            },
+            {
+                "key": "event",
+                "name": "事件叙事整理",
+                "desc": "侧重事件整理：经过、因果、影响",
+                "template": """【内容理解】
+这是围绕特定事件/经历展开的内容。请侧重事件整理，关注：
+- 事件要素：时间、地点、人物、起因
+- 发展经过：按时间/因果顺序还原完整链条
+- 关键节点与转折：什么改变了走向
+- 各方角色：谁做了什么、动机是什么
+- 结果与影响：事件的直接后果、后续发展、各方反应
+- 叙事中的主观视角：讲述者立场对事件的取舍
+目标：让读者不看视频也能完整复述事件的来龙去脉。""",
+            },
+            {
+                "key": "storytelling",
+                "name": "故事/纪实",
+                "desc": "还原叙事结构与人物弧光",
+                "template": """【内容理解】
+这是故事讲述或纪实类内容。请特别关注：
+- 叙事结构：起承转合、冲突的建立与解决
+- 人物：角色关系、动机、性格弧光（如何变化）
+- 场景与氛围：关键场景的细节和情绪
+- 主题：故事在讲什么更深层的东西
+- 讲述技巧：悬念、伏笔、呼应
+目标：还原故事的骨架，让人理解它为什么打动人。""",
+            },
         ],
     },
 
@@ -545,6 +600,96 @@ RECIPES = [
             "rules": "standard",
             "output": "timeline",
             "content_type": "entertainment",
+            "depth": "quick",
+            "tone": "口语化",
+            "word_count": "500",
+        },
+    },
+    {
+        "key": "academic_study_organize",
+        "name": "🎓 学术深度研究",
+        "desc": "侧重学术整理：概念、文献、谱系、论证",
+        "dimensions": {
+            "role": "academic",
+            "mode": "social_science",
+            "rules": "deep",
+            "output": "chapters",
+            "content_type": "academic_study",
+            "depth": "deep",
+            "tone": "学术严谨",
+            "word_count": "10000",
+        },
+    },
+    {
+        "key": "argument_organize",
+        "name": "⚖️ 论述整理",
+        "desc": "专注论述整理：论点、论据、论证结构",
+        "dimensions": {
+            "role": "academic",
+            "mode": "social_science",
+            "rules": "critical",
+            "output": "summary",
+            "content_type": "argument",
+            "depth": "deep",
+            "tone": "学术严谨",
+            "word_count": "10000",
+        },
+    },
+    {
+        "key": "event_organize",
+        "name": "📅 事件整理",
+        "desc": "侧重事件整理：经过、因果、影响",
+        "dimensions": {
+            "role": "journalist",
+            "mode": "general",
+            "rules": "standard",
+            "output": "timeline",
+            "content_type": "event",
+            "depth": "standard",
+            "tone": "新闻客观",
+            "word_count": "5000",
+        },
+    },
+    {
+        "key": "story_retelling",
+        "name": "🎬 故事脉络",
+        "desc": "还原叙事结构与人物弧光",
+        "dimensions": {
+            "role": "creative",
+            "mode": "general",
+            "rules": "standard",
+            "output": "timeline",
+            "content_type": "storytelling",
+            "depth": "standard",
+            "tone": "口语化",
+            "word_count": "3000",
+        },
+    },
+    {
+        "key": "debate_analysis",
+        "name": "🗣️ 观点交锋",
+        "desc": "多方观点对比与论证评估",
+        "dimensions": {
+            "role": "journalist",
+            "mode": "general",
+            "rules": "critical",
+            "output": "comparison",
+            "content_type": "interview",
+            "depth": "deep",
+            "tone": "新闻客观",
+            "word_count": "5000",
+        },
+    },
+    {
+        "key": "quotes_collection",
+        "name": "💬 金句摘录",
+        "desc": "提取原话金句与精彩表述",
+        "dimensions": {
+            "role": "general",
+            "mode": "general",
+            "rules": "standard",
+            "output": "bullets",
+            "content_type": "general",
             "depth": "quick",
             "tone": "口语化",
             "word_count": "500",

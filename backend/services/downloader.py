@@ -10,6 +10,7 @@ import logging
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
@@ -96,6 +97,48 @@ def _build_wbi_url(base_url: str, params: Dict) -> str:
 # 本地 ffmpeg 路径（项目自带，无需系统 PATH）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 FFMPEG_ARGS = ['--ffmpeg-location', str(PROJECT_ROOT / 'bin')]
+_YTDLP_STDIO_LOCK = threading.Lock()
+
+
+def _run_ytdlp(args: list, timeout: int = 120):
+    """运行 yt-dlp，兼容 PyInstaller frozen 模式。
+    args: 不含 [sys.executable, '-m', 'yt_dlp'] 前缀的参数列表。
+    返回对象含 .returncode / .stdout(bytes) / .stderr(bytes)，与 subprocess.run 兼容。
+    """
+    full_args = FFMPEG_ARGS + args
+    if getattr(sys, 'frozen', False):
+        import io as _io
+        import yt_dlp as _yt_dlp
+
+        class _R:
+            def __init__(self, rc, out, err):
+                self.returncode = rc
+                self.stdout = out
+                self.stderr = err
+
+        # yt-dlp.main() writes to process-global stdio. Serialise this narrow
+        # frozen-mode section so concurrent jobs cannot steal each other's logs.
+        with _YTDLP_STDIO_LOCK:
+            old_out, old_err = sys.stdout, sys.stderr
+            buf_out, buf_err = _io.BytesIO(), _io.BytesIO()
+            try:
+                sys.stdout = _io.TextIOWrapper(buf_out, encoding='utf-8', errors='replace')
+                sys.stderr = _io.TextIOWrapper(buf_err, encoding='utf-8', errors='replace')
+                rc = 0
+                try:
+                    _yt_dlp.main(full_args)
+                except SystemExit as e:
+                    rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+                finally:
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+            finally:
+                sys.stdout, sys.stderr = old_out, old_err
+        return _R(rc, buf_out.getvalue(), buf_err.getvalue())
+    else:
+        cmd = [sys.executable, '-m', 'yt_dlp'] + full_args
+        return subprocess.run(cmd, capture_output=True, timeout=timeout)
+
 
 # ============ 平台配置 ============
 PLATFORM_CONFIG = {
@@ -109,6 +152,62 @@ PLATFORM_CONFIG = {
     "twitter.com": {"name": "Twitter/X", "need_proxy": True},
     "x.com": {"name": "Twitter/X", "need_proxy": True},
 }
+
+
+def sanitize_input_url(raw: str) -> str:
+    """从用户输入中提取有效视频URL。
+
+    处理场景：
+    - 剪贴板截断BV片段拼接: "BV1RGhttps://www.bilibili.com/video/BV1RGN462EBs/..."
+    - 列表编号前缀: "3. https://..."
+    - 外层包裹符号: <url>、"url"、《url》
+    - 尾部中文/标点: "https://... 好看" / "https://...。"
+    - 多URL拼接: 优先取已识别平台的URL，否则取最后一个
+    - 裸BV号: "BV1RGN462EBs" → 补全为完整链接
+    - 裸短链: "b23.tv/xxx" → 补 https://
+    """
+    if not raw:
+        return ''
+    text = raw.strip()
+    # 剥外层包裹（中英文引号、尖括号、书名号）
+    text = text.strip('\'"“”‘’《》〈〉<>「」『』')
+
+    # 提取所有 URL 候选（遇到空白、中日韩字符、或下一个 https?:// 截断）
+    candidates = re.findall(
+        r'https?://(?:(?!https?://)[^\s\u4e00-\u9fff\u3000-\u303f\uff01-\uff5e])+',
+        text,
+    )
+
+    if candidates:
+        # 剥尾部残留标点（。，！？等不属于URL）
+        cleaned = [c.rstrip('.,;:!?\'"）)>》」』】') for c in candidates]
+        if len(cleaned) == 1:
+            url = cleaned[0]
+        else:
+            # 多URL：优先选已识别平台中最长的（垃圾片段总是更短）
+            url = max(cleaned, key=len)
+            platform_hits = [
+                c for c in cleaned
+                if any(
+                    (urlparse(c).hostname or '') == d
+                    or (urlparse(c).hostname or '').endswith('.' + d)
+                    for d in PLATFORM_CONFIG
+                )
+            ]
+            if platform_hits:
+                url = max(platform_hits, key=len)
+    else:
+        # 无完整URL → 尝试裸BV号 / 裸短链
+        bv = re.search(r'(BV[A-Za-z0-9]{10})', text)
+        if bv:
+            return f'https://www.bilibili.com/video/{bv.group(1)}'
+        b23 = re.search(r'(b23\.tv/[A-Za-z0-9]+)', text)
+        if b23:
+            return f'https://{b23.group(1)}'
+        # 实在提取不到，原样返回让下游报错
+        return text.strip()
+
+    return url
 
 
 def detect_platform(url: str) -> Tuple[str, bool]:
@@ -181,7 +280,7 @@ async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_i
     策略：bilibili-api-python库（完整wbi签名+风控处理）→ yt-dlp兜底 → Whisper转录
     返回 dict: {"success": True/False, "srt_path": Path, "txt_path": Path, "title": str, "message": str}
     """
-    match = re.search(r'(BV[A-Za-z0-9]+)', url)
+    match = re.search(r'(BV[A-Za-z0-9]{10})', url)
     if not match:
         # 短链不一定在 URL 中直接带 BV 号，跟随一次重定向再解析。
         try:
@@ -191,7 +290,7 @@ async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_i
                 headers={'User-Agent': 'Mozilla/5.0'},
             ) as client:
                 resolved = await client.head(url)
-            match = re.search(r'(BV[A-Za-z0-9]+)', str(resolved.url))
+            match = re.search(r'(BV[A-Za-z0-9]{10})', str(resolved.url))
             if match:
                 url = str(resolved.url)
         except Exception as e:
@@ -354,9 +453,10 @@ async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_i
     if not body:
         return {"success": False, "message": "字幕JSON内容为空"}
 
-    # 写入SRT和TXT
-    srt_path = output_dir / f'{video_title}.srt'
-    txt_path = output_dir / f'{video_title}.txt'
+    # 写入SRT和TXT（固定文件名，避免 Windows 非法字符 / ADS 旁路）
+    # 视频标题只存返回字段，不进路径
+    srt_path = output_dir / 'bilibili_subtitle.srt'
+    txt_path = output_dir / 'bilibili_subtitle.txt'
     _write_subtitle_files(sub_json, srt_path, txt_path)
 
     if sio:
@@ -405,7 +505,6 @@ async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None
     """yt-dlp兜底提取B站字幕（带cookie）
     关键防误认：只认"本次调用新增"的srt，避免把旧任务残留当成成功结果
     """
-    yt_dlp_cmd = [sys.executable, '-m', 'yt_dlp'] + FFMPEG_ARGS
     bilibili_headers = [
         '--add-header', 'Origin:https://www.bilibili.com',
         '--add-header', 'Referer:https://www.bilibili.com',
@@ -436,7 +535,7 @@ async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None
         await emit_log(sio, job_id, f'⚠ 目录已有 {len(existing_srts)} 个旧srt文件，将只认本次新增')
 
     for sub_flag in ['--write-auto-sub', '--write-sub']:
-        cmd = yt_dlp_cmd + bilibili_headers + cookie_args + [
+        ytdlp_args = bilibili_headers + cookie_args + [
             '--no-check-certificate', '--skip-download',
             sub_flag, '--sub-format', 'srt',
             '--sub-langs', 'zh-Hans,zh,zh-CN,ai-zh,all',
@@ -444,8 +543,8 @@ async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None
             url,
         ]
         try:
-            def _run(cmd=cmd):
-                return subprocess.run(cmd, capture_output=True, timeout=120)
+            def _run(args=ytdlp_args):
+                return _run_ytdlp(args, timeout=120)
             result = await asyncio.to_thread(_run)
             # ★ 只认本次调用"新增"的 srt（排除旧任务残留）
             current_srts = set(p.name for p in output_dir.glob('*.srt'))
@@ -523,7 +622,6 @@ async def extract_youtube_subtitles(
 
     target_lang: 期望语言代码，默认 'zh'，决定 --sub-langs 优先级。
     """
-    yt_dlp_cmd = [sys.executable, '-m', 'yt_dlp'] + FFMPEG_ARGS
 
     # 字幕语言优先级：中文优先，其次英文兜底
     if target_lang and target_lang.lower().startswith('zh'):
@@ -538,7 +636,7 @@ async def extract_youtube_subtitles(
 
     # 先试手动 CC 字幕（质量更好），再试自动生成字幕
     for sub_flag in ['--write-sub', '--write-auto-sub']:
-        cmd = yt_dlp_cmd + [
+        ytdlp_args = [
             '--ignore-errors', '--no-check-certificate', '--skip-download',
             sub_flag, '--sub-format', 'srt/best', '--convert-subs', 'srt',
             '--sub-langs', sub_langs,
@@ -546,8 +644,8 @@ async def extract_youtube_subtitles(
             url,
         ]
         try:
-            def _run(cmd=cmd):
-                return subprocess.run(cmd, capture_output=True, timeout=120)
+            def _run(args=ytdlp_args):
+                return _run_ytdlp(args, timeout=120)
             result = await asyncio.to_thread(_run)
             new_srt_names = set(p.name for p in output_dir.glob('*.srt')) - existing_srts
             valid_srt_paths = [
@@ -656,18 +754,8 @@ async def download_video(
     用 yt-dlp 下载视频/音频（支持多平台）
     返回：(file_path, title, platform_name)
     """
-    # ★ 安全清洗：剥离可能混入的前缀（如列表编号 "3. "、中文逗号等）
-    url = url.strip()
-    # 剥除开头的非 URL 前缀：编号、中文文字、标点等
-    # 匹配模式: "3. https://..." → "https://..."
-    m = re.match(r'^(?:[\s\d]+[\.\、\s]+)*(https?://.+)', url)
-    if m:
-        url = m.group(1)
-    elif not url.startswith('http'):
-        # 如果连 http 都不是，尝试从中提取
-        inner = re.search(r'(https?://\S+)', url)
-        if inner:
-            url = inner.group(1)
+    # ★ 安全清洗：剥离可能混入的前缀（如列表编号 "3. "、中文逗号、截断的BV片段等）
+    url = sanitize_input_url(url)
 
     platform, need_proxy = detect_platform(url)
 
@@ -680,7 +768,6 @@ async def download_video(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     proxy_args = ['--proxy', PROXY] if need_proxy and PROXY else []
-    yt_dlp_cmd = [sys.executable, '-m', 'yt_dlp'] + FFMPEG_ARGS
 
     # B站特殊请求头
     bilibili_headers = []
@@ -691,7 +778,7 @@ async def download_video(
         ]
 
     # ===== 第一步：获取视频信息 =====
-    cmd_info = yt_dlp_cmd + proxy_args + bilibili_headers + [
+    info_args = proxy_args + bilibili_headers + [
         '--no-check-certificate', '--dump-json', '--skip-download', url
     ]
 
@@ -699,19 +786,27 @@ async def download_video(
     duration = 0
     try:
         def _run_info():
-            return subprocess.run(cmd_info, capture_output=True, timeout=60)
+            return _run_ytdlp(info_args, timeout=60)
         result = await asyncio.to_thread(_run_info)
         if result.returncode == 0 and result.stdout:
-            info = json.loads(result.stdout.decode('utf-8', errors='ignore'))
+            stdout_text = result.stdout.decode('utf-8', errors='ignore')
+            first_line = stdout_text.split('\n', 1)[0]
+            info = json.loads(first_line)
             title = info.get('title', url)
             duration = info.get('duration', 0)
     except Exception as e:
         logger.warning(f'获取视频信息失败: {e}')
 
     # ===== 第二步：下载 =====
+    mode_label = '仅音频' if only_audio else ('仅视频' if video_only else '视频+音频')
     if sio:
-        from socket_handlers import emit_progress
-        await emit_progress(sio, job_id, 'download', 10, '开始下载...')
+        from socket_handlers import emit_progress, emit_log
+        await emit_progress(sio, job_id, 'download', 10, f'开始下载（{mode_label}）...')
+        await emit_log(
+            sio, job_id,
+            f'⬇️ 开始下载 | 平台: {platform} | 模式: {mode_label} | 标题: {title}'
+            + (f' | 时长: {_format_mmss(duration)}' if duration else '')
+        )
 
     # 格式选择
     if only_audio:
@@ -722,49 +817,25 @@ async def download_video(
         fmt = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]'
 
     output_template = str(output_dir / '%(title)s.%(ext)s')
-    cmd_dl = yt_dlp_cmd + proxy_args + bilibili_headers + [
+    dl_args = proxy_args + bilibili_headers + [
         '--no-check-certificate',
         '-f', fmt,
         '-o', output_template,
         '--newline', url
     ]
 
-    # 用 subprocess + asyncio.to_thread 避免 asyncio.create_subprocess_exec 在 Windows 上的问题
-    # ★ 关键修复：必须用 communicate() 读取 PIPE 输出，否则输出缓冲区满后子进程会死锁，
-    #   proc.wait() 永远等不到退出 → 600s timeout → "下载失败"
     def _run_download():
-        proc = subprocess.Popen(
-            cmd_dl,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-        try:
-            stdout_data, _ = proc.communicate(timeout=600)
-            # 保留输出尾部用于排查（yt-dlp 失败时 stderr 会写这里）
-            if stdout_data:
-                tail = stdout_data.decode('utf-8', errors='ignore')[-800:]
-                logger.info(f'yt-dlp输出尾部:\n{tail}')
-            return proc.returncode
-        except subprocess.TimeoutExpired:
-            # 超时先 kill 再 communicate 清理，避免僵尸进程
-            proc.kill()
-            try:
-                proc.communicate(timeout=5)
-            except Exception:
-                pass
-            raise
-        except Exception:
-            # 其他异常也确保进程不残留
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            raise
+        r = _run_ytdlp(dl_args, timeout=600)
+        if r.stdout:
+            tail = r.stdout.decode('utf-8', errors='ignore')[-800:]
+            logger.info(f'yt-dlp输出尾部:\n{tail}')
+        return r.returncode
 
     try:
         if sio:
-            from socket_handlers import emit_progress
-            await emit_progress(sio, job_id, 'download', 10, '下载中... 请稍候')
+            from socket_handlers import emit_progress, emit_log
+            await emit_progress(sio, job_id, 'download', 15, f'下载中（{platform}）... 请稍候（最长约10分钟）')
+            await emit_log(sio, job_id, f'⬇️ 下载进行中 | yt-dlp 拉流中，完成后汇报文件与大小...')
         returncode = await asyncio.to_thread(_run_download)
     except subprocess.TimeoutExpired:
         raise Exception(f'{platform} 下载超时(600s)')
@@ -780,11 +851,12 @@ async def download_video(
     if not files:
         raise Exception('下载完成但未找到音频文件')
     latest = max(files, key=lambda f: f.stat().st_mtime)
+    size_mb = latest.stat().st_size / (1024 * 1024)
 
     if sio:
         from socket_handlers import emit_log, emit_progress
-        await emit_log(sio, job_id, f'文件: {latest.name}')
-        await emit_progress(sio, job_id, 'download', 100, '下载完成！')
+        await emit_log(sio, job_id, f'✅ 下载完成 | 文件: {latest.name} | 大小: {size_mb:.1f} MB')
+        await emit_progress(sio, job_id, 'download', 100, f'下载完成！{latest.name} ({size_mb:.1f} MB)')
 
     return str(latest), title, platform
 
