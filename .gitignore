@@ -22,6 +22,7 @@ backend/data/*.db-wal
 backend/data/*.db-shm
 
 # Backend runtime data
+backend/data/*
 backend/data/downloads/
 backend/data/exports/
 backend/data/bilibili_cookies.json
@@ -76,8 +77,7 @@ restart.bat
 *.bak-*
 *.bak_*
 
-# AI tool directories
-.trellis/
+# AI tool directories (运行时数据/索引，不进库；治理层 .trellis 的脚本与 spec 进库)
 .codex/
 .claude/
 .codebuddy/
@@ -85,9 +85,26 @@ restart.bat
 .agent/
 .workbuddy/
 .codegraph/
+.zcode/
 openspec/
-AGENTS.md
-CLAUDE.md
+
+# Trellis 运行时状态（治理层 scripts/config/workflow/spec/tasks 进 git，只排运行时）
+.trellis/.developer
+.trellis/.current-task
+.trellis/.runtime/
+.trellis/.ralph-state.json
+.trellis/.agents/
+.trellis/.agent-log
+.trellis/.session-id
+.trellis/.plan-log
+.trellis/**/*.tmp
+.trellis/.backup-*/
+.trellis/**/*.new
+.trellis/**/__pycache__/
+.trellis/**/*.pyc
+
+# 治理入口文件（进 git，不忽略）
+# AGENTS.md / CONTEXT.md / CLAUDE.md 按需入库
 
 # Runtime logs
 backend/uvicorn.err
