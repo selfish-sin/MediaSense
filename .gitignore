@@ -77,16 +77,19 @@ restart.bat
 *.bak-*
 *.bak_*
 
-# AI tool directories (运行时数据/索引，不进库；治理层 .trellis 的脚本与 spec 进库)
+# AI tool directories (运行时数据/索引，不进库；治理层 .trellis 与 .agents/skills 进库)
 .codex/
 .claude/
 .codebuddy/
-.agents/
 .agent/
 .workbuddy/
 .codegraph/
 .zcode/
 openspec/
+
+# .agents 运行时数据忽略，但 skills/ 共享技能进 git
+.agents/*
+!.agents/skills/
 
 # Trellis 运行时状态（治理层 scripts/config/workflow/spec/tasks 进 git，只排运行时）
 .trellis/.developer
