@@ -24,7 +24,11 @@ const selectedJobs = ref([])  // 多选勾中的任务
 async function loadJobs() {
   loading.value = true
   try {
-    const res = await jobsApi.list({ limit: pageSize.value, offset: (page.value - 1) * pageSize.value })
+    const params = { limit: pageSize.value, offset: (page.value - 1) * pageSize.value }
+    // ★ 关键词过滤：按标题/URL 过滤列表（后端 get_jobs 的 keyword 参数）
+    const q = searchQuery.value.trim()
+    if (q) params.keyword = q
+    const res = await jobsApi.list(params)
     jobs.value = res.jobs || []
     total.value = res.total || 0
   } catch (err) {
@@ -133,18 +137,17 @@ function formatTime(time) {
   return new Date(time).toLocaleString()
 }
 
-// ============ 转录文本全文搜索 ============
+// ============ 历史列表关键词过滤 ============
 const searchQuery = ref('')
-const searchResults = ref(null)  // null=未搜索, {results, total_jobs_searched, total_jobs_matched}
 const searching = ref(false)
 
 async function doSearch() {
   const q = searchQuery.value.trim()
-  if (!q) { searchResults.value = null; return }
+  if (!q) { return }
   searching.value = true
   try {
-    const res = await jobsApi.searchTranscript(q, 50, 5)
-    searchResults.value = res
+    page.value = 1  // ★ 搜索时回到第一页
+    await loadJobs()
   } catch (err) {
     ElMessage.error('搜索失败: ' + err.message)
   } finally {
@@ -154,21 +157,8 @@ async function doSearch() {
 
 function clearSearch() {
   searchQuery.value = ''
-  searchResults.value = null
-}
-
-function highlightText(text, q) {
-  const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[ch]))
-  const source = String(text ?? '')
-  if (!q) return escapeHtml(source)
-  const escaped = String(q).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return source.split(new RegExp(`(${escaped})`, 'gi')).map((part, index) =>
-    index % 2 === 1
-      ? `<mark class="search-highlight">${escapeHtml(part)}</mark>`
-      : escapeHtml(part)
-  ).join('')
+  page.value = 1
+  loadJobs()
 }
 
 // ============ 重试 ============
@@ -314,12 +304,12 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- 转录文本全文搜索 -->
+    <!-- 历史列表关键词过滤 -->
     <el-card shadow="never" style="margin-bottom: 16px;">
       <div style="display: flex; gap: 8px; align-items: center;">
         <el-input
           v-model="searchQuery"
-          placeholder="搜索所有任务的转录文本内容（输入关键词）"
+          placeholder="按标题或 URL 关键词过滤历史记录"
           clearable
           @keyup.enter="doSearch"
           @clear="clearSearch"
@@ -328,39 +318,11 @@ onMounted(() => {
           <template #prefix><el-icon><Search /></el-icon></template>
         </el-input>
         <el-button type="primary" :loading="searching" @click="doSearch">搜索</el-button>
-        <el-button v-if="searchResults" @click="clearSearch">返回列表</el-button>
-      </div>
-      <div v-if="searchResults" class="search-info">
-        搜索 "<strong>{{ searchResults.query }}</strong>"：扫描 {{ searchResults.total_jobs_searched }} 个任务，命中 {{ searchResults.total_jobs_matched }} 个
       </div>
     </el-card>
 
-    <!-- 搜索结果面板 -->
-    <div v-if="searchResults">
-      <el-empty v-if="searchResults.results.length === 0" description="未找到匹配内容" />
-      <el-card
-        v-for="r in searchResults.results"
-        :key="r.job_id"
-        shadow="never"
-        style="margin-bottom: 12px; cursor: pointer;"
-        @click="viewResult(r.job_id)"
-      >
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-          <span style="font-weight: 600;">{{ r.title }}</span>
-          <div>
-            <el-tag size="small" type="info">{{ r.platform }}</el-tag>
-            <el-tag size="small" type="warning" style="margin-left: 6px;">{{ r.match_count }} 处匹配</el-tag>
-          </div>
-        </div>
-        <div v-for="(m, i) in r.matches" :key="i" class="match-card">
-          <span v-if="m.timestamp" class="match-timestamp">[{{ m.timestamp }}]</span>
-          <span v-html="highlightText(m.text, searchResults.query)"></span>
-        </div>
-      </el-card>
-    </div>
-
-    <!-- 正常任务列表（非搜索状态） -->
-    <template v-else>
+    <!-- 任务列表（搜索时按 keyword 过滤） -->
+    <template>
       <!-- 批量操作栏（选中任务时显示） -->
       <div v-if="selectedJobs.length > 0" class="batch-toolbar">
         <span class="batch-toolbar__count">已选 {{ selectedJobs.length }} 项</span>
@@ -371,7 +333,7 @@ onMounted(() => {
         <el-button size="small" link @click="selectedJobs = []">取消选择</el-button>
       </div>
 
-      <el-table :data="jobs" v-loading="loading" stripe style="width: 100%;" @selection-change="handleSelectionChange">
+      <el-table :data="jobs" v-loading="loading" stripe style="width: 100%;" :empty-text="searchQuery.trim() ? '未找到匹配的任务' : '暂无任务'" @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="40" />
         <el-table-column prop="id" label="ID" width="80" />
         <el-table-column prop="title" label="标题" min-width="200" show-overflow-tooltip />
@@ -466,44 +428,6 @@ onMounted(() => {
   border: 1px solid rgba(64, 158, 255, 0.22);
 }
 :root[data-theme="dark"] .batch-toolbar__count {
-  color: var(--el-color-primary-light-3);
-}
-
-/* ========== 搜索结果 ========== */
-.search-info {
-  margin-top: 8px;
-  font-size: 12px;
   color: var(--el-text-color-secondary);
-}
-
-.match-card {
-  padding: 6px 8px;
-  border-radius: 4px;
-  margin-bottom: 4px;
-  font-size: 13px;
-}
-:root[data-theme="light"] .match-card {
-  background: #fafafa;
-}
-:root[data-theme="dark"] .match-card {
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.match-timestamp {
-  font-family: monospace;
-  margin-right: 8px;
-  color: var(--el-color-primary);
-}
-
-/* 搜索高亮 */
-:deep(.search-highlight) {
-  background: #fff3a0;
-  padding: 0 2px;
-  border-radius: 2px;
-  color: #303133;
-}
-:root[data-theme="dark"] :deep(.search-highlight) {
-  background: rgba(255, 243, 160, 0.35);
-  color: #fff3a0;
 }
 </style>
