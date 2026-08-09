@@ -46,8 +46,31 @@ const activeVersionResult = ref(null)
 // 思维导图
 const mindmapLoading = ref(false)
 const mindmapReady = ref(false)
-const mindmapTab = ref('summary')
 const mindmapContainer = ref(null)
+
+// ============ 转录文本 tab ============
+// ★ 校正后文本(txt)与原文(txt_raw)独立展示，不再混入 result_text
+//   - transcriptTab: 'transcript' 时显示转录区
+//   - transcriptView: 'corrected'(校正后) / 'raw'(校正前原文)
+//   - hasCorrection: 是否做过 AI 校正（有 txt_raw 备份）
+const transcriptText = ref('')        // 校正后转录文本
+const transcriptRawText = ref('')     // 校正前原文（仅校正过才有）
+const transcriptLoading = ref(false)
+const transcriptLoaded = ref(false)
+const transcriptView = ref('corrected')  // 默认看校正后
+
+// 主 tab：summary / mindmap / transcript
+const resultTab = ref('summary')
+
+// 是否做过 AI 校正：有 txt_raw 备份文件即视为校正过
+const hasCorrection = computed(() => !!(job.value?.files?.txt_raw))
+// 校正统计（后端持久化，仅校正过的任务有）
+const correctionStats = computed(() => job.value?.correction_stats || null)
+const correctionNeedReview = computed(() => {
+  const s = correctionStats.value
+  if (!s) return false
+  return !!(s.failed_chunks || s.integrity_warnings || s.length_warnings)
+})
 
 // ★ 当前显示的结果（流式输出时显示 streamingText，否则根据 activeVersion 显示）
 const displayResult = computed(() => {
@@ -82,6 +105,14 @@ async function loadJob() {
   try {
     job.value = await jobsApi.get(jobId)
     await loadSummaryHistory()
+    // ★ do_summary=false 或无总结结果但有转录文本时，默认落到转录 tab
+    //   避免结果页空荡荡，让用户能看到转录/校正内容
+    const hasSummary = !!(job.value?.result_text)
+    const hasTranscript = !!(job.value?.files?.txt)
+    if (!hasSummary && hasTranscript) {
+      resultTab.value = 'transcript'
+      loadTranscript()
+    }
   } catch (err) {
     ElMessage.error(err.message)
   } finally {
@@ -224,7 +255,12 @@ watch(() => route.params.jobId, (newId, oldId) => {
     streamingText.value = ''
     streamingThinking.value = ''
     mindmapReady.value = false
-    mindmapTab.value = 'summary'
+    resultTab.value = 'summary'
+    // 重置转录状态
+    transcriptText.value = ''
+    transcriptRawText.value = ''
+    transcriptLoaded.value = false
+    transcriptView.value = 'corrected'
     if (mindmapContainer.value) mindmapContainer.value.innerHTML = ''
     loadJob()
   }
@@ -496,9 +532,71 @@ async function generateMindmap() {
 }
 
 function switchToMindmapTab() {
-  mindmapTab.value = 'mindmap'
+  resultTab.value = 'mindmap'
   if (!mindmapReady.value && !mindmapLoading.value) {
     generateMindmap()
+  }
+}
+
+// ============ 加载转录文本 ============
+async function loadTranscript() {
+  if (transcriptLoaded.value || transcriptLoading.value) return
+  const files = job.value?.files || {}
+  if (!files.txt) {
+    transcriptLoaded.value = true
+    return
+  }
+  transcriptLoading.value = true
+  try {
+    // 校正后文本（txt_path，校正后已写回）
+    const res = await fetch(`/api/download/view?path=${encodeURIComponent(files.txt)}`)
+    if (res.ok) {
+      transcriptText.value = await res.text()
+    }
+    // 校正前原文（txt_raw 备份，仅校正过才有）
+    if (files.txt_raw) {
+      try {
+        const resRaw = await fetch(`/api/download/view?path=${encodeURIComponent(files.txt_raw)}`)
+        if (resRaw.ok) transcriptRawText.value = await resRaw.text()
+      } catch { /* 原文读取失败不阻塞 */ }
+    }
+    transcriptLoaded.value = true
+  } catch (err) {
+    ElMessage.error('加载转录文本失败: ' + (err.message || err))
+  } finally {
+    transcriptLoading.value = false
+  }
+}
+
+function switchToTranscriptTab() {
+  resultTab.value = 'transcript'
+  if (!transcriptLoaded.value) loadTranscript()
+}
+
+// 当前展示的转录文本（根据校正/原文切换）
+const displayTranscript = computed(() => {
+  if (transcriptView.value === 'raw' && transcriptRawText.value) {
+    return transcriptRawText.value
+  }
+  return transcriptText.value
+})
+
+// 复制转录文本
+async function copyTranscript() {
+  const text = displayTranscript.value
+  if (!text) { ElMessage.warning('没有可复制的内容'); return }
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success(`已复制 ${text.length} 字符到剪贴板`)
+  } catch {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'; ta.style.left = '-9999px'
+    document.body.appendChild(ta)
+    ta.select()
+    try { document.execCommand('copy'); ElMessage.success(`已复制 ${text.length} 字符到剪贴板`) }
+    catch { ElMessage.error('复制失败，请手动选择文本') }
+    finally { document.body.removeChild(ta) }
   }
 }
 </script>
@@ -616,22 +714,29 @@ function switchToMindmapTab() {
     <!-- 结果展示区（固定栏，常驻显示） -->
     <div ref="resultSectionRef">
 
-      <!-- ★ 标签切换：总结 / 思维导图 -->
-      <div v-if="displayResult || isStreaming" style="display: flex; align-items: center; gap: 0; margin-bottom: 12px; border-bottom: 2px solid #e4e7ed;">
+      <!-- ★ 标签切换：总结 / 思维导图 / 转录 -->
+      <div v-if="displayResult || isStreaming || (job?.files?.txt)" style="display: flex; align-items: center; gap: 0; margin-bottom: 12px; border-bottom: 2px solid #e4e7ed;">
         <div
-          @click="mindmapTab = 'summary'"
-          :style="{ padding: '8px 16px', cursor: 'pointer', fontWeight: mindmapTab === 'summary' ? 600 : 400, color: mindmapTab === 'summary' ? '#409eff' : '#909399', borderBottom: mindmapTab === 'summary' ? '2px solid #409eff' : '2px solid transparent', marginBottom: '-2px' }"
+          @click="resultTab = 'summary'"
+          :style="{ padding: '8px 16px', cursor: 'pointer', fontWeight: resultTab === 'summary' ? 600 : 400, color: resultTab === 'summary' ? '#409eff' : '#909399', borderBottom: resultTab === 'summary' ? '2px solid #409eff' : '2px solid transparent', marginBottom: '-2px' }"
         ><el-icon style="vertical-align: -2px; margin-right: 4px;"><FileText /></el-icon>AI 总结</div>
         <div
           @click="switchToMindmapTab"
-          :style="{ padding: '8px 16px', cursor: 'pointer', fontWeight: mindmapTab === 'mindmap' ? 600 : 400, color: mindmapTab === 'mindmap' ? '#409eff' : '#909399', borderBottom: mindmapTab === 'mindmap' ? '2px solid #409eff' : '2px solid transparent', marginBottom: '-2px' }"
+          :style="{ padding: '8px 16px', cursor: 'pointer', fontWeight: resultTab === 'mindmap' ? 600 : 400, color: resultTab === 'mindmap' ? '#409eff' : '#909399', borderBottom: resultTab === 'mindmap' ? '2px solid #409eff' : '2px solid transparent', marginBottom: '-2px' }"
         ><el-icon style="vertical-align: -2px; margin-right: 4px;"><Cpu /></el-icon>思维导图</div>
+        <div
+          v-if="job?.files?.txt"
+          @click="switchToTranscriptTab"
+          :style="{ padding: '8px 16px', cursor: 'pointer', fontWeight: resultTab === 'transcript' ? 600 : 400, color: resultTab === 'transcript' ? '#409eff' : '#909399', borderBottom: resultTab === 'transcript' ? '2px solid #409eff' : '2px solid transparent', marginBottom: '-2px' }"
+        ><el-icon style="vertical-align: -2px; margin-right: 4px;"><FileText /></el-icon>转录文本
+          <el-tag v-if="hasCorrection" size="small" type="warning" effect="plain" style="margin-left: 4px; font-size: 10px;">已校正</el-tag>
+        </div>
         <div style="flex: 1;" />
-        <el-button v-if="mindmapTab === 'mindmap' && !mindmapLoading && mindmapReady" size="small" type="primary" text @click="generateMindmap" style="margin-right: 8px;"><el-icon style="vertical-align: -2px; margin-right: 4px;"><RefreshCcw /></el-icon>重新生成</el-button>
+        <el-button v-if="resultTab === 'mindmap' && !mindmapLoading && mindmapReady" size="small" type="primary" text @click="generateMindmap" style="margin-right: 8px;"><el-icon style="vertical-align: -2px; margin-right: 4px;"><RefreshCcw /></el-icon>重新生成</el-button>
       </div>
 
-      <!-- 工具栏 -->
-      <div v-if="displayResult || isStreaming" style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;">
+      <!-- 工具栏（总结/思维导图 tab 用） -->
+      <div v-if="(displayResult || isStreaming) && resultTab !== 'transcript'" style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;">
         <el-input
           v-model="searchText"
           placeholder="在结果中搜索..."
@@ -672,7 +777,7 @@ function switchToMindmapTab() {
       </div>
 
       <!-- 结果内容 -->
-      <el-card v-if="displayResult || isStreaming || mindmapReady" shadow="never">
+      <el-card v-if="displayResult || isStreaming || mindmapReady || resultTab === 'transcript'" shadow="never">
         <!-- 流式输出中但还没收到内容 -->
         <div v-if="isStreaming && !streamingText" style="text-align: center; padding: 40px; color: #909399;">
           <el-icon class="is-loading" style="font-size: 24px;"><Loader2 /></el-icon>
@@ -688,14 +793,54 @@ function switchToMindmapTab() {
           <pre v-if="showThinking" class="streaming-thinking-text">{{ streamingThinking }}</pre>
         </div>
 
+        <!-- ★ 转录文本 tab：原文/校正切换 + 校正统计 + 纯文本展示 -->
+        <div v-if="resultTab === 'transcript'">
+          <!-- 转录工具栏 -->
+          <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;">
+            <el-radio-group v-if="hasCorrection" v-model="transcriptView" size="small">
+              <el-radio-button label="corrected">校正后</el-radio-button>
+              <el-radio-button label="raw">校正前原文</el-radio-button>
+            </el-radio-group>
+            <span v-else style="font-size: 12px; color: #909399;">未启用 AI 校正</span>
+            <div style="flex: 1;" />
+            <el-button size="small" type="success" plain @click="copyTranscript" :disabled="!displayTranscript">复制转录</el-button>
+          </div>
+          <!-- 校正统计告警 -->
+          <el-alert
+            v-if="hasCorrection && correctionStats && correctionNeedReview && transcriptView === 'corrected'"
+            type="warning"
+            :closable="false"
+            style="margin-bottom: 12px;"
+          >
+            <template #title>
+              AI 校正存在需人工复核的批次：
+              失败 {{ correctionStats.failed_chunks }} /
+              完整性告警 {{ correctionStats.integrity_warnings }} /
+              长度告警 {{ correctionStats.length_warnings }}（共 {{ correctionStats.total_chunks }} 批）
+            </template>
+          </el-alert>
+          <!-- 校正统计（正常） -->
+          <div v-if="hasCorrection && correctionStats && !correctionNeedReview && transcriptView === 'corrected'"
+               style="font-size: 12px; color: #67c23a; margin-bottom: 8px;">
+            ✅ AI 校正完成，{{ correctionStats.total_chunks }} 批全部通过完整性校验
+          </div>
+          <!-- 转录文本内容 -->
+          <div v-if="transcriptLoading" style="text-align: center; padding: 40px; color: #909399;">
+            <el-icon class="is-loading" style="font-size: 24px;"><Loader2 /></el-icon>
+            <div style="margin-top: 8px;">加载转录文本...</div>
+          </div>
+          <pre v-else-if="displayTranscript" class="transcript-text">{{ displayTranscript }}</pre>
+          <el-empty v-else description="无转录文本" />
+        </div>
+
         <div
-          v-if="mindmapTab === 'summary'"
+          v-else-if="resultTab === 'summary'"
           class="markdown-body"
           v-html="renderedResult"
           style="line-height: 1.8; font-size: 14px;"
         />
         <!-- 思维导图 -->
-        <div v-else-if="mindmapTab === 'mindmap'" style="min-height: 400px; position: relative;">
+        <div v-else-if="resultTab === 'mindmap'" style="min-height: 400px; position: relative;">
           <div v-if="mindmapLoading" style="position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.85);">
             <div style="text-align: center; color: #909399;">
               <el-icon class="is-loading" style="font-size: 24px;"><Loader2 /></el-icon>
@@ -798,6 +943,21 @@ function switchToMindmapTab() {
   color: var(--app-thinking-text);
   max-height: 300px;
   overflow-y: auto;
+}
+
+/* 转录文本 */
+.transcript-text {
+  margin: 0;
+  padding: 16px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13.5px;
+  line-height: 1.7;
+  background: var(--app-bg-2, #fafafa);
+  border-radius: 6px;
+  max-height: 70vh;
+  overflow-y: auto;
+  font-family: 'Consolas', 'Monaco', 'Source Code Pro', monospace;
 }
 
 /* 思维导图容器 */

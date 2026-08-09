@@ -214,6 +214,13 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
+    # ★ AI 校正统计字段（迁移：旧 jobs 表没有，校正任务的批次/失败/告警统计）
+    #   JSON：{total_chunks, failed_chunks, integrity_warnings, length_warnings, warnings:[]}
+    try:
+        cursor.execute("ALTER TABLE jobs ADD COLUMN correction_stats TEXT")
+    except sqlite3.OperationalError:
+        pass
+
     # ★ 模块化提示词覆盖表（TemplatesView 编辑器写入）
     #   用户可覆盖任意维度任意模块的 template 文本，build_modular_prompt 优先读取
     cursor.execute("""

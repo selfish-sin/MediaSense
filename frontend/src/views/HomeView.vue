@@ -1422,6 +1422,24 @@ onDeactivated(() => {
                 <span class="adv-field-hint-inline">纠同音字 / 专名 / 标点（多耗 token）</span>
               </div>
             </div>
+            <!-- ★ 校正模型选择器：仅开启 AI 校正时显示，留空则用主模型 -->
+            <div v-if="settings.advancedOptions.ai_correct" class="adv-field">
+              <div class="adv-field-label">校正模型</div>
+              <el-select
+                v-model="settings.advancedOptions.ai_correct_model"
+                class="adv-field-control"
+                placeholder="留空则用上方主模型"
+                clearable
+                filterable
+              >
+                <el-option
+                  v-for="m in modelStore.models"
+                  :key="m.key"
+                  :label="m.name"
+                  :value="m.key"
+                />
+              </el-select>
+            </div>
           </div>
         </section>
 

@@ -267,7 +267,7 @@ def update_job(job_id: str, **kwargs) -> bool:
     fields = []
     values = []
     for key, value in kwargs.items():
-        if key in ('options', 'files', 'tags', 'token_usage'):
+        if key in ('options', 'files', 'tags', 'token_usage', 'correction_stats'):
             # JSON 字段需要序列化
             value = json.dumps(value, ensure_ascii=False)
         fields.append(f"{key} = ?")
@@ -435,7 +435,7 @@ def _row_to_dict(row) -> Dict[str, Any]:
     """将 sqlite3.Row 转为 dict，JSON字段自动反序列化，时间字段转 ISO 8601"""
     d = dict(row)
     # 反序列化 JSON 字段
-    json_fields = ('options', 'files', 'tags', 'token_usage')
+    json_fields = ('options', 'files', 'tags', 'token_usage', 'correction_stats')
     for field in json_fields:
         value = d.get(field)
         if value and isinstance(value, str):

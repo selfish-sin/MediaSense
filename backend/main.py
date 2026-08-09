@@ -637,13 +637,20 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                         f.write(raw_text)
                     result['files']['txt_raw'] = raw_backup
 
-                    corrected, c_in, c_out = await correct_transcript(
+                    corrected, c_in, c_out, corr_stats = await correct_transcript(
                         raw_text, model=correct_model, sio=sio, job_id=job_id
                     )
                     # 写回 txt（校正后）
                     with open(txt_path, 'w', encoding='utf-8') as f:
                         f.write(corrected)
-                    await emit_log(sio, job_id, f'📝 已用 {correct_model} 校正转录文本（原文备份: {Path(raw_backup).name}）')
+                    # 记录校正统计，供结果页展示「是否有人工复核提示」
+                    result['correction_stats'] = corr_stats
+                    update_job(job_id, correction_stats=corr_stats)
+                    need_review = (corr_stats['failed_chunks'] or
+                                   corr_stats['integrity_warnings'] or
+                                   corr_stats['length_warnings'])
+                    review_hint = '（⚠ 有批次需人工复核）' if need_review else ''
+                    await emit_log(sio, job_id, f'📝 已用 {correct_model} 校正转录文本{review_hint}（原文备份: {Path(raw_backup).name}）')
             except TaskCancelledError:
                 raise  # ★ 用户取消不能被"校正失败不影响主流程"的兜底吞掉
             except Exception as e:
@@ -699,6 +706,17 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             updated_job = get_job(job_id)
             edited_text = updated_job.get('edited_preview_text', '') if updated_job else ''
             if edited_text:
+                # ★ 校正覆盖提示：若启用了 AI 校正且用户编辑与校正后文本不同，
+                #   告知用户其编辑已覆盖校正结果（编辑优先，不阻断）
+                if ai_correct:
+                    try:
+                        with open(txt_path, 'r', encoding='utf-8') as f:
+                            pre_edit_text = f.read()
+                    except Exception:
+                        pre_edit_text = ''
+                    if edited_text != pre_edit_text:
+                        await emit_log(sio, job_id,
+                                       'ℹ 检测到用户编辑，已用编辑内容覆盖 AI 校正结果（编辑优先）')
                 with open(txt_path, 'w', encoding='utf-8') as f:
                     f.write(edited_text)
                 await emit_log(sio, job_id, f'✅ 已应用用户编辑（{len(edited_text)}字符）')

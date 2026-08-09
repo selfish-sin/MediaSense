@@ -485,38 +485,106 @@ async def translate_subtitles(
 
 
 # ============ 转录文本 AI 校正 ============
+
+# 时间戳标记正则：[MM:SS - MM:SS] / [MM:SS] / [HH:MM:SS ...] 等
+_TS_RE = re.compile(r'\[\d{1,2}:\d{2}(?::\d{2})?\s*(?:-\s*\d{1,2}:\d{2}(?::\d{2})?)?\]')
+# 说话人标记：[说话人1] / [Speaker A] 等
+_SPEAKER_RE = re.compile(r'\[(?:说话人|Speaker| speaker)\s*\w+\]', re.IGNORECASE)
+
+
+def _count_markers(text: str) -> int:
+    """统计时间戳 + 说话人标记数量（用于校正前后完整性比对）"""
+    return len(_TS_RE.findall(text)) + len(_SPEAKER_RE.findall(text))
+
+
+def _split_by_boundary(text: str, max_chars: int) -> list:
+    """按行边界分块，避免在时间戳/说话人标记中间硬切。
+
+    优先在换行处切；若单行超长则在该行的标记边界切；最后兜底硬切。
+    """
+    if len(text) <= max_chars:
+        return [text]
+    chunks = []
+    buf = ''
+    for line in text.split('\n'):
+        # 加上这行不超限 → 累积
+        if len(buf) + len(line) + 1 <= max_chars:
+            buf = buf + '\n' + line if buf else line
+            continue
+        # 当前行本身超限：先 flush buf，再把长行按标记边界切
+        if buf:
+            chunks.append(buf)
+            buf = ''
+        if len(line) <= max_chars:
+            buf = line
+            continue
+        # 长行：在 ] 后切（标记结尾），尽量不劈开标记
+        parts = re.split(r'(?<=\])', line)
+        for p in parts:
+            if len(buf) + len(p) <= max_chars:
+                buf += p
+            else:
+                if buf:
+                    chunks.append(buf)
+                # 单个 part 仍超长 → 兜底硬切
+                buf = p[:max_chars] if len(p) > max_chars else p
+                if len(p) > max_chars:
+                    chunks.append(buf)
+                    buf = p[max_chars:]
+    if buf:
+        chunks.append(buf)
+    return chunks
+
+
 async def correct_transcript(
     text: str,
     model: str = DEFAULT_MODEL,
     sio=None,
     job_id: str = '',
-) -> Tuple[str, int, int]:
+) -> Tuple[str, int, int, dict]:
     """
     用云端模型校正语音转写文本。
 
     针对语音转写常见错误：同音错字、专有名词误识别、标点缺失、断句不当。
     保持原意与时间戳标记，只修正明显错误，不增删内容。
 
-    返回：(校正后文本, input_tokens, output_tokens)
+    返回：(校正后文本, input_tokens, output_tokens, stats)
+      stats = {
+        'total_chunks': int,        # 总批次数
+        'failed_chunks': int,       # 校正失败/回退原文的批次数
+        'integrity_warnings': int,  # 时间戳完整性校验未通过的批次数
+        'length_warnings': int,     # 长度异常变化的批次数
+        'warnings': [str],          # 详细告警信息
+      }
     """
     model_cfg = get_model_by_key(model) or get_model_by_key(DEFAULT_MODEL)
     if not model_cfg:
         raise Exception(f'模型 {model} 不存在')
+
+    stats = {
+        'total_chunks': 0, 'failed_chunks': 0,
+        'integrity_warnings': 0, 'length_warnings': 0, 'warnings': [],
+    }
+
+    # ★ 空输入直接返回，避免无意义的 API 调用
+    if not text or not text.strip():
+        if sio:
+            from socket_handlers import emit_log
+            await emit_log(sio, job_id, '⚠ 校正输入为空，跳过 AI 校正')
+        return text or '', 0, 0, stats
 
     if sio:
         from socket_handlers import emit_progress, emit_log
         await emit_progress(sio, job_id, 'correct', 0, f'AI 校正转录文本（{model}）...')
         await emit_log(sio, job_id, f'🔧 开始 AI 校正（模型: {model}）')
 
-    # 分批处理（GLM-4.5-Air 128K上下文，8万字符一段已可覆盖绝大多数场景）
-    max_chars = 80000  # 单批最大字符数，一次处理更多内容减少API调用次数
-    if len(text) > max_chars:
-        chunks = [text[i:i+max_chars] for i in range(0, len(text), max_chars)]
-        if sio:
-            from socket_handlers import emit_log
-            await emit_log(sio, job_id, f'转录文本较长（{len(text)}字符），分 {len(chunks)} 批校正')
-    else:
-        chunks = [text]
+    # ★ 按行/标记边界分块，避免在时间戳标记中间硬切
+    max_chars = 80000
+    chunks = _split_by_boundary(text, max_chars)
+    stats['total_chunks'] = len(chunks)
+    if len(chunks) > 1 and sio:
+        from socket_handlers import emit_log
+        await emit_log(sio, job_id, f'转录文本较长（{len(text)}字符），分 {len(chunks)} 批校正（按行边界）')
 
     corrected_parts = []
     total_in = 0
@@ -531,7 +599,7 @@ async def correct_transcript(
         prompt = f"""以下是语音识别（ASR）转录的文本。请校正其中的明显错误：
 
 【校正要求】
-1. 修正同音错字、形近字误识别（如"终南山"→"钟南山"、".Rectifier"→纠正上下文）
+1. 修正同音错字、形近字误识别（如"终南山"→"钟南山"）
 2. 修正专有名词错误（人名、地名、术语、品牌、技术名词）
 3. 补全缺失的标点（句号、逗号、问号等），保持中文标点规范
 4. 修正明显的断句错误，但不改变原意
@@ -547,13 +615,43 @@ async def correct_transcript(
             model_cfg, prompt, timeout=120.0,
             sio=sio, job_id=job_id, round_label=f'校正批次 {i+1}/{len(chunks)}'
         )
-        # 去掉可能的失败标记
+
+        used = content
+        # ① 失败标记检测：LLM 返回失败哨兵 → 回退原文
         if content.startswith('[处理失败'):
-            content = chunk  # 校正失败则保留原文
+            used = chunk
+            stats['failed_chunks'] += 1
+            warn = f'批次 {i+1} 校正失败，保留原文'
+            stats['warnings'].append(warn)
             if sio:
                 from socket_handlers import emit_log
-                await emit_log(sio, job_id, f'⚠ 批次 {i+1} 校正失败，保留原文')
-        corrected_parts.append(content)
+                await emit_log(sio, job_id, f'⚠ {warn}')
+        else:
+            # ② 时间戳/说话人标记完整性校验：校正前后数量应一致
+            orig_count = _count_markers(chunk)
+            corr_count = _count_markers(used)
+            if orig_count != corr_count:
+                stats['integrity_warnings'] += 1
+                warn = f'批次 {i+1} 标记完整性异常（原文 {orig_count} 个 → 校正后 {corr_count} 个），可能丢失时间戳/说话人标记，回退原文'
+                stats['warnings'].append(warn)
+                if sio:
+                    from socket_handlers import emit_log
+                    await emit_log(sio, job_id, f'⚠ {warn}')
+                used = chunk  # 标记丢失 → 回退原文，防污染下游总结
+
+            # ③ 长度异常检测：变化超 ±30% 标记可疑（加标点会变长，但不应剧变）
+            #   注意：仅告警不回退（标点补全合理地会增长），除非同时触发完整性问题
+            if orig_count == corr_count:  # 完整性通过的才做长度告警
+                delta = (len(used) - len(chunk)) / max(len(chunk), 1)
+                if abs(delta) > 0.30:
+                    stats['length_warnings'] += 1
+                    warn = f'批次 {i+1} 长度变化 {delta:+.0%}（{len(chunk)}→{len(used)}），请人工复核'
+                    stats['warnings'].append(warn)
+                    if sio:
+                        from socket_handlers import emit_log
+                        await emit_log(sio, job_id, f'⚠ {warn}')
+
+        corrected_parts.append(used)
         total_in += in_tok
         total_out += out_tok
 
@@ -562,10 +660,13 @@ async def correct_transcript(
     if sio:
         from socket_handlers import emit_progress, emit_log
         await emit_progress(sio, job_id, 'correct', 100, 'AI 校正完成')
-        await emit_log(sio, job_id, f'✅ 校正完成 | 原文 {len(text)} 字符 → 校正后 {len(full_corrected)} 字符 | token in={total_in} out={total_out}')
+        summary = f'✅ 校正完成 | 原文 {len(text)} 字符 → 校正后 {len(full_corrected)} 字符 | token in={total_in} out={total_out}'
+        if stats['failed_chunks'] or stats['integrity_warnings'] or stats['length_warnings']:
+            summary += f' | ⚠ 失败{stats["failed_chunks"]}/完整性{stats["integrity_warnings"]}/长度{stats["length_warnings"]} 批次需复核'
+        await emit_log(sio, job_id, summary)
 
     _record_token_usage(model, total_in, total_out, job_id)
-    return full_corrected, total_in, total_out
+    return full_corrected, total_in, total_out, stats
 
 
 # ============ 思维导图 ============
