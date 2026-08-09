@@ -134,9 +134,28 @@ def _delete_chat_message(job_id, msg_id):
 
 
 def _delete_chat_from(job_id, msg_id):
+    """删除该消息及其后续，且仅限该消息所属会话（避免跨会话误删）。"""
     conn = get_connection()
     try:
-        conn.execute("DELETE FROM job_chats WHERE job_id = ? AND id >= ?", (job_id, msg_id))
+        row = conn.execute(
+            "SELECT session_id FROM job_chats WHERE job_id = ? AND id = ?",
+            (job_id, msg_id),
+        ).fetchone()
+        if not row:
+            return
+        session_id = row["session_id"]
+        if session_id:
+            conn.execute(
+                "DELETE FROM job_chats WHERE job_id = ? AND session_id = ? AND id >= ?",
+                (job_id, session_id, msg_id),
+            )
+        else:
+            # 旧数据无 session_id：只删同 job 且 session 为空的后续
+            conn.execute(
+                "DELETE FROM job_chats WHERE job_id = ? AND id >= ? "
+                "AND (session_id IS NULL OR session_id = '')",
+                (job_id, msg_id),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -144,6 +163,17 @@ def _delete_chat_from(job_id, msg_id):
 
 def _sse(obj):
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+
+
+def _parse_json(value, default):
+    if not value:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _truncate(text, max_len, tail=0):
@@ -186,7 +216,7 @@ def _build_messages(original_ctx, result_ctx, history, question, search_text, re
 # ============ 会话 CRUD ============
 
 @router.get("/{job_id}/chat/sessions")
-async def list_sessions(job_id: str):
+def list_sessions(job_id: str):
     conn = get_connection()
     try:
         rows = conn.execute(
@@ -202,7 +232,7 @@ async def list_sessions(job_id: str):
 
 
 @router.post("/{job_id}/chat/sessions")
-async def create_session(job_id: str, body: SessionCreate):
+def create_session(job_id: str, body: SessionCreate):
     job = get_job(job_id)
     if not job:
         return JSONResponse(status_code=404, content={"detail": "任务不存在"})
@@ -221,7 +251,7 @@ async def create_session(job_id: str, body: SessionCreate):
 
 
 @router.put("/{job_id}/chat/sessions/{session_id}")
-async def rename_session(job_id: str, session_id: str, body: SessionRename):
+def rename_session(job_id: str, session_id: str, body: SessionRename):
     title = (body.title or "").strip()
     if not title:
         return JSONResponse(status_code=400, content={"detail": "标题不能为空"})
@@ -238,7 +268,7 @@ async def rename_session(job_id: str, session_id: str, body: SessionRename):
 
 
 @router.delete("/{job_id}/chat/sessions/{session_id}")
-async def delete_session(job_id: str, session_id: str):
+def delete_session(job_id: str, session_id: str):
     conn = get_connection()
     try:
         conn.execute("DELETE FROM job_chats WHERE job_id = ? AND session_id = ?", (job_id, session_id))
@@ -250,7 +280,7 @@ async def delete_session(job_id: str, session_id: str):
 
 
 @router.delete("/{job_id}/chat/sessions/{session_id}/messages")
-async def clear_session_messages(job_id: str, session_id: str):
+def clear_session_messages(job_id: str, session_id: str):
     conn = get_connection()
     try:
         conn.execute("DELETE FROM job_chats WHERE job_id = ? AND session_id = ?", (job_id, session_id))
@@ -261,7 +291,7 @@ async def clear_session_messages(job_id: str, session_id: str):
 
 
 @router.get("/{job_id}/chat/sessions/{session_id}/history")
-async def get_session_history(job_id: str, session_id: str):
+def get_session_history(job_id: str, session_id: str):
     conn = get_connection()
     try:
         rows = conn.execute(
@@ -272,7 +302,7 @@ async def get_session_history(job_id: str, session_id: str):
         messages = []
         for r in rows:
             try:
-                sources = json.loads(r["sources"]) if r["sources"] else []
+                sources = _parse_json(r["sources"], [])
             except Exception:
                 sources = []
             messages.append({
@@ -281,7 +311,7 @@ async def get_session_history(job_id: str, session_id: str):
                 "content": r["content"],
                 "thinking": r["thinking"] or "",
                 "sources": sources,
-                "token_usage": json.loads(r["token_usage"]) if r["token_usage"] else {},
+                "token_usage": _parse_json(r["token_usage"], {}),
                 "created_at": str(r["created_at"]),
             })
         return {"job_id": job_id, "session_id": session_id, "messages": messages}
@@ -290,7 +320,7 @@ async def get_session_history(job_id: str, session_id: str):
 
 
 @router.get("/{job_id}/chat/history")
-async def get_legacy_chat_history(job_id: str):
+def get_legacy_chat_history(job_id: str):
     """兼容旧版单会话聊天历史接口。新前端应使用 session history。"""
     job = get_job(job_id)
     if not job:
@@ -501,12 +531,12 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
 # ============ 单条消息删除 ============
 
 @router.delete("/{job_id}/chat/{msg_id}")
-async def delete_chat_message(job_id: str, msg_id: int):
+def delete_chat_message(job_id: str, msg_id: int):
     _delete_chat_message(job_id, msg_id)
     return {"message": "已删除该消息"}
 
 
 @router.delete("/{job_id}/chat/from/{msg_id}")
-async def delete_chat_from_endpoint(job_id: str, msg_id: int):
+def delete_chat_from_endpoint(job_id: str, msg_id: int):
     _delete_chat_from(job_id, msg_id)
     return {"message": "已删除该消息及其后续"}

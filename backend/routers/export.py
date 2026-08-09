@@ -3,6 +3,7 @@ YouTube Tool V2 - 导出路由 (Word/PDF/HTML/TXT)
 将AI结果导出为4种格式，文件保存在data/exports/目录
 """
 import asyncio
+import html
 import logging
 import re
 from datetime import datetime
@@ -61,18 +62,18 @@ def _md_to_html(md_text: str, title: str = "") -> str:
     """将Markdown转为HTML页面（带样式）"""
     try:
         from markdown_it import MarkdownIt
-        md_parser = MarkdownIt("commonmark", {"html": True}).enable("table")
+        md_parser = MarkdownIt("commonmark", {"html": False}).enable("table")
         body_html = md_parser.render(md_text)
     except ImportError:
         # fallback: 简单转义
-        body_html = f"<pre>{md_text}</pre>"
+        body_html = f"<pre>{html.escape(md_text)}</pre>"
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{title or 'AI Summary'}</title>
+<title>{html.escape(title or 'AI Summary')}</title>
 <style>
 body {{
     font-family: "Noto Sans SC", "Microsoft YaHei", sans-serif;
@@ -99,7 +100,7 @@ a {{ color: #1a73e8; }}
 </style>
 </head>
 <body>
-<h1>{title or 'AI Summary'}</h1>
+<h1>{html.escape(title or 'AI Summary')}</h1>
 {body_html}
 </body>
 </html>"""

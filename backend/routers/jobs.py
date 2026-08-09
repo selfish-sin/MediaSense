@@ -1,11 +1,13 @@
 """
 YouTube Tool V2 - 任务路由
 """
+import asyncio
 import re
 import logging
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, UploadFile, File, Query, Request
 from typing import Optional
+from urllib.parse import urlparse
 
 from models.schemas import (
     JobCreate, JobSubmitResponse, JobListResponse,
@@ -85,6 +87,7 @@ ALLOWED_UPLOAD_EXTS = {
     '.mp4', '.mkv', '.webm', '.avi', '.mov', '.wmv', '.flv',
     '.txt', '.md', '.srt', '.vtt',
 }
+MAX_UPLOAD_SIZE = 2 * 1024**3  # 2GB 上传上限
 STAGED_UPLOAD_PATTERN = re.compile(r'^[0-9a-f]{8}_.+')
 REPARSE_POINT = 0x400
 ACTIVE_JOB_STATUSES = {'pending', 'downloading', 'transcribing', 'preview', 'summarizing'}
@@ -140,8 +143,16 @@ async def upload_file(file: UploadFile = File(...)):
     dest_path = UPLOAD_DIR / safe_name
 
     try:
+        written = 0
         with open(str(dest_path), 'xb') as f:
-            shutil.copyfileobj(file.file, f)
+            while chunk := await file.read(1024 * 1024):
+                written += len(chunk)
+                if written > MAX_UPLOAD_SIZE:
+                    raise HTTPException(status_code=413, detail=f"文件超过 {MAX_UPLOAD_SIZE // (1024**3)}GB 上限")
+                f.write(chunk)
+    except HTTPException:
+        dest_path.unlink(missing_ok=True)
+        raise
     except Exception:
         dest_path.unlink(missing_ok=True)
         raise
@@ -177,6 +188,13 @@ async def submit_job(job: JobCreate):
 
     if job.input_url:
         job.input_url = extract_single_url(job.input_url)
+
+    if job.input_type.value == 'url':
+        parsed = urlparse((job.input_url or '').strip())
+        if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+            raise HTTPException(status_code=400, detail='请输入有效的 http/https 视频 URL')
+    elif job.input_type.value == 'text' and not (job.input_text or '').strip():
+        raise HTTPException(status_code=400, detail='文本内容不能为空')
 
     # URL 去重检查（force_new 模式下跳过）
     if job.input_url and not job.force_new:
@@ -231,7 +249,11 @@ async def submit_job(job: JobCreate):
 
 
 @router.get("", response_model=JobListResponse)
-async def list_jobs(status: Optional[str] = None, limit: int = 50, offset: int = 0):
+async def list_jobs(
+    status: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=1_000_000),
+):
     """获取任务列表"""
     jobs, total = get_jobs(status=status, limit=limit, offset=offset)
     return JobListResponse(jobs=jobs, total=total)
@@ -409,17 +431,35 @@ async def retry_job(job_id: str, force: bool = Query(False, description="强制�
     if is_job_running(job_id):
         raise HTTPException(status_code=409, detail="旧任务仍在停止中，请稍后再重试")
 
-    # force 模式：清理已有文件
+    # force 模式：清理已有文件（保留文件任务的输入文件）
     cleared = []
     if force:
         job_dir = DOWNLOAD_DIR / job_id
         if job_dir.exists():
             import shutil
+            # ★ 文件任务：备份输入文件，rmtree 后恢复（否则重试必崩）
+            input_file_path = job.get('input_file', '')
+            backup_path = None
+            if input_file_path:
+                src = Path(input_file_path)
+                if src.exists() and src.is_file():
+                    backup_path = UPLOAD_DIR / f"retry_{job_id}_{src.name}"
+                    try:
+                        shutil.copy2(str(src), str(backup_path))
+                    except Exception:
+                        backup_path = None
             try:
                 shutil.rmtree(job_dir)
             except Exception as e:
                 logger.warning(f"清理文件失败（重试继续）: {job_dir} - {e}")
             job_dir.mkdir(parents=True, exist_ok=True)
+            if backup_path and backup_path.exists():
+                restored = job_dir / backup_path.name.split('_', 2)[-1]
+                try:
+                    backup_path.rename(restored)
+                    update_job(job_id, input_file=str(restored.resolve()))
+                except Exception:
+                    logger.warning(f"恢复输入文件失败: {backup_path}")
             cleared.append(f"已清理 {job_dir}")
 
     # 读取原任务参数
@@ -690,6 +730,9 @@ async def batch_submit(request: Request):
     #   用 Request 直接拿原始 JSON，避免 FastAPI dict 类型校验拒绝 list
     body = await request.json()
 
+    if not isinstance(body, (list, dict)):
+        raise HTTPException(status_code=400, detail='批量请求必须是 URL 数组或对象')
+
     # 兼容两种格式
     if isinstance(body, list):
         urls: List[str] = body
@@ -708,7 +751,16 @@ async def batch_submit(request: Request):
         do_translate = body.get("do_translate", False)
         do_subtitle = body.get("do_subtitle", False)
         preview_before_summary = body.get("preview_before_summary", True)
-        # ★ 模块化提示词：从顶层或 options.dimensions 提取
+
+    if not isinstance(urls, list):
+        raise HTTPException(status_code=400, detail='urls 必须是数组')
+    if not isinstance(opts, dict):
+        raise HTTPException(status_code=400, detail='options 必须是对象')
+    if len(urls) > 200:
+        raise HTTPException(status_code=413, detail='单次最多提交 200 个 URL')
+
+    if isinstance(body, dict):
+        # 模块化提示词：从顶层或 options.dimensions 提取
         dimensions = body.get("dimensions") or opts.get("dimensions")
 
     # ★ URL 去重 + 清洗（智能提取URL + 去空行 + 去重复，保持顺序）
@@ -910,7 +962,10 @@ async def search_transcripts(
 
 
 @router.get("/{job_id}/screenshots")
-async def get_screenshots(job_id: str, frame_count: int = 10):
+async def get_screenshots(
+    job_id: str,
+    frame_count: int = Query(10, ge=1, le=30),
+):
     """提取视频关键帧截图"""
     job = get_job(job_id)
     if not job:
@@ -936,7 +991,9 @@ async def get_screenshots(job_id: str, frame_count: int = 10):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     from services.screenshot import extract_keyframes
-    results = extract_keyframes(video_path, str(output_dir), frame_count=min(frame_count, 30))
+    results = await asyncio.to_thread(
+        extract_keyframes, video_path, str(output_dir), frame_count=frame_count
+    )
 
     return {
         "job_id": job_id,

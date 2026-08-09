@@ -258,6 +258,15 @@ class TestJobsRouter:
         resp = client.post("/api/jobs/batch-delete", json={"job_ids":["j1","j2"]})
         assert resp.status_code == 200
 
+    def test_batch_rejects_non_object_options(self, client):
+        resp = client.post("/api/jobs/batch", json={
+            "urls": ["https://example.com/video"],
+            "options": ["invalid"],
+        })
+
+        assert resp.status_code == 400
+        assert "options" in resp.json()["detail"]
+
 
 # ── Models ──
 class TestModelsRouter:

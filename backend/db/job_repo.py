@@ -399,8 +399,8 @@ def clear_jobs_by_status(status: str, delete_files: bool = True) -> int:
 
 
 def finish_job(job_id: str, success: bool, files: Optional[Dict] = None,
-               token_usage: Optional[Dict] = None, error: Optional[str] = None):
-    """完成/失败任务"""
+               token_usage: Optional[Dict] = None, error: Optional[str] = None) -> bool:
+    """完成/失败任务。返回是否成功写入终态（cancelled 保护命中时返回 False）。"""
     status = JobStatus.completed if success else JobStatus.failed
     update_data = {"status": status}
     if files:
@@ -417,6 +417,7 @@ def finish_job(job_id: str, success: bool, files: Optional[Dict] = None,
     else:
         # ★ 终态保护命中：任务已被用户取消（cancelled），收尾写入被拦截
         logger.info(f"任务 {job_id} 收尾写入被跳过（已处于 cancelled 终态，不被 {status} 覆盖）")
+    return updated
 
 
 def _row_to_dict(row) -> Dict[str, Any]:

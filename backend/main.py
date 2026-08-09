@@ -376,6 +376,10 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
         model = job.get('model', DEFAULT_MODEL)
         summary_type = job.get('summary_type', 'summary')
         input_url = job.get('input_url', '')
+        # ★ 清洗畸形URL（剪贴板可能带入截断BV片段等前缀垃圾）
+        if input_url:
+            from services.downloader import sanitize_input_url
+            input_url = sanitize_input_url(input_url)
         input_text = job.get('input_text', '')
         input_file = job.get('input_file', '')
         input_type = options.get('input_type', 'url')
@@ -829,6 +833,18 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             result['files']['translated_srt'] = str(cn_srt_path)
 
         # ===== 完成 =====
+        # ★ 取消竞态：收尾前再查一次；若已取消则不写结果、不推 success
+        if check_cancelled(job_id):
+            await emit_log(sio, job_id, '⏹ 用户取消处理（收尾阶段）')
+            update_job(job_id, status='cancelled', error='用户取消')
+            await _safe_emit('done', {
+                'job_id': job_id,
+                'success': False,
+                'error': '用户取消',
+                'cancelled': True,
+            })
+            return sem_state['held']
+
         # 如果 do_summary=False，把文本存到 result_text 供前端显示
         if not do_summary and not result.get('result_text') and txt_path:
             try:
@@ -836,8 +852,19 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                     result['result_text'] = f.read()
             except Exception:
                 pass
-        finish_job(job_id, success=True, files=result.get('files', {}),
-                   token_usage=result.get('token_usage', {}))
+        finished = finish_job(job_id, success=True, files=result.get('files', {}),
+                              token_usage=result.get('token_usage', {}))
+        if not finished:
+            # 终态保护：期间被取消 → 不写 result_text/历史，推取消 done
+            await emit_log(sio, job_id, '⏹ 任务已取消，跳过结果写入')
+            await _safe_emit('done', {
+                'job_id': job_id,
+                'success': False,
+                'error': '用户取消',
+                'cancelled': True,
+            })
+            return sem_state['held']
+
         update_job(job_id, title=result.get('title', title),
                    platform=result.get('platform', platform),
                    tags=result.get('tags', []),
