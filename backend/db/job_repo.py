@@ -84,21 +84,32 @@ def get_job(job_id: str) -> Optional[Dict[str, Any]]:
     return _row_to_dict(row)
 
 
-def get_jobs(status: Optional[str] = None, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
-    """获取任务列表"""
+def get_jobs(status: Optional[str] = None, limit: int = 50, offset: int = 0,
+             keyword: Optional[str] = None) -> List[Dict[str, Any]]:
+    """获取任务列表
+
+    keyword 非空时按 title / input_url 模糊匹配（LIKE 通配符 % _ 已转义）。
+    可与 status 叠加（AND）。
+    """
     conn = get_connection()
+    # 构造 WHERE 子句：status 和 keyword 可叠加
+    clauses = []
+    params: list = []
     if status:
-        rows = conn.execute(
-            "SELECT * FROM jobs WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (status, limit, offset)
-        ).fetchall()
-        total = conn.execute("SELECT COUNT(*) FROM jobs WHERE status = ?", (status,)).fetchone()[0]
-    else:
-        rows = conn.execute(
-            "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (limit, offset)
-        ).fetchall()
-        total = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+        clauses.append("status = ?")
+        params.append(status)
+    if keyword:
+        # 转义 LIKE 通配符，防 % _ 注入；用 ESCAPE '\' 声明转义字符
+        escaped = keyword.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        like = f"%{escaped}%"
+        clauses.append("(title LIKE ? ESCAPE '\\' OR input_url LIKE ? ESCAPE '\\')")
+        params.extend([like, like])
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = conn.execute(
+        f"SELECT * FROM jobs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        (*params, limit, offset)
+    ).fetchall()
+    total = conn.execute(f"SELECT COUNT(*) FROM jobs{where}", params).fetchone()[0]
     conn.close()
     return [_row_to_dict(r) for r in rows], total
 

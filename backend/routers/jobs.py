@@ -254,9 +254,10 @@ async def list_jobs(
     status: Optional[str] = None,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0, le=1_000_000),
+    keyword: Optional[str] = Query(None, description="按标题/URL 关键词过滤"),
 ):
-    """获取任务列表"""
-    jobs, total = get_jobs(status=status, limit=limit, offset=offset)
+    """获取任务列表（可按 status + keyword 过滤）"""
+    jobs, total = get_jobs(status=status, limit=limit, offset=offset, keyword=keyword)
     return JobListResponse(jobs=jobs, total=total)
 
 

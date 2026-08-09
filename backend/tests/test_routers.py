@@ -114,6 +114,14 @@ class TestJobsRouter:
         resp = client.get("/api/jobs")
         assert resp.status_code == 200
 
+    @patch("routers.jobs.get_jobs", return_value=([], 0))
+    def test_list_jobs_keyword_forwarded(self, mock_list, client):
+        """keyword 查询参数应透传给 get_jobs"""
+        resp = client.get("/api/jobs?keyword=深度学习")
+        assert resp.status_code == 200
+        mock_list.assert_called_once()
+        assert mock_list.call_args.kwargs.get("keyword") == "深度学习"
+
     @patch("routers.jobs.get_job", return_value=None)
     def test_get_job_404(self, mock_get, client):
         resp = client.get("/api/jobs/no")

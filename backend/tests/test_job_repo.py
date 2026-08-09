@@ -162,6 +162,42 @@ class TestGetJobs:
         assert total == 0
         assert len(jobs) == 0
 
+    def test_list_by_keyword_input_url(self):
+        """keyword 按 input_url 模糊匹配"""
+        create_job(input_type="url", input_url="https://youtube.com/watch?v=abc123")
+        create_job(input_type="url", input_url="https://bilibili.com/video/BVxyz")
+        jobs, total = get_jobs(keyword="youtube")
+        assert total == 1
+        assert "youtube" in jobs[0]["input_url"]
+
+    def test_list_by_keyword_title(self):
+        """keyword 按 title 模糊匹配"""
+        jid1 = create_job(input_type="url", input_url="https://a.com")
+        update_job(jid1, title="深度学习入门教程")
+        create_job(input_type="url", input_url="https://b.com")  # 无 title
+        jobs, total = get_jobs(keyword="深度学习")
+        assert total == 1
+        assert jobs[0]["id"] == jid1
+
+    def test_list_by_keyword_like_wildcard_escaped(self):
+        """LIKE 通配符 % _ 应被转义为字面量，不当通配符"""
+        create_job(input_type="url", input_url="https://a.com/50%_off")
+        create_job(input_type="url", input_url="https://b.com/normal")
+        # 搜 "%_%" —— 若未转义会匹配所有含任意字符的行；转义后只匹配字面含 % 的
+        jobs, total = get_jobs(keyword="%")
+        assert total == 1
+        assert "%" in jobs[0]["input_url"]
+
+    def test_list_by_keyword_with_status(self):
+        """keyword 与 status 可叠加（AND）"""
+        create_job(input_type="url", input_url="https://youtube.com/1")
+        create_job(input_type="url", input_url="https://youtube.com/2")
+        # 把第二个改成 completed
+        all_jobs, _ = get_jobs(keyword="youtube")
+        update_job(all_jobs[1]["id"], status="completed")
+        jobs, total = get_jobs(status="pending", keyword="youtube")
+        assert total == 1
+
 
 # ── get_running_jobs ──
 class TestGetRunningJobs:
