@@ -2,7 +2,8 @@ import MarkdownIt from 'markdown-it'
 
 // 创建 markdown-it 实例
 const md = new MarkdownIt({
-  html: true,       // 允许 HTML 标签
+  // AI 输出、转录文本和用户编辑内容都可能包含任意字符串，禁止原始 HTML。
+  html: false,
   linkify: true,    // 自动识别链接
   typographer: true, // 排版优化
   breaks: true,     // 换行转 <br>

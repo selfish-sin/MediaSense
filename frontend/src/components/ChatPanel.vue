@@ -3,7 +3,7 @@
     <template #header>
       <div class="chat-header">
         <span class="chat-title">
-          <el-icon style="margin-right: 4px; vertical-align: -2px;"><ChatDotRound /></el-icon>追问
+          <el-icon style="margin-right: 4px; vertical-align: -2px;"><MessageCircle /></el-icon>追问
         </span>
         <div class="chat-header-tools">
           <el-tooltip content="开启后，追问时会先通过智谱API联网搜索（与所选模型无关），结果带来源引用" placement="top">
@@ -51,11 +51,11 @@
       </el-select>
       <el-button size="small" :icon="Plus" @click="createSession" :disabled="streaming">新建</el-button>
       <el-button
-        size="small" text :icon="Edit" title="重命名当前对话"
+        size="small" text :icon="Pencil" title="重命名当前对话"
         :disabled="!activeSessionId || streaming" @click="renameSession"
       />
       <el-button
-        size="small" text type="danger" :icon="Delete" title="删除当前对话"
+        size="small" text type="danger" :icon="Trash2" title="删除当前对话"
         :disabled="!activeSessionId || streaming" @click="deleteSession"
       />
     </div>
@@ -96,7 +96,7 @@
 
           <!-- 思考过程 -->
           <div v-if="showThinking && msg.thinking" class="thinking-box">
-            <div class="thinking-label">💡 思考过程</div>
+            <div class="thinking-label"><el-icon :size="13" style="vertical-align: -2px;"><Sparkles /></el-icon> 思考过程</div>
             <pre class="thinking-text">{{ msg.thinking }}</pre>
           </div>
 
@@ -112,7 +112,7 @@
 
           <!-- 引用来源 -->
           <div v-if="msg.sources && msg.sources.length" class="sources-box">
-            <div class="sources-label">🔗 引用来源 ({{ msg.sources.length }})</div>
+            <div class="sources-label"><el-icon :size="13" style="vertical-align: -2px;"><Link /></el-icon> 引用来源 ({{ msg.sources.length }})</div>
             <div v-for="(s, i) in msg.sources" :key="i" class="source-item">
               <span class="source-index">{{ i + 1 }}.</span>
               <a :href="s.url" target="_blank" rel="noopener noreferrer" class="source-link">
@@ -177,7 +177,7 @@
 
 <script setup>
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
-import { ChatDotRound, Plus, Edit, Delete, ArrowDown } from '@element-plus/icons-vue'
+import { MessageCircle, Plus, Pencil, Trash2, ArrowDown, Sparkles, Link } from 'lucide-vue-next'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatApi } from '../utils/api'
 import { renderMarkdown } from '../utils/markdown'
@@ -427,7 +427,7 @@ async function onSend(overrideContent) {
           if (ev.assistant_id != null) assistant.id = ev.assistant_id
           if (ev.token_usage) assistant.token_usage = ev.token_usage
         } else if (ev.type === 'error') {
-          assistant.content = (assistant.content || '') + '\n\n⚠️ ' + (ev.message || '生成出错')
+          assistant.content = (assistant.content || '') + '\n\n**[错误]** ' + (ev.message || '生成出错')
         }
         scrollToBottom()
       },
@@ -446,7 +446,7 @@ async function onSend(overrideContent) {
         streaming.value = false
         activeMsg.value = null
         abortCtrl = null
-        assistant.content = (assistant.content || '') + '\n\n⚠️ ' + (err?.message || '网络错误')
+        assistant.content = (assistant.content || '') + '\n\n**[错误]** ' + (err?.message || '网络错误')
         ElMessage.error('追问失败: ' + (err?.message || '未知错误'))
         scrollToBottom()
       },
@@ -633,11 +633,11 @@ watch(
   transition: transform 0.12s, background 0.12s;
 }
 .rail-tick-user {
-  background: #6366f1;
+  background: var(--app-accent-1);
 }
 .rail-tick-active {
-  background: #818cf8;
-  border-color: #c7d2fe;
+  background: var(--app-accent-2);
+  border-color: var(--app-accent-1);
   transform: scale(1.5);
 }
 .rail-tick:hover {
@@ -675,7 +675,7 @@ watch(
   padding: 0;
   border: none;
   border-radius: 50%;
-  background: rgba(99, 102, 241, 0.85);
+  background: rgba(var(--app-accent-1-rgb), 0.85);
   color: #fff;
   cursor: pointer;
   display: flex;
@@ -687,7 +687,7 @@ watch(
   font-size: 12px;
 }
 .rail-bottom:hover {
-  background: #6366f1;
+  background: var(--app-accent-1);
 }
 .chat-row {
   margin: 10px 0;
@@ -707,13 +707,13 @@ watch(
   line-height: 1.65;
 }
 .bubble-user {
-  background: #409eff;
+  background: var(--app-accent-1);
   color: #fff;
 }
 .bubble-ai {
   background: rgba(255, 255, 255, 0.07);
   color: #e6e6e6;
-  border-left: 3px solid #6366f1;
+  border-left: 3px solid var(--app-accent-1);
 }
 .bubble-head {
   display: flex;
@@ -733,7 +733,7 @@ watch(
   color: #fff;
 }
 .ai-tag {
-  background: #6366f1;
+  background: var(--app-accent-1);
   color: #fff;
 }
 .token-tag {
@@ -753,15 +753,15 @@ watch(
   word-break: break-word;
 }
 .thinking-box {
-  background: rgba(99, 102, 241, 0.08);
-  border: 1px dashed rgba(99, 102, 241, 0.4);
+  background: rgba(var(--app-accent-1-rgb), 0.08);
+  border: 1px dashed rgba(var(--app-accent-1-rgb), 0.4);
   border-radius: 8px;
   padding: 8px 10px;
   margin-bottom: 8px;
 }
 .thinking-label {
   font-size: 12px;
-  color: #a5b4fc;
+  color: var(--app-accent-1);
   margin-bottom: 4px;
 }
 .thinking-text {
@@ -770,12 +770,12 @@ watch(
   word-break: break-word;
   font-size: 12.5px;
   line-height: 1.55;
-  color: #c7d2fe;
+  color: var(--app-thinking-text);
   max-height: 220px;
   overflow-y: auto;
 }
 .streaming-placeholder {
-  color: #818cf8;
+  color: var(--app-accent-1);
   font-style: italic;
 }
 .dot-flashing::after {
@@ -802,7 +802,7 @@ watch(
   gap: 4px;
 }
 .source-index {
-  color: #818cf8;
+  color: var(--app-accent-1);
 }
 .source-link {
   color: #60a5fa;
@@ -814,7 +814,7 @@ watch(
 }
 .streaming-hint {
   text-align: center;
-  color: #818cf8;
+  color: var(--app-accent-1);
   font-size: 13px;
   padding: 8px;
 }

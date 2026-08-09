@@ -8,6 +8,7 @@ const props = defineProps({
 })
 
 const loggedIn = ref(false)
+const sessdataExpired = ref(false)
 const showDialog = ref(false)
 const qrUrl = ref('')
 const qrKey = ref('')
@@ -19,6 +20,7 @@ async function checkStatus() {
   try {
     const res = await bilibiliApi.status()
     loggedIn.value = !!res.logged_in
+    sessdataExpired.value = !!(res.logged_in && res.sessdata_expired)
   } catch { /* ignore */ }
 }
 
@@ -111,9 +113,10 @@ onBeforeUnmount(() => { stopPolling() })
       </template>
       <template v-else-if="qrStatus === 'success'">
         <div class="qr-success">
-          <el-icon :size="48" color="#67C23A"><svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="currentColor"/></svg></el-icon>
+          <el-icon :size="48" :color="sessdataExpired ? '#E6A23C' : '#67C23A'"><svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="currentColor"/></svg></el-icon>
           <p>B站已登录</p>
-          <p style="font-size: 12px; color: #909399;">登录状态已持久化，无需重复扫码</p>
+          <p v-if="sessdataExpired" style="font-size: 12px; color: #E6A23C;">登录态已过期，AI字幕可能不可用，建议重新扫码</p>
+          <p v-else style="font-size: 12px; color: #909399;">登录状态已持久化，无需重复扫码</p>
         </div>
       </template>
       <template v-else-if="qrStatus === 'expired'">

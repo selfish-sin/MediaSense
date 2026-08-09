@@ -13,7 +13,7 @@ import { computed, watch, ref, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '../stores/settingsStore'
 import { summaryApi } from '../utils/api'
-import { Edit } from '@element-plus/icons-vue'
+import { Pencil, Check } from 'lucide-vue-next'
 
 const props = defineProps({
   modelValue: { type: Object, default: () => ({}) },
@@ -88,12 +88,21 @@ watch(() => selected.value, (cur) => {
   appliedRecipeKey.value = match ? match.key : ''
 }, { deep: true })
 
-function onRecipePick(key) {
-  const recipe = settings.recipes.find(r => r.key === key)
-  if (recipe) {
-    settings.applyRecipe(recipe)
-    appliedRecipeKey.value = key
+function onRecipePick(recipeOrKey) {
+  const recipe = typeof recipeOrKey === 'object' && recipeOrKey
+    ? recipeOrKey
+    : settings.recipes.find(r => r.key === recipeOrKey)
+  if (!recipe) return
+  // 写 store + 同步本组件 v-model（重新总结弹窗等独立 v-model 场景必需）
+  settings.applyRecipe(recipe)
+  if (recipe.dimensions) {
+    selected.value = { ...recipe.dimensions }
   }
+  appliedRecipeKey.value = recipe.key
+}
+
+function isUserRecipe(key) {
+  return key && String(key).startsWith('usr_')
 }
 
 // 跳转到模板页编辑配方
@@ -131,39 +140,40 @@ async function loadPreview() {
 
 <template>
   <div class="dimension-selector" :class="{ compact }">
-    <!-- 预设配方应用条（紧凑下拉，选即应用，不展开内容） -->
-    <div v-if="showRecipes && settings.recipes?.length" class="recipes-bar">
-      <span class="dim-label recipes-bar-label">预设配方</span>
-      <el-select
-        :model-value="appliedRecipeKey"
-        placeholder="选择预设配方，一键应用"
-        size="small"
-        filterable
-        style="flex: 1; min-width: 0;"
-        @change="onRecipePick"
-      >
-        <el-option
+    <!-- 预设配方：紧凑小卡片（点即应用） -->
+    <div v-if="showRecipes && settings.recipes?.length" class="recipes-block">
+      <div class="recipes-block-head">
+        <span class="dim-label recipes-bar-label">预设配方</span>
+        <span class="recipes-hint">点选即用</span>
+        <el-button
+          size="small"
+          text
+          type="primary"
+          title="到「模板」页编辑预设配方"
+          @click="goToTemplates"
+        >编辑</el-button>
+      </div>
+      <div class="recipes-mini-grid">
+        <button
           v-for="r in settings.recipes"
           :key="r.key"
-          :label="r.name"
-          :value="r.key"
+          type="button"
+          class="recipe-mini"
+          :class="{
+            applied: appliedRecipeKey === r.key,
+            'is-mine': isUserRecipe(r.key),
+          }"
+          :title="r.desc || r.name"
+          @click="onRecipePick(r)"
         >
-          <span style="float: left;">{{ r.name }}</span>
-          <span style="float: right; color: var(--app-text-secondary); font-size: 12px; margin-left: 12px;">
-            {{ r.desc || (r.key && r.key.startsWith('usr_') ? '自定义' : '内置') }}
-          </span>
-        </el-option>
-      </el-select>
-      <el-button
-        size="small"
-        text
-        type="primary"
-        title="到「模板」页编辑预设配方"
-        @click="goToTemplates"
-      >编辑</el-button>
+          <span class="recipe-mini-name">{{ r.name }}</span>
+          <span v-if="appliedRecipeKey === r.key" class="recipe-mini-mark"><el-icon :size="12"><Check /></el-icon></span>
+          <span v-else-if="isUserRecipe(r.key)" class="recipe-mini-badge">我的</span>
+        </button>
+      </div>
     </div>
 
-    <el-divider v-if="showRecipes && settings.recipes?.length" style="margin: 8px 0;" />
+    <el-divider v-if="showRecipes && settings.recipes?.length" style="margin: 10px 0 8px;" />
 
     <!-- 8 维度选择器 -->
     <div v-for="dim in dimensionList" :key="dim.key" class="dim-row">
@@ -182,7 +192,7 @@ async function loadPreview() {
           @click="selectModule(dim.key, m.key)"
         >
           <span class="module-name">{{ m.name }}</span>
-          <el-icon v-if="m.is_customized" class="customized-badge" title="此模块已在模板编辑器中自定义"><Edit /></el-icon>
+          <el-icon v-if="m.is_customized" class="customized-badge" title="此模块已在模板编辑器中自定义"><Pencil /></el-icon>
         </div>
         <!-- + 自定义按钮 -->
         <div
@@ -259,16 +269,102 @@ async function loadPreview() {
   gap: 8px;
 }
 
-.recipes-bar {
+.recipes-block {
+  margin-bottom: 2px;
+}
+.recipes-block-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 4px;
+  margin-bottom: 8px;
 }
 .recipes-bar-label {
   margin-bottom: 0;
   white-space: nowrap;
   flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--app-text-secondary);
+}
+.recipes-hint {
+  font-size: 10px;
+  color: var(--app-text-placeholder, #6b7085);
+}
+.recipes-block-head .el-button {
+  margin-left: auto;
+}
+.recipes-mini-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.recipe-mini {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  width: auto;
+  max-width: none;
+  padding: 4px 10px;
+  min-height: 26px;
+  border-radius: 999px;
+  border: 1px solid var(--app-border, #2a2d38);
+  background: var(--app-chip-bg, #2a2e3c);
+  color: var(--app-text-heading, #f3f4f8);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.25;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    background 0.15s,
+    box-shadow 0.15s,
+    transform 0.12s,
+    color 0.15s;
+  user-select: none;
+}
+.recipe-mini:hover {
+  border-color: rgba(var(--app-accent-1-rgb), 0.55);
+  background: var(--app-hover-bg, #242734);
+  color: var(--app-text-heading, #fff);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(var(--app-accent-1-rgb), 0.12);
+}
+.recipe-mini.applied {
+  border-color: transparent;
+  color: #fff;
+  background: linear-gradient(135deg, var(--app-accent-1), var(--app-accent-2));
+  box-shadow: 0 4px 14px rgba(var(--app-accent-1-rgb), 0.35);
+}
+.recipe-mini.is-mine:not(.applied) {
+  border-style: dashed;
+}
+.recipe-mini-name {
+  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+  max-width: none;
+}
+.recipe-mini-mark {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 800;
+}
+.recipe-mini-badge {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 1px 4px;
+  border-radius: 4px;
+  color: var(--app-text-secondary);
+  background: var(--app-card-bg, rgba(0, 0, 0, 0.15));
+  border: 1px solid var(--app-border);
 }
 .dim-label {
   font-size: 12px;

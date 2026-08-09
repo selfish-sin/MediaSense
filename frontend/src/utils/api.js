@@ -4,9 +4,8 @@ import axios from 'axios'
 const api = axios.create({
   baseURL: '/api',  // 开发时通过 Vite proxy 代理到后端
   timeout: 300000,  // 5分钟超时（下载/转录可能很久）
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  // 不设默认 Content-Type：axios 按 payload 自动识别
+  //   对象 → application/json，FormData → multipart/form-data + boundary
 })
 
 // 请求拦截器

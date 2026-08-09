@@ -1,3 +1,5 @@
+import { isActiveJobStatus } from './jobStatus'
+
 export const ACTIVE_JOB_STATUSES = Object.freeze([
   'pending',
   'downloading',
@@ -10,7 +12,7 @@ export function getJobActionModel(status) {
   if (status === 'preview') {
     return { primary: 'restore', primaryLabel: '继续确认', canCancel: true }
   }
-  if (ACTIVE_JOB_STATUSES.includes(status)) {
+  if (ACTIVE_JOB_STATUSES.includes(status) || isActiveJobStatus(status)) {
     return { primary: 'restore', primaryLabel: '查看进度', canCancel: true }
   }
   if (status === 'completed') {

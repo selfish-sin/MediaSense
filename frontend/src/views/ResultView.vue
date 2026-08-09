@@ -2,11 +2,12 @@
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, Search, Refresh, ChatDotRound, Loading, Plus } from '@element-plus/icons-vue'
+import { ArrowLeft, Search, RefreshCw, Loader2, Plus, FileText, Cpu, RefreshCcw } from 'lucide-vue-next'
 import { jobsApi, exportApi, chatApi } from '../utils/api'
 import { renderMarkdown } from '../utils/markdown'
 import { useModelStore } from '../stores/modelStore'
 import { buildRerunRoute, buildRestoreRoute, getJobActionModel } from '../utils/jobActions'
+import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
 import ResummarizeDialog from '../components/ResummarizeDialog.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 import {
@@ -73,28 +74,6 @@ const activeModel = computed(() => {
 })
 
 const renderedResult = computed(() => renderMarkdown(displayResult.value))
-
-const statusColors = {
-  pending: 'info',
-  downloading: 'warning',
-  transcribing: 'warning',
-  preview: 'warning',
-  summarizing: 'warning',
-  completed: 'success',
-  failed: 'danger',
-  cancelled: 'info',
-}
-
-const statusLabels = {
-  pending: '等待中',
-  downloading: '下载中',
-  transcribing: '转录中',
-  preview: '等待确认',
-  summarizing: '总结中',
-  completed: '已完成',
-  failed: '失败',
-  cancelled: '已取消',
-}
 
 async function loadJob() {
   const jobId = route.params.jobId
@@ -175,30 +154,25 @@ function onResummarizeSuccess(data) {
     resultSectionRef.value?.scrollIntoView({ behavior: 'smooth' })
   })
   
-  // 异步提交重新总结请求
+  // 异步提交重新总结请求（整包透传 dialog 的 dimensions/model/options）
   const jobId = route.params.jobId
-  jobsApi.summarize(jobId, {
-    summary_type: data.summary_type,
-    model: data.model,
-    options: {
-      word_count: data.word_count,
-      tone: data.tone,
-      format: data.format,
-      purpose: data.purpose,
-      custom_prompt: data.custom_prompt || '',
-    },
-  }).then(res => {
+  jobsApi.summarize(jobId, data).then(res => {
     // HTTP 返回后，结果已通过 socket 流式推送完毕
     if (res?.result_text) {
       job.value.result_text = res.result_text
-      job.value.summary_type = data.summary_type
+      if (data.summary_type) job.value.summary_type = data.summary_type
+      if (data.dimensions) job.value.dimensions = data.dimensions
     }
     isStreaming.value = false
     streamingText.value = ''
     // ★ 重新加载历史版本列表
     loadSummaryHistory()
   }).catch(err => {
-    ElMessage.error(`重新总结失败: ${err.response?.data?.detail || err.message}`)
+    const detail = err?.response?.data?.detail
+    const msg = Array.isArray(detail)
+      ? detail.map(d => d.msg || JSON.stringify(d)).join('; ')
+      : (detail || err.message)
+    ElMessage.error(`重新总结失败: ${msg}`)
     isStreaming.value = false
     streamingText.value = ''
   })
@@ -208,14 +182,17 @@ function onResummarizeSuccess(data) {
 onMounted(() => {
   loadJob()
 
-  // 监听流式 token
+  // 监听流式 token（done=true 时 token 是完整全文，必须覆盖而非追加）
   socketUnsubs.push(onAiToken((data) => {
     if (data.job_id === route.params.jobId && isStreaming.value) {
-      if (data.token) {
-        streamingText.value += data.token
-      }
       if (data.done) {
-        // 流式完成
+        const full = data.token || (Array.isArray(data.tokens) ? data.tokens.join('') : '')
+        if (full) streamingText.value = full
+      } else {
+        const pieces = Array.isArray(data.tokens)
+          ? data.tokens
+          : (data.token ? [data.token] : [])
+        if (pieces.length) streamingText.value += pieces.join('')
       }
     }
   }))
@@ -494,10 +471,13 @@ async function generateMindmap() {
 
     function renderNode(node, depth) {
       if (!node) return ''
+      const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[ch]))
       const indent = 20 * depth
       const color = colors[Math.min(depth, colors.length - 1)]
       let html = `<div style="margin-left:${indent}px;padding:4px 0;border-left:2px solid ${color};padding-left:8px;">`
-      html += `<div style="font-weight:600;font-size:${16-depth}px;color:${color};cursor:pointer;" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">${node.content || node.v || '●'}</div>`
+      html += `<div style="font-weight:600;font-size:${Math.max(12, 16-depth)}px;color:${color};cursor:pointer;" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">${escapeHtml(node.content || node.v || '●')}</div>`
       if (node.children && node.children.length) {
         html += `<div>${node.children.map(c => renderNode(c, depth + 1)).join('')}</div>`
       }
@@ -531,8 +511,8 @@ function switchToMindmapTab() {
       <h2 style="margin: 0; flex: 1; font-size: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
         {{ job?.title || '任务详情' }}
       </h2>
-      <el-tag v-if="job" :type="statusColors[job.status] || 'info'" size="small">
-        {{ statusLabels[job.status] || job.status }}
+      <el-tag v-if="job" :type="jobStatusTagType(job.status)" size="small" effect="dark">
+        {{ jobStatusLabel(job.status) }}
       </el-tag>
       <el-button
         v-if="taskAction.primary === 'restore' || taskAction.primary === 'resume'"
@@ -641,13 +621,13 @@ function switchToMindmapTab() {
         <div
           @click="mindmapTab = 'summary'"
           :style="{ padding: '8px 16px', cursor: 'pointer', fontWeight: mindmapTab === 'summary' ? 600 : 400, color: mindmapTab === 'summary' ? '#409eff' : '#909399', borderBottom: mindmapTab === 'summary' ? '2px solid #409eff' : '2px solid transparent', marginBottom: '-2px' }"
-        >📄 AI 总结</div>
+        ><el-icon style="vertical-align: -2px; margin-right: 4px;"><FileText /></el-icon>AI 总结</div>
         <div
           @click="switchToMindmapTab"
           :style="{ padding: '8px 16px', cursor: 'pointer', fontWeight: mindmapTab === 'mindmap' ? 600 : 400, color: mindmapTab === 'mindmap' ? '#409eff' : '#909399', borderBottom: mindmapTab === 'mindmap' ? '2px solid #409eff' : '2px solid transparent', marginBottom: '-2px' }"
-        >🧠 思维导图</div>
+        ><el-icon style="vertical-align: -2px; margin-right: 4px;"><Cpu /></el-icon>思维导图</div>
         <div style="flex: 1;" />
-        <el-button v-if="mindmapTab === 'mindmap' && !mindmapLoading && mindmapReady" size="small" type="primary" text @click="generateMindmap" style="margin-right: 8px;">🔄 重新生成</el-button>
+        <el-button v-if="mindmapTab === 'mindmap' && !mindmapLoading && mindmapReady" size="small" type="primary" text @click="generateMindmap" style="margin-right: 8px;"><el-icon style="vertical-align: -2px; margin-right: 4px;"><RefreshCcw /></el-icon>重新生成</el-button>
       </div>
 
       <!-- 工具栏 -->
@@ -670,10 +650,10 @@ function switchToMindmapTab() {
         <div style="flex: 1;" />
         <!-- 流式输出指示 -->
         <el-tag v-if="isStreaming" type="warning" size="small" effect="plain">
-          <el-icon class="is-loading" style="margin-right: 2px;"><Loading /></el-icon>
+          <el-icon class="is-loading" style="margin-right: 2px;"><Loader2 /></el-icon>
           AI 生成中...
         </el-tag>
-        <el-button size="small" type="warning" :icon="Refresh" @click="openResummarize" :disabled="isStreaming || job?.status !== 'completed'">
+        <el-button size="small" type="warning" :icon="RefreshCw" @click="openResummarize" :disabled="isStreaming || job?.status !== 'completed'">
           重新总结
         </el-button>
         <el-button size="small" type="primary" plain @click="goToWorkbench" :disabled="!canContinueInWorkbench && job?.status !== 'completed'">
@@ -695,17 +675,17 @@ function switchToMindmapTab() {
       <el-card v-if="displayResult || isStreaming || mindmapReady" shadow="never">
         <!-- 流式输出中但还没收到内容 -->
         <div v-if="isStreaming && !streamingText" style="text-align: center; padding: 40px; color: #909399;">
-          <el-icon class="is-loading" style="font-size: 24px;"><Loading /></el-icon>
+          <el-icon class="is-loading" style="font-size: 24px;"><Loader2 /></el-icon>
           <div style="margin-top: 8px;">AI 正在生成...</div>
         </div>
         <!-- Markdown 渲染 -->
         <!-- 思考过程（重总结流式时显示） -->
-        <div v-if="streamingThinking" style="margin-bottom: 12px; border: 1px dashed #6366f1; border-radius: 8px; background: rgba(99,102,241,0.06);">
-          <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; cursor: pointer;" @click="showThinking = !showThinking">
-            <span style="font-size: 13px; color: #a5b4fc;">AI 思考过程</span>
+        <div v-if="streamingThinking" class="streaming-thinking-box">
+          <div class="streaming-thinking-head" @click="showThinking = !showThinking">
+            <span class="streaming-thinking-label">AI 思考过程</span>
             <el-button size="small" text>{{ showThinking ? '收起' : '展开' }}</el-button>
           </div>
-          <pre v-if="showThinking" style="margin: 0; padding: 0 10px 10px; white-space: pre-wrap; word-break: break-word; font-size: 12.5px; line-height: 1.55; color: #c7d2fe; max-height: 300px; overflow-y: auto;">{{ streamingThinking }}</pre>
+          <pre v-if="showThinking" class="streaming-thinking-text">{{ streamingThinking }}</pre>
         </div>
 
         <div
@@ -718,13 +698,13 @@ function switchToMindmapTab() {
         <div v-else-if="mindmapTab === 'mindmap'" style="min-height: 400px; position: relative;">
           <div v-if="mindmapLoading" style="position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.85);">
             <div style="text-align: center; color: #909399;">
-              <el-icon class="is-loading" style="font-size: 24px;"><Loading /></el-icon>
+              <el-icon class="is-loading" style="font-size: 24px;"><Loader2 /></el-icon>
               <div style="margin-top: 8px;">正在生成思维导图...</div>
             </div>
           </div>
           <div ref="mindmapContainer" class="mindmap-container" style="width: 100%; height: 560px; overflow: auto; background: #fff; border-radius: 4px;">
             <div v-if="!mindmapReady && !mindmapLoading" style="text-align: center; padding: 40px; color: #909399;">
-              点击上方 <strong>🧠 思维导图</strong> 标签生成
+              点击上方 <strong><el-icon style="vertical-align: -2px;"><Cpu /></el-icon> 思维导图</strong> 标签生成
             </div>
           </div>
         </div>
@@ -788,6 +768,36 @@ function switchToMindmapTab() {
 .version-chip.active {
   border-color: #409eff;
   background: rgba(64, 158, 255, 0.15);
+}
+
+/* 流式思考过程 */
+.streaming-thinking-box {
+  margin-bottom: 12px;
+  border: 1px dashed var(--app-accent-1);
+  border-radius: 8px;
+  background: rgba(var(--app-accent-1-rgb), 0.06);
+}
+.streaming-thinking-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.streaming-thinking-label {
+  font-size: 13px;
+  color: var(--app-accent-1);
+}
+.streaming-thinking-text {
+  margin: 0;
+  padding: 0 10px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--app-thinking-text);
+  max-height: 300px;
+  overflow-y: auto;
 }
 
 /* 思维导图容器 */

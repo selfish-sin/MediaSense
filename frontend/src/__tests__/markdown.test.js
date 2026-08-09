@@ -36,6 +36,12 @@ describe('markdown utils', () => {
     expect(html).toContain('href')
   })
 
+  it('escapes raw HTML from untrusted result text', () => {
+    const html = renderMarkdown('<img src=x onerror=alert(1)>')
+    expect(html).not.toContain('<img')
+    expect(html).toContain('&lt;img')
+  })
+
   it('renderPlainText returns empty for falsy input', () => {
     expect(renderPlainText('')).toBe('')
     expect(renderPlainText(null)).toBe('')

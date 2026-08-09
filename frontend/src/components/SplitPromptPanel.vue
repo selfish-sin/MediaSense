@@ -1,12 +1,13 @@
 <script setup>
 /**
  * 总结配置卡片内部菜单（上下结构）
- * - 顶部：内部菜单栏（书签 tab）「维度预设」→「完全自定义」
- * - 维度预设顶部：预设配方卡片网格（点即应用，不展开内容）
+ * - 顶部：内部菜单栏「维度预设」→「完全自定义」
+ * - 维度预设顶部：预设配方小卡片（点即应用）
  */
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '../stores/settingsStore'
+import { Check } from 'lucide-vue-next'
 import DimensionSelector from './DimensionSelector.vue'
 import CustomPromptPanel from './CustomPromptPanel.vue'
 
@@ -16,17 +17,23 @@ const router = useRouter()
 const activeTab = ref('dimensions')
 const appliedRecipeKey = ref('')
 
+const DIM_KEYS = ['role', 'mode', 'content_type', 'rules', 'depth', 'output', 'tone', 'word_count']
+
 function switchTab(tab) {
   activeTab.value = tab
   if (tab !== 'custom') {
-    // 切回维度预设：关闭 fullOverride
     settings.toggleFullOverride(false)
   }
 }
 
 function onApplyRecipe(recipe) {
+  if (!recipe) return
   settings.applyRecipe(recipe)
   appliedRecipeKey.value = recipe.key
+  // 确保 v-model 维度与配方一致（applyRecipe 已写 store）
+  if (recipe.dimensions) {
+    settings.selectedDimensions = { ...recipe.dimensions }
+  }
 }
 
 function goTemplates() {
@@ -34,8 +41,24 @@ function goTemplates() {
 }
 
 function isUserRecipe(key) {
-  return key && key.startsWith('usr_')
+  return key && String(key).startsWith('usr_')
 }
+
+// 手动改维度时同步高亮：完全匹配某配方则点亮
+watch(
+  () => settings.selectedDimensions,
+  (cur) => {
+    if (!cur || !settings.recipes?.length) {
+      appliedRecipeKey.value = ''
+      return
+    }
+    const match = settings.recipes.find(
+      (r) => r.dimensions && DIM_KEYS.every((k) => (r.dimensions[k] || '') === (cur[k] || '')),
+    )
+    appliedRecipeKey.value = match ? match.key : ''
+  },
+  { deep: true, immediate: true },
+)
 </script>
 
 <template>
@@ -60,32 +83,37 @@ function isUserRecipe(key) {
 
     <!-- ── 维度预设 Tab ── -->
     <div v-if="activeTab === 'dimensions'" class="tab-content">
-      <!-- 预设配方卡片（点即应用，不展示内容） -->
+      <!-- 预设配方：紧凑小卡片 -->
       <div class="recipe-section">
         <div class="recipe-section-head">
           <span class="recipe-section-title">预设配方</span>
-          <el-button size="small" text type="primary" @click="goTemplates">编辑配方</el-button>
+          <span class="recipe-section-hint">点选即用</span>
+          <el-button size="small" text type="primary" class="recipe-edit-btn" @click="goTemplates">
+            编辑
+          </el-button>
         </div>
         <div v-if="!settings.recipes?.length" class="empty-hint">暂无预设配方</div>
         <div v-else class="recipes-grid">
-          <div
+          <button
             v-for="r in settings.recipes"
             :key="r.key"
-            class="recipe-card"
-            :class="{ applied: appliedRecipeKey === r.key }"
+            type="button"
+            class="recipe-mini"
+            :class="{
+              applied: appliedRecipeKey === r.key,
+              'is-mine': isUserRecipe(r.key),
+            }"
+            :title="r.desc || r.name"
             @click="onApplyRecipe(r)"
           >
-            <div class="recipe-head">
-              <span class="recipe-name">{{ r.name }}</span>
-              <el-tag v-if="appliedRecipeKey === r.key" type="success" size="small">已应用</el-tag>
-              <el-tag v-else-if="isUserRecipe(r.key)" size="small" type="info">我的</el-tag>
-            </div>
-            <div class="recipe-desc">{{ r.desc }}</div>
-          </div>
+            <span class="recipe-mini-name">{{ r.name }}</span>
+            <span v-if="appliedRecipeKey === r.key" class="recipe-mini-mark"><el-icon :size="12"><Check /></el-icon></span>
+            <span v-else-if="isUserRecipe(r.key)" class="recipe-mini-badge">我的</span>
+          </button>
         </div>
       </div>
 
-      <el-divider style="margin: 8px 0;" />
+      <el-divider style="margin: 10px 0 8px;" />
 
       <DimensionSelector
         v-model="settings.selectedDimensions"
@@ -104,7 +132,7 @@ function isUserRecipe(key) {
 .prompt-tabs-card {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 /* 内部菜单栏：书签样式 */
@@ -129,81 +157,135 @@ function isUserRecipe(key) {
 }
 .menu-item:hover {
   color: var(--app-text, #e0e0e0);
-  background: var(--app-hover-bg, rgba(255,255,255,0.03));
+  background: var(--app-hover-bg, rgba(255, 255, 255, 0.03));
 }
 .menu-item.active {
-  color: var(--app-text, #e0e0e0);
+  color: var(--app-accent-1);
   font-weight: 600;
-  border-bottom-color: #409eff;
+  border-bottom-color: var(--app-accent-1);
 }
 
 .tab-content {
-  min-height: 300px;
+  min-height: 280px;
 }
 
-/* ====== 预设配方卡片 ====== */
+/* ====== 预设配方：紧凑小卡片 ====== */
 .recipe-section {
-  margin-bottom: 2px;
+  margin-bottom: 0;
 }
 .recipe-section-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 4px;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 .recipe-section-title {
   font-size: 11px;
-  font-weight: 600;
-  color: var(--app-text);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--app-text-secondary);
 }
-.recipes-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 4px;
-}
-@media (max-width: 600px) {
-  .recipes-grid {
-    grid-template-columns: 1fr;
-  }
-}
-.recipe-card {
-  border: 1px solid var(--app-border, #2a2a2a);
-  border-radius: 5px;
-  padding: 5px 7px;
-  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
-  display: flex;
-  flex-direction: column;
-  cursor: pointer;
-}
-.recipe-card:hover {
-  border-color: #409eff;
-  box-shadow: 0 0 0 1px rgba(64, 158, 255, 0.15);
-}
-.recipe-card.applied {
-  border-color: #67c23a;
-  background: rgba(103, 194, 58, 0.04);
-}
-.recipe-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  margin-bottom: 2px;
-}
-.recipe-name {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--app-text, #e0e0e0);
-}
-.recipe-desc {
+.recipe-section-hint {
   font-size: 10px;
-  color: var(--app-text-secondary, #909399);
-  line-height: 1.3;
+  color: var(--app-text-placeholder, #6b7085);
 }
+.recipe-edit-btn {
+  margin-left: auto;
+  font-size: 12px !important;
+}
+
+.recipes-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+/* 小胶囊：宽度随文字，名称完整显示、尽量醒目 */
+.recipe-mini {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  width: auto;
+  max-width: none;
+  padding: 4px 10px;
+  min-height: 26px;
+  border-radius: 999px;
+  border: 1px solid var(--app-border, #2a2d38);
+  background: var(--app-chip-bg, #2a2e3c);
+  color: var(--app-text-heading, #f3f4f8);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.25;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    background 0.15s,
+    box-shadow 0.15s,
+    transform 0.12s,
+    color 0.15s;
+  user-select: none;
+}
+.recipe-mini:hover {
+  border-color: rgba(var(--app-accent-1-rgb), 0.55);
+  background: var(--app-hover-bg, #242734);
+  color: var(--app-text-heading, #fff);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(var(--app-accent-1-rgb), 0.12);
+}
+.recipe-mini:active {
+  transform: translateY(0);
+}
+.recipe-mini.applied {
+  border-color: transparent;
+  color: #fff;
+  background: linear-gradient(135deg, var(--app-accent-1), var(--app-accent-2));
+  box-shadow: 0 4px 14px rgba(var(--app-accent-1-rgb), 0.35);
+}
+.recipe-mini.applied:hover {
+  filter: brightness(1.05);
+  border-color: transparent;
+  color: #fff;
+}
+.recipe-mini.is-mine:not(.applied) {
+  border-style: dashed;
+}
+
+.recipe-mini-name {
+  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+  max-width: none;
+}
+.recipe-mini-mark {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 800;
+  opacity: 1;
+}
+.recipe-mini-badge {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 1px 4px;
+  border-radius: 4px;
+  color: var(--app-text-secondary);
+  background: var(--app-card-bg, rgba(0, 0, 0, 0.15));
+  border: 1px solid var(--app-border);
+}
+.recipe-mini.applied .recipe-mini-badge {
+  display: none;
+}
+
 .empty-hint {
   text-align: center;
-  padding: 24px 0;
+  padding: 12px 0;
   color: var(--app-text-secondary, #909399);
-  font-size: 13px;
+  font-size: 12px;
 }
 </style>

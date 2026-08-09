@@ -2,9 +2,9 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  CircleCheck, Clock, Delete, DocumentCopy, Files, List, Lock, Refresh,
-  Search, WarningFilled,
-} from '@element-plus/icons-vue'
+  CircleCheck, Clock, Trash2, Copy, Files, List, Lock, RefreshCw,
+  Search, TriangleAlert,
+} from 'lucide-vue-next'
 import { storageCleanupApi } from '../utils/api'
 
 const policy = reactive({
@@ -160,7 +160,7 @@ onBeforeUnmount(stopPolling)
       <div class='header-actions'>
         <el-tag :type='phaseType' effect='plain' size='large'>{{ phaseLabels[state.phase] || state.phase }}</el-tag>
         <el-button :loading='loading' :disabled='isBusy' @click='loadStatus'>
-          <el-icon><Refresh /></el-icon>刷新状态
+          <el-icon><RefreshCw /></el-icon>刷新状态
         </el-button>
       </div>
     </header>
@@ -185,7 +185,7 @@ onBeforeUnmount(stopPolling)
         <label><span>单次预算（GiB）</span><el-input-number v-model='maxBytesGiB' :min='1' :max='10240' :step='1' controls-position='right' /></label>
         <label class='toggle-field'><span>允许清理 URL 音频</span><el-switch v-model='policy.prune_url_audio' /></label>
       </div>
-      <div v-if='policy.prune_url_audio' class='policy-warning'><el-icon><WarningFilled /></el-icon>URL 音频清理已启用，仅会处理已有字幕且超过阈值的音频。</div>
+      <div v-if='policy.prune_url_audio' class='policy-warning'><el-icon><TriangleAlert /></el-icon>URL 音频清理已启用，仅会处理已有字幕且超过阈值的音频。</div>
     </section>
 
     <section class='summary-grid' aria-label='预览摘要'>
@@ -205,7 +205,7 @@ onBeforeUnmount(stopPolling)
         </div>
       </div>
       <el-button type='danger' :disabled='!canApply || !candidates.length' :loading='state.phase === "running"' @click='applyCleanup'>
-        <el-icon><Delete /></el-icon>确认并执行
+        <el-icon><Trash2 /></el-icon>确认并执行
       </el-button>
     </section>
 
@@ -262,7 +262,7 @@ onBeforeUnmount(stopPolling)
         </el-tab-pane>
 
         <el-tab-pane name='audit'>
-          <template #label><el-icon><DocumentCopy /></el-icon><span>审计 {{ state.audit?.length || 0 }}</span></template>
+          <template #label><el-icon><Copy /></el-icon><span>审计 {{ state.audit?.length || 0 }}</span></template>
           <el-empty v-if='!state.audit?.length' description='尚无清理审计记录' :image-size='72' />
           <el-table v-else :data='[...state.audit].reverse()' stripe height='440'>
             <el-table-column label='时间' width='180'><template #default='{ row }'>{{ formatDate(row.timestamp) }}</template></el-table-column>

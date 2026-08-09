@@ -6,7 +6,7 @@
  */
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Edit, Delete, Plus, Refresh, Document, Files } from '@element-plus/icons-vue'
+import { Pencil, Trash2, Plus, RefreshCw, FileText, Files } from 'lucide-vue-next'
 import { useSettingsStore } from '../stores/settingsStore'
 import { summaryApi, templatesApi } from '../utils/api'
 import DimensionSelector from '../components/DimensionSelector.vue'
@@ -388,7 +388,7 @@ async function applyLib(item) {
         </div>
 
         <div style="display: flex; justify-content: flex-end; margin: 12px 0;">
-          <el-button type="danger" :icon="Refresh" plain size="small" @click="handleResetAll">
+          <el-button type="danger" :icon="RefreshCw" plain size="small" @click="handleResetAll">
             清空所有模块覆盖
           </el-button>
         </div>
@@ -439,10 +439,10 @@ async function applyLib(item) {
                   <el-button size="small" @click="editingText = originalDefault; dirty = true" :disabled="!originalDefault">
                     恢复到默认文本
                   </el-button>
-                  <el-button v-if="isCustomized" size="small" type="danger" :icon="Delete" @click="handleReset">
+                  <el-button v-if="isCustomized" size="small" type="danger" :icon="Trash2" @click="handleReset">
                     删除覆盖
                   </el-button>
-                  <el-button size="small" type="primary" :icon="Edit" :loading="saving" @click="handleSave" :disabled="!dirty">
+                  <el-button size="small" type="primary" :icon="Pencil" :loading="saving" @click="handleSave" :disabled="!dirty">
                     保存
                   </el-button>
                 </div>
@@ -470,7 +470,7 @@ async function applyLib(item) {
             </template>
 
             <div v-else class="empty-hint">
-              <el-icon :size="40" color="#c0c4cc"><Document /></el-icon>
+              <el-icon :size="40" color="#c0c4cc"><FileText /></el-icon>
               <div style="margin-top: 12px; color: var(--app-text-secondary);">从左侧选择一个维度模块开始编辑</div>
             </div>
           </div>
@@ -503,8 +503,8 @@ async function applyLib(item) {
             <el-table-column label="操作" width="220" align="center">
               <template #default="{ row }">
                 <el-button size="small" type="primary" @click="applyLib(row)">应用</el-button>
-                <el-button size="small" :icon="Edit" @click="openEditLibDialog(row)" />
-                <el-button size="small" :icon="Delete" type="danger" @click="deleteLib(row)" />
+                <el-button size="small" :icon="Pencil" @click="openEditLibDialog(row)" />
+                <el-button size="small" :icon="Trash2" type="danger" @click="deleteLib(row)" />
               </template>
             </el-table-column>
           </el-table>

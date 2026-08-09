@@ -20,11 +20,11 @@ export default defineConfig({
     proxy: {
       // 开发时前端请求代理到后端
       '/api': {
-        target: 'http://localhost:7000',
+        target: 'http://localhost:7001',
         changeOrigin: true,
       },
       '/ws': {
-        target: 'http://localhost:7000',
+        target: 'http://localhost:7001',
         changeOrigin: true,
         ws: true,  // WebSocket proxy
       },

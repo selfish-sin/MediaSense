@@ -11,7 +11,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Check, Close, Plus, Delete, Edit } from '@element-plus/icons-vue'
+import { Check, X, Plus, Trash2, Pencil } from 'lucide-vue-next'
 import { useSettingsStore } from '../stores/settingsStore'
 import { templatesApi } from '../utils/api'
 
@@ -143,7 +143,7 @@ function previewText(p) {
     <div v-if="isActive" class="override-active-bar">
       <el-icon><Check /></el-icon>
       <span>已启用自定义提示词（覆盖维度拼装）</span>
-      <el-button size="small" text :icon="Close" @click="disableOverride" class="close-btn">关闭</el-button>
+      <el-button size="small" text :icon="X" @click="disableOverride" class="close-btn">关闭</el-button>
     </div>
 
     <!-- 编辑区 -->
@@ -168,7 +168,7 @@ function previewText(p) {
     <div class="library-section">
       <div class="library-header">
         <span class="library-title">提示词库</span>
-        <el-button text size="small" :icon="Edit" @click="editInTemplates">在模板中心管理</el-button>
+        <el-button text size="small" :icon="Pencil" @click="editInTemplates">在模板中心管理</el-button>
       </div>
 
       <div v-loading="libraryLoading" class="library-list">
@@ -191,8 +191,8 @@ function previewText(p) {
             <div class="lib-card-preview">{{ previewText(item.prompt) }}</div>
           </div>
           <div class="lib-card-actions" @click.stop>
-            <el-button text size="small" :icon="Edit" @click="editInTemplates" />
-            <el-button text size="small" :icon="Delete" type="danger" @click="deleteCard(item)" />
+            <el-button text size="small" :icon="Pencil" @click="editInTemplates" />
+            <el-button text size="small" :icon="Trash2" type="danger" @click="deleteCard(item)" />
           </div>
         </div>
       </div>

@@ -4,6 +4,7 @@ import {
   buildRestoreRoute,
   getJobActionModel,
 } from '../utils/jobActions'
+import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
 
 describe('job action model', () => {
   it('restores active tasks and preview tasks with distinct labels', () => {
@@ -32,5 +33,15 @@ describe('job action model', () => {
   it('builds unambiguous restore and rerun routes', () => {
     expect(buildRestoreRoute('job-1')).toEqual({ path: '/', query: { restore: 'job-1' } })
     expect(buildRerunRoute('job-2')).toEqual({ path: '/', query: { rerun: 'job-2' } })
+  })
+})
+
+describe('job status labels', () => {
+  it('uses unified Chinese labels across the app', () => {
+    expect(jobStatusLabel('pending')).toBe('排队中')
+    expect(jobStatusLabel('summarizing')).toBe('AI处理中')
+    expect(jobStatusLabel('preview')).toBe('待确认')
+    expect(jobStatusTagType('completed')).toBe('success')
+    expect(jobStatusTagType('failed')).toBe('danger')
   })
 })

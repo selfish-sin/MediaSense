@@ -4,17 +4,34 @@ import { useRouter, useRoute } from 'vue-router'
 import { useJobStore } from './stores/jobStore'
 import { useThemeStore } from './stores/themeStore'
 import BilibiliCard from './components/BilibiliCard.vue'
+import BackgroundPanel from './components/BackgroundPanel.vue'
 import {
-  HomeFilled, Document, Cpu, Setting, Expand, Fold, Collection, Switch,
-  Sunny, Moon, ArrowUp, ArrowDown, Files,
-} from '@element-plus/icons-vue'
+  Home, FileText, Cpu, ChevronsLeft, ChevronsRight, LayoutTemplate,
+  Database, Sun, Moon, ArrowUp, ArrowDown, Palette,
+} from 'lucide-vue-next'
 
 const router = useRouter()
 const route = useRoute()
 const jobStore = useJobStore()
 const theme = useThemeStore()
 
-const activeMenu = computed(() => route.path)
+const activeMenu = computed(() => {
+  // 结果页仍高亮「历史」更合理；工作台处理中高亮视频处理
+  if (route.path.startsWith('/result')) return '/history'
+  return route.path
+})
+
+/** 侧栏角标：有任务在跑时显示 */
+const hasLiveJob = computed(() => {
+  return jobStore.isProcessing || ['pending', 'downloading', 'transcribing', 'preview', 'summarizing'].includes(jobStore.jobStatus)
+})
+const liveJobLabel = computed(() => {
+  const map = {
+    pending: '排', downloading: '下', transcribing: '转',
+    preview: '确', summarizing: 'AI',
+  }
+  return map[jobStore.jobStatus] || '…'
+})
 
 const handleMenuSelect = (path) => {
   router.push(path)
@@ -25,6 +42,9 @@ const isCollapsed = ref(false)
 const isNarrow = ref(window.innerWidth < 760)
 const menuCollapsed = computed(() => isCollapsed.value || isNarrow.value)
 const sidebarWidth = computed(() => isNarrow.value ? '56px' : (isCollapsed.value ? '64px' : '200px'))
+
+// 背景设置抽屉
+const showBgPanel = ref(false)
 
 function updateViewport() {
   isNarrow.value = window.innerWidth < 760
@@ -58,47 +78,52 @@ function scrollToBottom() {
 </script>
 
 <template>
-  <el-container style="height: 100vh;">
+  <el-container class="app-shell">
     <!-- 侧边栏 -->
     <el-aside :width="sidebarWidth" class="app-sidebar">
-      <div style="padding: 16px 12px 8px; text-align: center;">
-        <span v-if="!menuCollapsed" class="app-title">
-          智能处理工作站
-        </span>
-        <span v-else class="app-title app-title-sm">
-          处理
-        </span>
+      <div class="app-brand">
+        <span v-if="!menuCollapsed" class="app-title">MediaSense</span>
+        <span v-else class="app-title app-title-sm">MS</span>
+        <span v-if="!menuCollapsed" class="app-subtitle">智能多媒体工作站</span>
       </div>
       <el-menu
         :default-active="activeMenu"
         :collapse="menuCollapsed"
         @select="handleMenuSelect"
-        style="border-right: none; flex: none; background: transparent;"
+        class="app-menu"
       >
-        <el-menu-item index="/">
-          <el-icon><HomeFilled /></el-icon>
-          <span>视频处理</span>
+        <el-menu-item index="/" :class="{ 'is-live-job': hasLiveJob }">
+          <span class="menu-icon-wrap">
+            <el-icon><Home /></el-icon>
+            <i v-if="hasLiveJob && menuCollapsed" class="menu-live-dot" aria-hidden="true" />
+          </span>
+          <template #title>
+            <span class="menu-label">视频处理</span>
+            <span v-if="hasLiveJob" class="menu-live-badge" :title="`任务进行中: ${jobStore.jobStatus}`">
+              {{ liveJobLabel }}
+            </span>
+          </template>
         </el-menu-item>
         <el-menu-item index="/history">
-          <el-icon><Document /></el-icon>
-          <span>历史记录</span>
+          <el-icon><FileText /></el-icon>
+          <template #title><span class="menu-label">历史记录</span></template>
         </el-menu-item>
         <el-menu-item index="/models">
           <el-icon><Cpu /></el-icon>
-          <span>模型管理</span>
+          <template #title><span class="menu-label">模型管理</span></template>
         </el-menu-item>
         <el-menu-item index="/templates">
-          <el-icon><Collection /></el-icon>
-          <span>模板管理</span>
+          <el-icon><LayoutTemplate /></el-icon>
+          <template #title><span class="menu-label">模板管理</span></template>
         </el-menu-item>
         <el-menu-item index="/storage">
-          <el-icon><Files /></el-icon>
-          <span>存储管理</span>
+          <el-icon><Database /></el-icon>
+          <template #title><span class="menu-label">存储管理</span></template>
         </el-menu-item>
       </el-menu>
-      <!-- 弹性空间，把底部三项推到底部 -->
+      <!-- 弹性空间，把底部项推到底部 -->
       <div style="flex: 1;" />
-      <!-- 底部三项：主题切换 / B站 / 折叠（纵向等宽） -->
+      <!-- 底部：主题切换 / 背景 / B站 / 折叠 -->
       <div class="sidebar-bottom">
         <button
           class="sidebar-action-btn"
@@ -106,12 +131,20 @@ function scrollToBottom() {
           :title="theme.theme === 'dark' ? '切换到日间模式' : '切换到夜间模式'"
         >
           <el-icon style="font-size: 16px;">
-            <Sunny v-if="theme.theme === 'dark'" />
+            <Sun v-if="theme.theme === 'dark'" />
             <Moon v-else />
           </el-icon>
           <span v-if="!menuCollapsed" class="sidebar-action-label">
             {{ theme.theme === 'dark' ? '日间' : '夜间' }}
           </span>
+        </button>
+        <button
+          class="sidebar-action-btn"
+          @click="showBgPanel = true"
+          title="桌面背景与配色"
+        >
+          <el-icon style="font-size: 16px;"><Palette /></el-icon>
+          <span v-if="!menuCollapsed" class="sidebar-action-label">背景</span>
         </button>
         <BilibiliCard :collapsed="menuCollapsed" />
         <button
@@ -121,7 +154,7 @@ function scrollToBottom() {
           :title="isCollapsed ? '展开侧栏' : '折叠侧栏'"
         >
           <el-icon style="font-size: 16px;">
-            <Fold v-if="!isCollapsed" /><Expand v-else />
+            <ChevronsLeft v-if="!isCollapsed" /><ChevronsRight v-else />
           </el-icon>
           <span v-if="!menuCollapsed" class="sidebar-action-label">{{ isCollapsed ? '展开' : '折叠' }}</span>
         </button>
@@ -145,109 +178,305 @@ function scrollToBottom() {
         <el-icon><ArrowDown /></el-icon>
       </button>
     </div>
+
+    <!-- 背景与配色设置抽屉 -->
+    <el-drawer
+      v-model="showBgPanel"
+      title="桌面背景与配色"
+      direction="rtl"
+      size="380px"
+      class="bg-drawer"
+    >
+      <BackgroundPanel />
+    </el-drawer>
   </el-container>
 </template>
 
 <style>
 /* ============ 主题 CSS 变量 ============ */
+/* 主色由 themeStore 动态写入 --app-accent-1/2 及 -rgb；此处为兜底默认值（午夜青蓝）。 */
 :root[data-theme="dark"] {
-  --app-bg: #141414;
-  --app-sidebar-bg: #1a1a1a;
-  --app-border: #2a2a2a;
-  --app-card-bg: #1e1e1e;
-  --app-card-header-border: #2a2a2a;
-  --app-input-bg: #252525;
-  --app-input-border: #333;
-  --app-text: #e0e0e0;
-  --app-text-heading: #e8e8e8;
-  --app-text-secondary: #909399;
-  --app-text-placeholder: #666;
-  --app-hover-bg: #2a2a2a;
-  --app-table-header-bg: #252525;
-  --app-scrollbar-track: #1a1a1a;
-  --app-scrollbar-thumb: #444;
-  --app-scrollbar-thumb-hover: #555;
-  --app-chip-bg: #545659;
-  --app-chip-border: #4c4d4f;
-  --app-chip-text: #e6e8eb;
-  --app-chip-hover-bg: #6a6d70;
-  --app-chip-active-bg: #409eff;
-  --app-preview-bg: #2d2f33;
-  --app-preview-text: #d6d8db;
-  --app-override-bar-bg: #3a2f1a;
+  --app-bg: #0b1120;
+  --app-dim-color: 11, 17, 32;
+  --app-sidebar-bg: linear-gradient(180deg, rgba(15, 23, 38, 0.86) 0%, rgba(11, 17, 32, 0.92) 100%);
+  --app-sidebar-solid: #0f1726;
+  --app-border: #1e2a3f;
+  --app-card-bg: #111b2e;
+  --app-card-header-border: #1e2a3f;
+  --app-card-glow: 0 8px 28px rgba(0, 0, 0, 0.42);
+  --app-input-bg: #16223a;
+  --app-input-border: #243352;
+  --app-text: #d6dee8;
+  --app-text-heading: #eef3f9;
+  --app-text-secondary: #8b9bb3;
+  --app-text-placeholder: #5c6b82;
+  --app-hover-bg: #18243c;
+  --app-table-header-bg: #16223a;
+  --app-scrollbar-track: #0b1120;
+  --app-scrollbar-thumb: #2a3a55;
+  --app-scrollbar-thumb-hover: #3d5174;
+  --app-chip-bg: #18243c;
+  --app-chip-border: #243352;
+  --app-chip-text: #d6dee8;
+  --app-chip-hover-bg: #1f2d48;
+  --app-chip-active-bg: var(--app-accent-1, #38bdf8);
+  --app-chip-active-soft: rgba(var(--app-accent-1-rgb, 56, 189, 248), 0.16);
+  --app-preview-bg: #16223a;
+  --app-preview-text: #b8c4d6;
+  --app-override-bar-bg: #2a2318;
   --app-override-bar-border: #5d4a2a;
-  --app-recipes-bg: #1f1f1f;
+  --app-recipes-bg: #0f1828;
+  --app-accent-1: #38bdf8;
+  --app-accent-2: #0ea5e9;
+  --app-accent-1-rgb: 56, 189, 248;
+  --app-accent-2-rgb: 14, 165, 233;
+  --app-accent: var(--app-accent-1);
+  --app-accent-rgb: var(--app-accent-1-rgb);
+  --app-log-bg: #08101d;
+  --app-log-text: #b8c4d6;
+  --app-log-time: #7dd3fc;
+  --app-log-border: #1a2538;
+  --app-log-line-border: #142033;
+  --app-code-bg: #16223a;
+  --app-code-text: #7dd3fc;
+  --app-progress-card-bg-a: #0f1828;
+  --app-progress-card-bg-b: #0d1b2e;
+  --app-progress-meter-bg: rgba(var(--app-accent-1-rgb, 56, 189, 248), 0.08);
+  --app-progress-track: #1a2538;
+  --app-search-hl-bg: #6b5e00;
+  --app-search-hl-text: #ffe066;
+  --app-search-hl-active-bg: #ff9900;
+  --app-search-hl-active-text: #111;
+  --app-thinking-bg: rgba(var(--app-accent-1-rgb, 56, 189, 248), 0.1);
+  --app-thinking-text: #bae6fd;
 }
 
 :root[data-theme="light"] {
-  --app-bg: #f5f7fa;
-  --app-sidebar-bg: #ffffff;
-  --app-border: #e4e7ed;
+  --app-bg: #f0f4fa;
+  --app-dim-color: 240, 244, 250;
+  --app-sidebar-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.9) 0%, rgba(244, 247, 252, 0.92) 100%);
+  --app-sidebar-solid: #ffffff;
+  --app-border: #dce4ee;
   --app-card-bg: #ffffff;
-  --app-card-header-border: #ebeef5;
+  --app-card-header-border: #e8eef6;
+  --app-card-glow: 0 8px 24px rgba(15, 23, 42, 0.08);
   --app-input-bg: #ffffff;
-  --app-input-border: #dcdfe6;
-  --app-text: #303133;
-  --app-text-heading: #303133;
-  --app-text-secondary: #909399;
-  --app-text-placeholder: #c0c4cc;
-  --app-hover-bg: #f5f7fa;
-  --app-table-header-bg: #f5f7fa;
-  --app-scrollbar-track: #f0f0f0;
-  --app-scrollbar-thumb: #c0c4cc;
-  --app-scrollbar-thumb-hover: #909399;
-  --app-chip-bg: #ecf0f5;
-  --app-chip-border: #c0c6cc;
-  --app-chip-text: #303133;
-  --app-chip-hover-bg: #e0e6ed;
-  --app-chip-active-bg: #409eff;
-  --app-preview-bg: #f5f7fa;
-  --app-preview-text: #606266;
-  --app-override-bar-bg: #fdf6ec;
+  --app-input-border: #cbd6e5;
+  --app-text: #1f2a3c;
+  --app-text-heading: #0f1a2c;
+  --app-text-secondary: #5c6b82;
+  --app-text-placeholder: #9ca8bc;
+  --app-hover-bg: #ebf1f9;
+  --app-table-header-bg: #f4f7fb;
+  --app-scrollbar-track: #ebeef3;
+  --app-scrollbar-thumb: #c2cddc;
+  --app-scrollbar-thumb-hover: #9cabc0;
+  --app-chip-bg: #ebf1f9;
+  --app-chip-border: #cbd6e5;
+  --app-chip-text: #2d3b52;
+  --app-chip-hover-bg: #dde6f2;
+  --app-chip-active-bg: var(--app-accent-1, #0ea5e9);
+  --app-chip-active-soft: rgba(var(--app-accent-1-rgb, 14, 165, 233), 0.1);
+  --app-preview-bg: #f4f7fb;
+  --app-preview-text: #4b5563;
+  --app-override-bar-bg: #fff8eb;
   --app-override-bar-border: #f5dab1;
-  --app-recipes-bg: #f8f9fb;
+  --app-recipes-bg: #f7fafd;
+  --app-accent-1: #0ea5e9;
+  --app-accent-2: #38bdf8;
+  --app-accent-1-rgb: 14, 165, 233;
+  --app-accent-2-rgb: 56, 189, 248;
+  --app-accent: var(--app-accent-1);
+  --app-accent-rgb: var(--app-accent-1-rgb);
+  --app-log-bg: #eef3f8;
+  --app-log-text: #2d3b52;
+  --app-log-time: #0ea5e9;
+  --app-log-border: #dce4ee;
+  --app-log-line-border: #e4ebf3;
+  --app-code-bg: #ebf1f9;
+  --app-code-text: #0369a1;
+  --app-progress-card-bg-a: #ffffff;
+  --app-progress-card-bg-b: #f0f9ff;
+  --app-progress-meter-bg: rgba(var(--app-accent-1-rgb, 14, 165, 233), 0.06);
+  --app-progress-track: #e4ebf3;
+  --app-search-hl-bg: #fef08a;
+  --app-search-hl-text: #713f12;
+  --app-search-hl-active-bg: #f59e0b;
+  --app-search-hl-active-text: #111;
+  --app-thinking-bg: #f0f9ff;
+  --app-thinking-text: #0369a1;
 }
 
-/* 全局 */
+/* ============ 全局背景层（图片 + 遮罩） ============ */
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   background: var(--app-bg);
   color: var(--app-text);
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.2s, color 0.2s;
+  position: relative;
+}
+/* 背景图片层 */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  background-image: var(--app-bg-image, none);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  filter: blur(var(--app-bg-blur, 0px));
+  transform: scale(1.04); /* 避免 blur 边缘透出 */
+}
+/* 遮罩层：让背景图不喧宾夺主，保证内容可读 */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background: rgba(var(--app-dim-color), 1);
+  opacity: calc(var(--app-bg-dim, 28) / 100);
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+
+.app-shell {
+  height: 100vh;
+  background: transparent;
 }
 
 .app-sidebar {
   background: var(--app-sidebar-bg);
+  background-color: var(--app-sidebar-solid);
   border-right: 1px solid var(--app-border);
   overflow: hidden;
   display: flex;
   flex-direction: column;
   transition: width 0.15s ease-out, background 0.2s, border-color 0.2s;
   will-change: width;
+  position: relative;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.app-sidebar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse 120% 40% at 50% -10%, rgba(var(--app-accent-1-rgb, 56, 189, 248), 0.18), transparent 70%);
+  opacity: 0.9;
 }
 /* 覆盖 Element Plus el-aside 默认 0.3s width transition */
 .el-aside.app-sidebar {
   transition: width 0.15s ease-out, background 0.2s, border-color 0.2s !important;
 }
 .app-main {
-  background: var(--app-bg);
+  background: transparent;
   color: var(--app-text);
 }
 
+.app-brand {
+  position: relative;
+  z-index: 1;
+  padding: 18px 14px 14px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: center;
+}
 .app-title {
-  font-size: 15px;
-  font-weight: 700;
-  background: linear-gradient(135deg, #6366f1, #a855f7);
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  background: linear-gradient(135deg, var(--app-accent-1, #38bdf8), var(--app-accent-2, #0ea5e9));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
 .app-title-sm {
-  font-size: 14px;
+  font-size: 15px;
+  letter-spacing: 0.08em;
+}
+.app-subtitle {
+  font-size: 10px;
+  color: var(--app-text-secondary);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  opacity: 0.85;
 }
 
-/* ============ 侧边栏底部三项（纵向等宽） ============ */
+.app-menu {
+  border-right: none !important;
+  flex: none;
+  background: transparent !important;
+  position: relative;
+  z-index: 1;
+  padding: 4px 8px;
+}
+.app-menu .el-menu-item {
+  border-radius: 10px !important;
+  margin: 2px 0;
+  height: 44px !important;
+  line-height: 44px !important;
+}
+.app-menu .el-menu-item.is-active {
+  background: linear-gradient(90deg, rgba(var(--app-accent-1-rgb, 56, 189, 248), 0.22), rgba(var(--app-accent-2-rgb, 14, 165, 233), 0.1)) !important;
+  color: var(--app-accent-1) !important;
+  box-shadow: inset 3px 0 0 var(--app-accent-1);
+}
+.menu-label {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+}
+.menu-icon-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+}
+.menu-live-dot {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 0 2px var(--app-sidebar-solid, #0f1726);
+  animation: live-badge-pulse 1.6s ease-out infinite;
+}
+.menu-live-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 6px;
+  margin-left: 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #fff;
+  background: linear-gradient(135deg, #22c55e, #16a34a);
+  box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.5);
+  animation: live-badge-pulse 1.6s ease-out infinite;
+}
+.app-menu .is-live-job:not(.is-active) {
+  color: var(--app-text) !important;
+}
+@keyframes live-badge-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.45); }
+  70% { box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+}
+
+/* ============ 侧边栏底部项（纵向等宽） ============ */
 .sidebar-bottom {
   display: flex;
   flex-direction: column;
@@ -286,9 +515,11 @@ body {
 
 /* 日间模式：移除 dark class 的影响，恢复 Element Plus 默认亮色 */
 :root[data-theme="light"] .el-card {
-  background: var(--app-card-bg) !important;
+  background: rgba(var(--app-dim-color), var(--app-card-opacity, 1)) !important;
   border-color: var(--app-border) !important;
   color: var(--app-text) !important;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 :root[data-theme="light"] .el-card__header {
   border-bottom-color: var(--app-card-header-border) !important;
@@ -299,32 +530,37 @@ body {
 
 /* 暗黑模式卡片 */
 :root[data-theme="dark"] .el-card {
-  background: var(--app-card-bg) !important;
+  background: rgba(var(--app-dim-color), var(--app-card-opacity, 1)) !important;
   border-color: var(--app-border) !important;
   color: var(--app-text) !important;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 :root[data-theme="dark"] .el-card__header {
   border-bottom-color: var(--app-card-header-border) !important;
 }
 
-/* 对话框 */
+/* 对话框 / 抽屉 */
 :root[data-theme="dark"] .el-dialog {
-  --el-dialog-bg-color: #1e1e1e;
+  --el-dialog-bg-color: #16223a;
 }
 :root[data-theme="dark"] .el-drawer {
-  --el-drawer-bg-color: #1e1e1e;
+  --el-drawer-bg-color: #0f1828;
 }
 :root[data-theme="light"] .el-dialog {
   --el-dialog-bg-color: #ffffff;
 }
+:root[data-theme="light"] .el-drawer {
+  --el-drawer-bg-color: #ffffff;
+}
 
 /* 表格 */
 :root[data-theme="dark"] .el-table {
-  --el-table-bg-color: #1e1e1e;
-  --el-table-tr-bg-color: #1e1e1e;
-  --el-table-header-bg-color: #252525;
-  --el-table-border-color: #2a2a2a;
-  --el-table-row-hover-bg-color: #2a2a2a;
+  --el-table-bg-color: #111b2e;
+  --el-table-tr-bg-color: #111b2e;
+  --el-table-header-bg-color: #16223a;
+  --el-table-border-color: #1e2a3f;
+  --el-table-row-hover-bg-color: #18243c;
 }
 
 /* 页面标题 */
@@ -366,17 +602,59 @@ h2, h3 { color: var(--app-text-heading) !important; }
   height: 44px;
   border-radius: 50%;
   border: none;
-  background: #6366f1;
+  background: linear-gradient(135deg, var(--app-accent-1, #38bdf8), var(--app-accent-2, #0ea5e9));
   color: #fff;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
-  transition: background 0.2s;
+  box-shadow: 0 6px 18px rgba(var(--app-accent-1-rgb, 56, 189, 248), 0.4);
+  transition: transform 0.15s, filter 0.15s;
 }
-.scroll-jump-btn:hover { background: #4f46e5; }
+.scroll-jump-btn:hover {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
 .scroll-jump-btn .el-icon { font-size: 18px; }
+
+/* 全局 Markdown（结果页等未 scoped 处也能用） */
+.markdown-body {
+  color: var(--app-text);
+  line-height: 1.75;
+}
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3 {
+  color: var(--app-text-heading);
+}
+.markdown-body code {
+  background: var(--app-code-bg);
+  color: var(--app-code-text);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.markdown-body pre {
+  background: var(--app-log-bg);
+  color: var(--app-log-text);
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--app-border);
+  overflow-x: auto;
+}
+.markdown-body blockquote {
+  border-left: 4px solid var(--app-accent-1);
+  color: var(--app-text-secondary);
+  padding-left: 14px;
+  margin: 8px 0;
+}
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--app-border);
+  padding: 8px 12px;
+}
+.markdown-body th {
+  background: var(--app-table-header-bg);
+}
 
 /* 分页 */
 .el-pagination {
@@ -386,8 +664,8 @@ h2, h3 { color: var(--app-text-heading) !important; }
 
 /* 标签/Tag */
 :root[data-theme="dark"] .el-tag {
-  --el-tag-bg-color: #252525;
-  --el-tag-border-color: #333;
+  --el-tag-bg-color: #16223a;
+  --el-tag-border-color: #243352;
 }
 
 /* el-menu 透明背景（继承侧边栏） */
@@ -399,31 +677,42 @@ h2, h3 { color: var(--app-text-heading) !important; }
 }
 :root[data-theme="dark"] .el-menu {
   --el-menu-bg-color: transparent;
-  --el-menu-text-color: #c0c4cc;
-  --el-menu-hover-bg-color: #2a2a2a;
-  --el-menu-active-color: #409eff;
+  --el-menu-text-color: #8b9bb3;
+  --el-menu-hover-bg-color: #18243c;
+  --el-menu-active-color: var(--app-accent-1, #38bdf8);
+}
+:root[data-theme="light"] .el-menu {
+  --el-menu-bg-color: transparent;
+  --el-menu-text-color: #5c6b82;
+  --el-menu-hover-bg-color: #ebf1f9;
+  --el-menu-active-color: var(--app-accent-1, #0ea5e9);
 }
 
 /* ============ 业务组件暗色主题 ============ */
 
 /* 批量任务进度面板 */
 :root[data-theme="dark"] .batch-panel {
-  background: #252525 !important;
-  border: 1px solid #333 !important;
+  background: #16223a !important;
+  border: 1px solid #243352 !important;
 }
 
 /* 思维导图 SVG */
 :root[data-theme="dark"] .mindmap-container {
-  background: #1a1a1a !important;
+  background: #0f1828 !important;
 }
 :root[data-theme="dark"] .mindmap-container svg {
-  background: #1a1a1a;
+  background: #0f1828;
 }
 /* markmap 节点文字强制亮色 */
 :root[data-theme="dark"] .markmap-container svg text {
-  fill: #e0e0e0 !important;
+  fill: #d6dee8 !important;
 }
 :root[data-theme="dark"] .markmap-container svg path {
-  stroke: #444 !important;
+  stroke: #2a3a55 !important;
+}
+
+/* 背景抽屉内边距 */
+.bg-drawer .el-drawer__body {
+  padding: 20px;
 }
 </style>

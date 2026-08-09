@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Loading, RefreshRight, View, Hide } from '@element-plus/icons-vue'
+import { RefreshCcw, Eye, EyeOff } from 'lucide-vue-next'
 import { useModelStore } from '../stores/modelStore'
 import { modelsApi } from '../utils/api'
 
@@ -225,8 +225,8 @@ onMounted(() => {
         <el-form-item label="API Key">
           <el-input v-model="form.api_key" :type="showApiKey ? 'text' : 'password'" placeholder="API密钥">
             <template #suffix>
-              <el-icon v-if="!showApiKey" style="cursor: pointer;" @click="showApiKey = true"><View /></el-icon>
-              <el-icon v-else style="cursor: pointer;" @click="showApiKey = false"><Hide /></el-icon>
+              <el-icon v-if="!showApiKey" style="cursor: pointer;" @click="showApiKey = true"><Eye /></el-icon>
+              <el-icon v-else style="cursor: pointer;" @click="showApiKey = false"><EyeOff /></el-icon>
             </template>
           </el-input>
         </el-form-item>
@@ -238,7 +238,7 @@ onMounted(() => {
             <el-input v-model="form.model_id" placeholder="API调用时的模型名" style="flex: 1;" />
             <el-tooltip content="从端点获取可用模型列表" placement="top">
               <el-button
-                :icon="RefreshRight"
+                :icon="RefreshCcw"
                 circle
                 size="small"
                 @click="fetchModelsFromForm"

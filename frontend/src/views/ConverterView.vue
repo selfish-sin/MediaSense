@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { UploadFilled, Download, Loading, CircleCheck, CircleClose, RefreshRight, InfoFilled } from '@element-plus/icons-vue'
+import { UploadCloud, Download, CircleCheck, CircleX, RefreshCcw, Info, FileText, Video, Music, Image, HelpCircle, ArrowLeftRight, X, Crosshair, Send, CheckCircle2, XCircle, TriangleAlert } from 'lucide-vue-next'
 
 // ============ 引擎状态 ============
 const engines = ref({ pandoc: false, ffmpeg: false, libreoffice: false, pillow: false })
@@ -59,11 +59,11 @@ function detectFileType(filename) {
   const vidExts = ['.mp4','.mkv','.webm','.avi','.mov','.flv','.gif','.ts','.m4v','.3gp']
   const audExts = ['.mp3','.wav','.aac','.ogg','.flac','.m4a','.opus','.wma']
   const imgExts = ['.png','.jpg','.jpeg','.webp','.bmp','.tiff']
-  if (docExts.includes(ext)) return { label: '文档', group: 'document', icon: '📄' }
-  if (vidExts.includes(ext)) return { label: '视频', group: 'video', icon: '🎬' }
-  if (audExts.includes(ext)) return { label: '音频', group: 'audio', icon: '🎵' }
-  if (imgExts.includes(ext)) return { label: '图片', group: 'image', icon: '🖼️' }
-  return { label: '未知', group: 'unknown', icon: '❓' }
+  if (docExts.includes(ext)) return { label: '文档', group: 'document', icon: 'document' }
+  if (vidExts.includes(ext)) return { label: '视频', group: 'video', icon: 'video' }
+  if (audExts.includes(ext)) return { label: '音频', group: 'audio', icon: 'audio' }
+  if (imgExts.includes(ext)) return { label: '图片', group: 'image', icon: 'image' }
+  return { label: '未知', group: 'unknown', icon: 'unknown' }
 }
 
 function clearFile() {
@@ -94,7 +94,7 @@ const outputGroups = computed(() => {
       { fmt: 'pdf',    name: 'PDF',            avail: engines.value.pandoc || engines.value.libreoffice, desc: '便携文档' },
       { fmt: 'xlsx',   name: 'Excel (.xlsx)',  avail: engines.value.libreoffice, desc: 'Microsoft Excel' },
     ].filter(f => f.avail)
-    if (docs.length) list.push({ label: '📄 文档格式', formats: docs })
+    if (docs.length) list.push({ label: '文档格式', icon: 'document', formats: docs })
   }
 
   if (g === 'video' || g === 'audio') {
@@ -108,7 +108,7 @@ const outputGroups = computed(() => {
         { fmt: 'gif',  name: 'GIF 动图',       avail: engines.value.ffmpeg, desc: '表情包/短动图' },
       ].filter(f => f.avail)
       if (vids.length) {
-        list.push({ label: '🎬 视频格式', formats: vids, hint: '同格式转换=压缩视频' })
+        list.push({ label: '视频格式', icon: 'video', formats: vids, hint: '同格式转换=压缩视频' })
       }
     }
     const auds = [
@@ -122,7 +122,7 @@ const outputGroups = computed(() => {
     ].filter(f => f.avail)
     if (auds.length) {
       const hint = g === 'video' ? '视频→音频=提取音频轨' : '同格式转换=改码率'
-      list.push({ label: '🎵 音频格式', formats: auds, hint })
+      list.push({ label: '音频格式', icon: 'audio', formats: auds, hint })
     }
   }
 
@@ -133,7 +133,7 @@ const outputGroups = computed(() => {
       { fmt: 'webp', name: 'WebP',         avail: engines.value.pillow, desc: '网页优化，体积小' },
       { fmt: 'bmp',  name: 'BMP',          avail: engines.value.pillow, desc: 'Windows 兼容' },
     ].filter(f => f.avail)
-    if (imgs.length) list.push({ label: '🖼️ 图片格式', formats: imgs, hint: '同格式转换=压缩图片' })
+    if (imgs.length) list.push({ label: '图片格式', icon: 'image', formats: imgs, hint: '同格式转换=压缩图片' })
   }
 
   return list
@@ -238,7 +238,7 @@ onMounted(() => {
 
 <template>
   <div style="max-width: 1000px; margin: 0 auto; padding: 24px;">
-    <h2 style="margin-top: 0; color: #e8e8e8;">🔀 万能格式转换器</h2>
+    <h2 style="margin-top: 0; color: #e8e8e8; display: flex; align-items: center; gap: 8px;"><el-icon><ArrowLeftRight /></el-icon> 万能格式转换器</h2>
     <p style="color: #999; margin-bottom: 20px;">本地引擎驱动：Pandoc · LibreOffice · FFmpeg · Pillow</p>
 
     <!-- 引擎状态 -->
@@ -254,12 +254,12 @@ onMounted(() => {
           border: '1px solid ' + (engines[key] ? '#2d5a2d' : '#4a2020'),
         }"
       >
-        <el-icon :size="14"><CircleCheck v-if="engines[key]" /><CircleClose v-else /></el-icon>
+        <el-icon :size="14"><CircleCheck v-if="engines[key]" /><CircleX v-else /></el-icon>
         {{ info.name }}
         <span style="opacity: 0.5; font-size: 11px;">{{ info.desc }}</span>
       </div>
       <el-button text size="small" @click="loadEngines" style="margin-left: auto;">
-        <el-icon><RefreshRight /></el-icon> 刷新
+        <el-icon><RefreshCcw /></el-icon> 刷新
       </el-button>
     </div>
 
@@ -284,9 +284,9 @@ onMounted(() => {
           :on-change="handleFileChange"
           accept="*"
         >
-          <el-icon :size="48" color="#818cf8"><UploadFilled /></el-icon>
+          <el-icon :size="48" color="var(--app-accent-1)"><UploadCloud /></el-icon>
           <div style="margin-top: 12px; color: #ccc; font-size: 15px;">
-            拖拽文件到此处 或 <em style="color: #818cf8; font-style: normal; font-weight: 600;">点击上传</em>
+            拖拽文件到此处 或 <em style="color: var(--app-accent-1); font-style: normal; font-weight: 600;">点击上传</em>
           </div>
           <div style="margin-top: 6px; color: #555; font-size: 12px; line-height: 1.8;">
             文档 (.md .docx .pdf .epub …)｜视频 (.mp4 .mkv .webm …)<br>
@@ -299,7 +299,13 @@ onMounted(() => {
       <div v-else>
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px;">
           <div style="display: flex; align-items: center; gap: 12px;">
-            <span style="font-size: 32px; line-height: 1;">{{ uploadedFile.type.icon }}</span>
+            <el-icon :size="32" style="line-height: 1;" color="var(--app-accent-1)">
+              <FileText v-if="uploadedFile.type.icon === 'document'" />
+              <Video v-else-if="uploadedFile.type.icon === 'video'" />
+              <Music v-else-if="uploadedFile.type.icon === 'audio'" />
+              <Image v-else-if="uploadedFile.type.icon === 'image'" />
+              <HelpCircle v-else />
+            </el-icon>
             <div>
               <div style="font-weight: 600; color: #e8e8e8; font-size: 15px;">{{ uploadedFile.name }}</div>
               <div style="font-size: 12px; color: #888;">
@@ -307,13 +313,16 @@ onMounted(() => {
               </div>
             </div>
           </div>
-          <el-button text type="danger" size="small" @click="clearFile">✕ 移除</el-button>
+          <el-button text type="danger" size="small" :icon="X" @click="clearFile">移除</el-button>
         </div>
 
         <!-- 目标格式选择 -->
         <div v-for="group in outputGroups" :key="group.label" style="margin-bottom: 16px;">
           <div style="display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px;">
-            <span style="font-size: 13px; color: #aaa;">{{ group.label }}</span>
+            <span style="font-size: 13px; color: #aaa; display: inline-flex; align-items: center; gap: 4px;">
+              <el-icon :size="14"><FileText v-if="group.icon === 'document'" /><Video v-else-if="group.icon === 'video'" /><Music v-else-if="group.icon === 'audio'" /><Image v-else-if="group.icon === 'image'" /></el-icon>
+              {{ group.label }}
+            </span>
             <span v-if="group.hint" style="font-size: 11px; color: #666;">— {{ group.hint }}</span>
           </div>
           <div style="display: flex; flex-wrap: wrap; gap: 6px;">
@@ -340,13 +349,13 @@ onMounted(() => {
 
         <!-- 选中的格式说明 -->
         <div v-if="selectedFormatInfo" style="margin-bottom: 16px; padding: 8px 12px; background: #252535; border-radius: 6px; display: flex; align-items: center; gap: 8px; font-size: 12px;">
-          <el-icon color="#818cf8" :size="14"><InfoFilled /></el-icon>
+          <el-icon color="var(--app-accent-1)" :size="14"><Info /></el-icon>
           <span style="color: #aaa;">目标格式：<b style="color: #e0e0e0;">{{ selectedFormatInfo.name }}</b> — {{ selectedFormatInfo.desc }}</span>
         </div>
 
         <!-- 同格式提示 -->
-        <div v-if="sameFormatHint" style="margin-bottom: 12px; padding: 6px 12px; background: #2a2a1a; border-radius: 6px; color: #facc15; font-size: 12px;">
-          💡 {{ sameFormatHint }}
+        <div v-if="sameFormatHint" style="margin-bottom: 12px; padding: 6px 12px; background: #2a2a1a; border-radius: 6px; color: #facc15; font-size: 12px; display: flex; align-items: center; gap: 6px;">
+          <el-icon :size="14"><TriangleAlert /></el-icon>{{ sameFormatHint }}
         </div>
 
         <!-- 质量选择 -->
@@ -371,10 +380,10 @@ onMounted(() => {
             :loading="converting"
             @click="startConvert"
           >
-            {{ converting ? '转换中，请稍候...' : '▶ 开始转换' }}
+            <el-icon v-if="!converting"><Send /></el-icon> {{ converting ? '转换中，请稍候...' : '开始转换' }}
           </el-button>
-          <span v-if="!selectedTarget" style="color: #888; font-size: 13px;">
-            👈 请先选择目标格式
+          <span v-if="!selectedTarget" style="color: #888; font-size: 13px; display: inline-flex; align-items: center; gap: 4px;">
+            <el-icon :size="14"><Crosshair /></el-icon> 请先选择目标格式
           </span>
         </div>
       </div>
@@ -384,7 +393,7 @@ onMounted(() => {
     <el-card v-if="result && result.success" shadow="never" style="border: 1px solid #2d5a2d;">
       <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
         <div style="display: flex; align-items: center; gap: 12px;">
-          <span style="font-size: 24px;">✅</span>
+          <el-icon :size="24" color="#4ade80"><CheckCircle2 /></el-icon>
           <div>
             <div style="font-weight: 700; color: #4ade80; font-size: 15px;">
               {{ result.input_name }} → {{ result.output_name }}
@@ -405,7 +414,7 @@ onMounted(() => {
     <!-- 转换错误 -->
     <el-card v-if="convertError" shadow="never" style="border: 1px solid #4a2020; margin-top: 16px;">
       <div style="display: flex; align-items: flex-start; gap: 8px; color: #f87171;">
-        <span style="font-size: 16px; margin-top: 1px;">❌</span>
+        <el-icon :size="16" style="margin-top: 1px;"><XCircle /></el-icon>
         <div>
           <div style="font-weight: 600; margin-bottom: 4px;">转换失败</div>
           <div style="font-size: 13px; opacity: 0.85; white-space: pre-wrap; word-break: break-all;">{{ convertError }}</div>
@@ -426,7 +435,7 @@ onMounted(() => {
   transition: all 0.2s;
 }
 .converter-upload :deep(.el-upload-dragger:hover) {
-  border-color: #818cf8;
+  border-color: var(--app-accent-1);
   background: #1e1e2e;
 }
 </style>

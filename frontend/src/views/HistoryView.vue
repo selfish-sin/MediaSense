@@ -2,7 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { View, Delete, Search } from '@element-plus/icons-vue'
+import { Eye, Trash2, Search } from 'lucide-vue-next'
 import { jobsApi } from '../utils/api'
 import {
   ACTIVE_JOB_STATUSES,
@@ -10,6 +10,7 @@ import {
   buildRestoreRoute,
   getJobActionModel,
 } from '../utils/jobActions'
+import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
 
 const router = useRouter()
 
@@ -19,28 +20,6 @@ const loading = ref(false)
 const page = ref(1)
 const pageSize = ref(20)
 const selectedJobs = ref([])  // 多选勾中的任务
-
-const statusColors = {
-  pending: 'info',
-  downloading: 'warning',
-  transcribing: 'warning',
-  preview: 'warning',
-  summarizing: 'warning',
-  completed: 'success',
-  failed: 'danger',
-  cancelled: 'info',
-}
-
-const statusLabels = {
-  pending: '等待中',
-  downloading: '下载中',
-  transcribing: '转录中',
-  preview: '等待确认',
-  summarizing: '总结中',
-  completed: '已完成',
-  failed: '失败',
-  cancelled: '已取消',
-}
 
 async function loadJobs() {
   loading.value = true
@@ -179,9 +158,17 @@ function clearSearch() {
 }
 
 function highlightText(text, q) {
-  if (!q) return text
-  const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return text.replace(new RegExp(escaped, 'gi'), (m) => `<mark class="search-highlight">${m}</mark>`)
+  const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[ch]))
+  const source = String(text ?? '')
+  if (!q) return escapeHtml(source)
+  const escaped = String(q).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return source.split(new RegExp(`(${escaped})`, 'gi')).map((part, index) =>
+    index % 2 === 1
+      ? `<mark class="search-highlight">${escapeHtml(part)}</mark>`
+      : escapeHtml(part)
+  ).join('')
 }
 
 // ============ 重试 ============
@@ -391,8 +378,8 @@ onMounted(() => {
         <el-table-column prop="platform" label="平台" width="80" />
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
-            <el-tag :type="statusColors[row.status] || 'info'" size="small">
-              {{ statusLabels[row.status] || row.status }}
+            <el-tag :type="jobStatusTagType(row.status)" size="small" effect="dark">
+              {{ jobStatusLabel(row.status) }}
             </el-tag>
           </template>
         </el-table-column>
@@ -403,7 +390,7 @@ onMounted(() => {
         </el-table-column>
         <el-table-column label="操作" width="330" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" type="primary" link :icon="View" @click="handlePrimaryAction(row)">
+            <el-button size="small" type="primary" link :icon="Eye" @click="handlePrimaryAction(row)">
               {{ actionFor(row).primaryLabel }}
             </el-button>
             <el-button
@@ -424,7 +411,7 @@ onMounted(() => {
               size="small" type="danger" link
               @click="handleCancel(row.id)"
             >取消</el-button>
-            <el-button size="small" type="danger" link :icon="Delete" @click="handleDelete(row.id)">删除</el-button>
+            <el-button size="small" type="danger" link :icon="Trash2" @click="handleDelete(row.id)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
