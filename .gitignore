@@ -114,6 +114,7 @@ backend/uvicorn.err
 
 # Internal docs
 workspace.yaml
+_index.md
 
 backend/services/downloader_v2_temp.py
 backend/routers/books.py.deleted
