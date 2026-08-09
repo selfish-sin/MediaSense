@@ -88,3 +88,45 @@ AI 校正（`ai_correct`）是任务流水线里的可选步骤，用云端 LLM 
 - 展示选项 1：`ResultView.vue`（加 tab + 文件读取）、`api.js`（可能加 text 端点封装）、可能 `download.py`（加返回 text 的端点）。
 - 有效性方案 A：`ai_processor.py`（校验/分块/失败标记）、`main.py`（告警）、`test_ai_processor.py`（测试）。
 - 不改 DB schema（选项 1）。
+
+## 七、实现记录（2026-08-09 完成）
+
+### 用户最终确认的方案
+- 展示：选项 1（转录 tab + 原文/校正切换）
+- 预览覆盖：提示但编辑优先
+- 有效性：方案 A（全面加固）
+- ai_correct_model：加模型选择器
+- 执行：并行
+
+### 实际实现（5 切片）
+
+**切片1 — ai_processor.py 有效性加固**
+- 新增 `_count_markers`（统计时间戳+说话人标记）、`_split_by_boundary`（按行/标记边界分块，不硬切标记）
+- `correct_transcript` 加 4 项加固：①标记完整性校验（不一致回退原文）②长度异常检测（±30%告警不回退）③显式失败（stats 计数+告警）④边界分块
+- 签名改 4 元组 `(corrected, in_tok, out_tok, stats)`；空输入守卫
+- 单测 6 例（成功/失败回退/标记丢失/长度异常/空输入/多批）+ 辅助函数测试
+
+**切片2 — main.py 预览覆盖提示**
+- 预览确认时若 ai_correct 且用户编辑≠校正后文本，emit_log 告警"编辑已覆盖校正结果"（编辑优先不阻断）
+
+**切片3 — ai_correct_model 链路确认**
+- 后端链路完整（settingsStore→options JSON→create_job→main.py:629 `or model` 兜底），无断点
+- correction_stats 持久化：jobs 表新增 correction_stats 列（migration），update_job/_row_to_dict JSON 白名单纳入
+
+**切片4 — ResultView.vue 转录 tab**
+- mindmapTab 重构为 resultTab（summary/mindmap/transcript）
+- 转录 tab：原文/校正切换（el-radio-group）、校正统计告警、纯文本展示
+- do_summary=false 或无总结但有转录时默认落转录 tab
+- 通过 fetch /download/view 读 txt/txt_raw（FileResponse，前端 res.text() 取文本）
+
+**切片5 — HomeView.vue 校正模型选择器**
+- AI 校正开关旁加 el-select，v-model=ai_correct_model，留空用主模型
+
+### 验证
+- backend pytest: 370 全绿（新增 14 测试）
+- frontend vitest: 16 全绿
+- vite build: 成功
+
+### 偏离设计之处
+- 设计"不改 DB schema（选项1）"→ 实际加了 correction_stats 列。原因：校正统计需持久化供结果页展示"是否需人工复核"，不存库则刷新后丢失。属合理偏离，已记。
+- 设计疑虑"/download/view 返回格式"→ 确认 FileResponse 可用，前端 fetch + res.text() 取文本，无需新端点。

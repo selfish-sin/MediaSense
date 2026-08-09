@@ -57,5 +57,5 @@ python main.py
 - 运行数据默认落在 `backend/data`；服务重启不会继续执行内存中的 Python 任务，但会处理启动时的中断记录。
 - 治理基础设施（2026-08-09 bootstrap）：`.trellis/`（scripts/config/workflow/spec/tasks 已入库）+ CodeGraph 索引已 init（不入库）+ `.agents/skills/`（9 个 trellis skill 入库）。
 - 批量 URL 已修（2026-08-09，task 08-09-fix-batch-url-dedup 已归档）：`batch_submit` 读取 `force_new`（默认 True，与单 URL 路径对齐），裸 BV/短链经 `sanitize_input_url` 补全。
-- 历史搜索已修（2026-08-09，task 08-09-fix-history-search 已归档）：`get_jobs`/`list_jobs` 加 `keyword` 参数（`title`/`input_url` LIKE，`%`/`_` 转义），前端搜索框从转录全文搜索改接列表过滤；backend pytest 356 全绿。
-- 待办（已建档）：AI 校正展示与有效性——校正后文本与总结共用 `result_text` 字段导致结果页混在一起；校正逻辑有静默回退/无完整性校验/分块硬切/无测试隐患（task 08-09-fix-ai-correct-display-and-validity，待设计确认）。
+- 历史搜索已修（2026-08-09，task 08-09-fix-history-search 已归档）：`get_jobs`/`list_jobs` 加 `keyword` 参数（`title`/`input_url` LIKE，`%`/`_` 转义），前端搜索框从转录全文搜索改接列表过滤。
+- AI 校正展示与有效性已修（2026-08-09，task 08-09-fix-ai-correct-display-and-validity 已归档）：`correct_transcript` 加 4 项加固（标记完整性校验/长度异常检测/显式失败/边界分块），返回 4 元组含 stats；`correction_stats` 持久化到 jobs 表（新列）；`ResultView` 新增「转录文本」tab（原文/校正切换+校正统计告警），`do_summary=false` 时默认落转录 tab；`HomeView` 加校正模型选择器；backend pytest 370 全绿、frontend vitest 16 全绿。
