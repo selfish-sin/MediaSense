@@ -305,7 +305,7 @@ async def clear_jobs_by_status_endpoint(status: str):
         raise HTTPException(status_code=400, detail=f"不支持的状态: {status}，仅支持 completed/failed/cancelled")
     count = clear_jobs_by_status(status)
     labels = {"completed": "成功", "failed": "失败", "cancelled": "已取消"}
-    return SuccessResponse(message=f"已清空 {count} 个{labels.get(status, status)}任务")
+    return SuccessResponse(message=f"已清空 {count} 个{labels.get(status, status)}任务", data={"count": count})
 
 
 @router.post("/{job_id}/cancel")

@@ -92,6 +92,24 @@ async function handleClearByStatus(status, label) {
   }
 }
 
+// ★ 清空失败 + 取消的任务（用户要求一并清理）
+async function handleClearFailed() {
+  try {
+    await ElMessageBox.confirm('确认清空所有「失败/取消」任务？此操作不可恢复！', '警告', { type: 'error' })
+    const [r1, r2] = await Promise.all([
+      jobsApi.clearByStatus('failed'),
+      jobsApi.clearByStatus('cancelled'),
+    ])
+    const total = (r1.data?.count || 0) + (r2.data?.count || 0)
+    ElMessage.success(`已清空 ${total} 个失败/取消任务`)
+    await loadJobs()
+  } catch (err) {
+    if (err !== 'cancel') {
+      ElMessage.error(err.message)
+    }
+  }
+}
+
 function handlePageChange(p) {
   page.value = p
   selectedJobs.value = []
@@ -299,7 +317,7 @@ onMounted(() => {
       <h2 style="margin: 0;">任务历史</h2>
       <div style="display: flex; gap: 8px;">
         <el-button type="success" plain @click="handleClearByStatus('completed', '成功')">清空成功</el-button>
-        <el-button type="danger" plain @click="handleClearByStatus('failed', '失败')">清空失败</el-button>
+        <el-button type="danger" plain @click="handleClearFailed">清空失败/取消</el-button>
         <el-button type="danger" plain @click="handleClearAll">清空全部</el-button>
       </div>
     </div>
@@ -334,19 +352,17 @@ onMounted(() => {
 
       <el-table :data="jobs" v-loading="loading" stripe style="width: 100%;" :empty-text="searchQuery.trim() ? '未找到匹配的任务' : '暂无任务'" @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="40" />
-        <el-table-column prop="id" label="ID" width="80" />
-        <el-table-column prop="title" label="标题" min-width="200" show-overflow-tooltip />
-        <el-table-column prop="platform" label="平台" width="80" />
-        <el-table-column label="状态" width="100">
+        <el-table-column prop="title" label="标题" min-width="240" show-overflow-tooltip />
+        <el-table-column prop="platform" label="平台" width="90" />
+        <el-table-column label="状态" width="90">
           <template #default="{ row }">
             <el-tag :type="jobStatusTagType(row.status)" size="small" effect="dark">
               {{ jobStatusLabel(row.status) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="summary_type" label="类型" width="80" />
-        <el-table-column prop="model" label="模型" width="120" show-overflow-tooltip />
-        <el-table-column label="创建时间" width="160">
+        <el-table-column prop="model" label="模型" width="140" show-overflow-tooltip />
+        <el-table-column label="创建时间" width="170">
           <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="330" fixed="right">
