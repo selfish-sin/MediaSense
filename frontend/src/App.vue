@@ -562,6 +562,10 @@ body::after {
   --el-table-border-color: #1e2a3f;
   --el-table-row-hover-bg-color: #18243c;
 }
+/* ★ stripe 斑马纹行：贴合暗色背景，比奇数行略亮一点点（不突兀） */
+:root[data-theme="dark"] .el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
+  background-color: #141f33 !important;
+}
 
 /* 页面标题 */
 h2, h3 { color: var(--app-text-heading) !important; }
