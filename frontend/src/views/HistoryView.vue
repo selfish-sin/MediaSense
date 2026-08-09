@@ -322,9 +322,8 @@ onMounted(() => {
     </el-card>
 
     <!-- 任务列表（搜索时按 keyword 过滤） -->
-    <template>
-      <!-- 批量操作栏（选中任务时显示） -->
-      <div v-if="selectedJobs.length > 0" class="batch-toolbar">
+    <!-- 批量操作栏（选中任务时显示） -->
+    <div v-if="selectedJobs.length > 0" class="batch-toolbar">
         <span class="batch-toolbar__count">已选 {{ selectedJobs.length }} 项</span>
         <el-button size="small" type="warning" @click="handleBatchCancel">
           批量取消（{{ selectedJobs.filter(j => activeStatuses.includes(j.status)).length }}）
@@ -387,7 +386,6 @@ onMounted(() => {
         layout="prev, pager, next"
         @current-change="handlePageChange"
       />
-    </template>
   </div>
 </template>
 
