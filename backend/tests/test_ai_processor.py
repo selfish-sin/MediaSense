@@ -15,6 +15,7 @@ from services.ai_processor import (
     _record_token_usage,
     _save_checkpoint,
     _load_checkpoint,
+    _call_ai,
     generate_tags,
     generate_mindmap,
     correct_transcript,
@@ -310,3 +311,57 @@ class TestCorrectTranscript:
         assert stats['total_chunks'] == 2
         assert stats['failed_chunks'] == 0
         assert chunk1 in out and chunk2 in out
+
+
+# ── 流式 chunk 容错（回归：choices 空数组导致 list index out of range）──
+@pytest.mark.asyncio
+class TestCallAiEmptyChoicesChunk:
+    """部分 OpenAI 兼容接口（如阿里云 MaaS）在流式末尾发送 choices=[] 的 usage chunk，
+    旧代码 chunk.get('choices', [{}])[0] 会越界，导致已生成的内容全部丢失并返回失败哨兵"""
+
+    def _mock_cfg(self):
+        return {
+            "name": "test", "key": "glm", "model_id": "glm-4",
+            "endpoint": "https://api.example.com/v1/chat/completions",
+            "auth_type": "bearer", "api_key": "sk",
+            "temperature": 0.3, "max_tokens": 4096,
+        }
+
+    async def test_usage_chunk_with_empty_choices_does_not_crash(self):
+        async def fake_aiter_lines():
+            yield 'data: {"choices": [{"delta": {"content": "你好"}}]}'
+            yield 'data: {"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 2}}'
+            yield 'data: [DONE]'
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.aiter_lines = fake_aiter_lines
+        stream_cm = MagicMock()
+        stream_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.stream = MagicMock(return_value=stream_cm)
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            content, in_tok, out_tok = await _call_ai(self._mock_cfg(), "测试提示词")
+        # 内容完整保留，usage 被读到，而不是抛 list index out of range
+        assert content == "你好"
+        assert in_tok == 3
+        assert out_tok == 2
+
+    async def test_first_chunk_empty_choices_keeps_streaming(self):
+        async def fake_aiter_lines():
+            yield 'data: {"choices": []}'
+            yield 'data: {"choices": [{"delta": {"content": "后续内容"}}]}'
+            yield 'data: [DONE]'
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.aiter_lines = fake_aiter_lines
+        stream_cm = MagicMock()
+        stream_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.stream = MagicMock(return_value=stream_cm)
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            content, _, _ = await _call_ai(self._mock_cfg(), "测试提示词")
+        assert content == "后续内容"

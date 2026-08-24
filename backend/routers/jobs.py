@@ -14,6 +14,7 @@ from models.schemas import (
     JobResponse, SuccessResponse, JobStatus
 )
 from db.job_repo import create_job, get_job, get_jobs, get_running_jobs, delete_job, clear_jobs, clear_jobs_by_status, update_job, get_jobs_by_batch, get_batch_summary, find_job_by_url, save_summary_version, get_summary_history, get_summary_version, get_latest_summary_version, delete_jobs_batch, get_jobs_disk_info, claim_staged_upload, get_cleanup_jobs
+from db.model_repo import get_default_model_key
 from config import DOWNLOAD_DIR, DEFAULT_MODEL
 from services.downloader import sanitize_input_url
 
@@ -215,7 +216,7 @@ async def submit_job(job: JobCreate):
         input_url=job.input_url,
         input_text=job.input_text,
         input_file=str(staged_upload) if staged_upload else None,
-        model=job.model or DEFAULT_MODEL,
+        model=job.model or get_default_model_key(),
         summary_type=job.summary_type or "summary",
         options=job.options or {},
         do_summary=job.do_summary,
@@ -512,9 +513,10 @@ async def resummarize_job(job_id: str, body: dict):
     if not job:
         raise HTTPException(status_code=404, detail=f"任务 {job_id} 不存在")
 
-    # 检查job状态：必须是completed才能重新总结
-    if job['status'] != 'completed':
-        raise HTTPException(status_code=400, detail="只能对已完成的任务重新总结")
+    # 检查job状态：completed 或 failed（AI 阶段失败且保留转录文本）可重新总结，
+    # 仅重跑 AI 步骤，不重新下载/转录
+    if job['status'] not in ('completed', 'failed'):
+        raise HTTPException(status_code=400, detail="只能对已完成或失败（且保留转录文本）的任务重新总结")
 
     # 获取已有转录文本
     files = job.get('files') or {}
@@ -531,7 +533,7 @@ async def resummarize_job(job_id: str, body: dict):
 
     # 获取新参数
     summary_type = body.get('summary_type', job.get('summary_type', 'summary'))
-    model = body.get('model', job.get('model', DEFAULT_MODEL))
+    model = body.get('model') or job.get('model') or get_default_model_key()
     # Long-text auto-routing in resummarize: >=5000 chars -> deepseek
     if model == DEFAULT_MODEL and len(text_content) >= 5000:
         from db.model_repo import get_model_by_key
@@ -583,6 +585,11 @@ async def resummarize_job(job_id: str, body: dict):
             sio=sio, job_id=job_id, summary_options=summary_options,
             dimensions=dimensions,
         )
+
+        # ★ 契约检查（镜像 main.py）：AI 层失败返回 [处理失败: ...] 哨兵串时必须显式失败，
+        #   否则会被当作正常结果写盘并标记 completed
+        if isinstance(result_text, str) and result_text.lstrip().startswith('[处理失败'):
+            raise Exception(result_text.strip().strip('[]'))
 
         # 保存新结果文件
         result_md_path = txt_path.replace('.txt', f'__{summary_type}.md')
@@ -739,7 +746,7 @@ async def batch_submit(request: Request):
     if isinstance(body, list):
         urls: List[str] = body
         opts = {}
-        model = DEFAULT_MODEL
+        model = get_default_model_key()
         summary_type = "summary"
         do_summary, do_translate, do_subtitle = True, False, False
         preview_before_summary = True
@@ -748,7 +755,7 @@ async def batch_submit(request: Request):
     else:
         urls = body.get("urls", [])
         opts = body.get("options", {}) or {}
-        model = body.get("model", DEFAULT_MODEL)
+        model = body.get("model") or get_default_model_key()
         summary_type = body.get("summary_type", "summary")
         do_summary = body.get("do_summary", True)
         do_translate = body.get("do_translate", False)

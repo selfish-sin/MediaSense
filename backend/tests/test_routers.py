@@ -324,6 +324,60 @@ class TestJobsRouter:
         assert submitted_url.startswith("https://"), f"裸 BV 应被补全为完整 URL, got: {submitted_url}"
 
 
+# ── 重新总结（失败任务仅重跑 AI 步骤）──
+class TestResummarizeRouter:
+    def _job(self, tmp_path, status="failed"):
+        txt = tmp_path / "job.txt"
+        txt.write_text("这是转录文本内容", encoding="utf-8")
+        return {
+            "id": "j1", "status": status, "model": "m1", "summary_type": "summary",
+            "files": {"txt": str(txt)}, "options": {},
+            "result_text": None, "summary_version": 1, "tags": [], "token_usage": {},
+        }
+
+    @patch("routers.jobs.get_job")
+    @patch("routers.jobs.update_job")
+    def test_failed_job_can_resummarize(self, mock_update, mock_get, client, tmp_path):
+        mock_get.return_value = self._job(tmp_path, status="failed")
+        with patch("services.ai_processor.ai_process",
+                   new=AsyncMock(return_value=("结果内容", 10, 20))), \
+             patch("services.ai_processor.generate_tags", new=AsyncMock(return_value=["tag"])), \
+             patch("db.job_repo.save_summary_version", return_value=True), \
+             patch("main.sio", None):
+            resp = client.post("/api/jobs/j1/summarize", json={"model": "m1"})
+        assert resp.status_code == 200
+        assert resp.json()["result_text"] == "结果内容"
+        # 任务被标记回 completed
+        assert any(c.kwargs.get("status") == "completed" for c in mock_update.call_args_list)
+
+    @patch("routers.jobs.get_job")
+    @patch("routers.jobs.update_job")
+    def test_sentinel_failure_not_written_as_result(self, mock_update, mock_get, client, tmp_path):
+        """AI 层返回 [处理失败: ...] 哨兵串时不得写盘并标记 completed"""
+        mock_get.return_value = self._job(tmp_path, status="failed")
+        with patch("services.ai_processor.ai_process",
+                   new=AsyncMock(return_value=("[处理失败: list index out of range]", 0, 0))), \
+             patch("services.ai_processor.generate_tags", new=AsyncMock(return_value=[])), \
+             patch("db.job_repo.save_summary_version", return_value=True), \
+             patch("main.sio", None):
+            resp = client.post("/api/jobs/j1/summarize", json={})
+        assert resp.status_code == 500
+        assert any(c.kwargs.get("status") == "failed" for c in mock_update.call_args_list)
+        assert not any(c.kwargs.get("status") == "completed" for c in mock_update.call_args_list)
+
+    @patch("routers.jobs.get_job")
+    def test_cancelled_job_rejected(self, mock_get, client, tmp_path):
+        mock_get.return_value = self._job(tmp_path, status="cancelled")
+        resp = client.post("/api/jobs/j1/summarize", json={})
+        assert resp.status_code == 400
+
+    @patch("routers.jobs.get_job")
+    def test_failed_job_without_txt_rejected(self, mock_get, client):
+        mock_get.return_value = {"id": "j1", "status": "failed", "files": {}, "options": {}}
+        resp = client.post("/api/jobs/j1/summarize", json={})
+        assert resp.status_code == 400
+
+
 # ── Models ──
 class TestModelsRouter:
     @patch("routers.models.get_all_models", return_value=[])
@@ -351,6 +405,47 @@ class TestModelsRouter:
     def test_delete_model(self, mock_del, client):
         resp = client.delete("/api/models/m1")
         assert resp.status_code == 200
+
+    @patch("routers.models.set_default_model", return_value=True)
+    def test_set_default_model(self, mock_set, client):
+        resp = client.post("/api/models/default", json={"key": "m1"})
+        assert resp.status_code == 200
+        mock_set.assert_called_once_with("m1")
+
+    @patch("routers.models.set_default_model", return_value=False)
+    def test_set_default_model_missing(self, mock_set, client):
+        resp = client.post("/api/models/default", json={"key": "ghost"})
+        assert resp.status_code == 404
+
+    @patch("routers.models.set_default_model", return_value=False)
+    def test_set_default_model_missing_key(self, mock_set, client):
+        resp = client.post("/api/models/default", json={})
+        assert resp.status_code == 400
+
+    @patch("routers.models.get_default_model_key", return_value="m1")
+    @patch("routers.models.get_all_models", return_value=[])
+    def test_list_models_returns_db_default(self, mock_all, mock_default, client):
+        resp = client.get("/api/models")
+        assert resp.status_code == 200
+        assert resp.json()["default"] == "m1"
+
+    @patch("routers.models.add_model", return_value=True)
+    def test_add_model_normalizes_endpoint(self, mock_add, client):
+        resp = client.post("/api/models", json={
+            "key": "m1", "name": "Test", "endpoint": "https://api.example.com/v1"
+        })
+        assert resp.status_code == 200
+        kwargs = mock_add.call_args.kwargs
+        assert kwargs["endpoint"] == "https://api.example.com/v1/chat/completions"
+
+    @patch("routers.models.add_model", return_value=True)
+    def test_add_model_keeps_full_endpoint(self, mock_add, client):
+        resp = client.post("/api/models", json={
+            "key": "m1", "name": "Test", "endpoint": "https://api.example.com/v1/chat/completions"
+        })
+        assert resp.status_code == 200
+        kwargs = mock_add.call_args.kwargs
+        assert kwargs["endpoint"] == "https://api.example.com/v1/chat/completions"
 
 
 # ── Summary ──

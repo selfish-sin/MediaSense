@@ -125,7 +125,10 @@ async def _call_ai(
                             break
                         try:
                             chunk = json.loads(data_str)
-                            delta = chunk.get('choices', [{}])[0].get('delta', {})
+                            # ★ 兼容部分接口（如阿里云 MaaS）发送 choices 为空数组的 usage/keep-alive chunk：
+                            #   dict.get(key, default) 只在 key 缺失时返回默认值，choices=[] 时会越界
+                            choices = chunk.get('choices') or []
+                            delta = choices[0].get('delta', {}) if choices else {}
                             text_piece = delta.get('content', '')
                             reasoning_piece = delta.get('reasoning_content', '')
                             if reasoning_piece and sio:

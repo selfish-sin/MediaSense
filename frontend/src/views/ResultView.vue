@@ -212,6 +212,8 @@ function onResummarizeSuccess(data) {
 // ============ Socket.IO 流式输出监听 ============
 onMounted(() => {
   loadJob()
+  // ★ 模型列表/默认模型（重新总结弹窗、思维导图等需要）
+  if (!modelStore.models.length) modelStore.loadModels()
 
   // 监听流式 token（done=true 时 token 是完整全文，必须覆盖而非追加）
   socketUnsubs.push(onAiToken((data) => {
@@ -475,6 +477,13 @@ function goToWorkbench() {
   router.push(buildRerunRoute(job.value.id))
 }
 
+// ★ 可重新总结：已完成的任务，或 AI 阶段失败但保留转录文本的任务（仅重跑 AI 步骤）
+const canResummarize = computed(() => {
+  if (isStreaming.value) return false
+  const s = job.value?.status
+  return (s === 'completed' || s === 'failed') && !!(job.value?.files?.txt)
+})
+
 // ============ 思维导图 ============
 
 async function generateMindmap() {
@@ -604,42 +613,45 @@ async function copyTranscript() {
 <template>
   <div style="max-width: 1000px; margin: 0 auto; padding: 24px;" v-loading="loading">
     <!-- 顶部导航 -->
-    <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 20px;">
-      <el-button :icon="ArrowLeft" @click="goBack" size="small">返回</el-button>
-      <h2 style="margin: 0; flex: 1; font-size: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-        {{ job?.title || '任务详情' }}
-      </h2>
-      <el-tag v-if="job" :type="jobStatusTagType(job.status)" size="small" effect="dark">
-        {{ jobStatusLabel(job.status) }}
-      </el-tag>
-      <el-button
-        v-if="taskAction.primary === 'restore' || taskAction.primary === 'resume'"
-        type="primary"
-        size="small"
-        @click="handleTaskAction(taskAction.primary)"
-      >
-        {{ taskAction.primaryLabel }}
-      </el-button>
-      <el-button
-        v-if="taskAction.secondary === 'rerun' || taskAction.secondary === 'forceRetry'"
-        type="warning"
-        size="small"
-        @click="handleTaskAction(taskAction.secondary)"
-      >
-        {{ taskAction.secondaryLabel }}
-      </el-button>
-      <el-button
-        v-if="taskAction.canCancel"
-        type="danger"
-        size="small"
-        @click="handleTaskAction('cancel')"
-      >
-        取消任务
-      </el-button>
-    </div>
+    <el-card class="app-card" shadow="never" style="margin-bottom: 16px;">
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <el-button :icon="ArrowLeft" @click="goBack" size="small">返回</el-button>
+        <h2 style="margin: 0; flex: 1; font-size: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+          {{ job?.title || '任务详情' }}
+        </h2>
+        <el-tag v-if="job" :type="jobStatusTagType(job.status)" size="small" effect="plain" round>
+          {{ jobStatusLabel(job.status) }}
+        </el-tag>
+        <el-button
+          v-if="taskAction.primary === 'restore' || taskAction.primary === 'resume'"
+          type="primary"
+          size="small"
+          @click="handleTaskAction(taskAction.primary)"
+        >
+          {{ taskAction.primaryLabel }}
+        </el-button>
+        <el-button
+          v-if="taskAction.secondary === 'rerun' || taskAction.secondary === 'forceRetry'"
+          type="warning"
+          size="small"
+          @click="handleTaskAction(taskAction.secondary)"
+        >
+          {{ taskAction.secondaryLabel }}
+        </el-button>
+        <el-button
+          v-if="taskAction.canCancel"
+          type="danger"
+          size="small"
+          @click="handleTaskAction('cancel')"
+        >
+          取消任务
+        </el-button>
+      </div>
+    </el-card>
 
     <!-- 任务信息 -->
-    <el-descriptions v-if="job" :column="3" border size="small" style="margin-bottom: 20px;">
+    <el-card class="app-card" shadow="never" style="margin-bottom: 16px;">
+      <el-descriptions v-if="job" :column="3" border size="small">
       <el-descriptions-item label="平台">{{ job.platform || '-' }}</el-descriptions-item>
       <el-descriptions-item label="总结类型">
         {{ activeSummaryType }}
@@ -671,7 +683,7 @@ async function copyTranscript() {
         </template>
         <template v-else>
           <el-tag v-for="t in (job.tags || [])" :key="t" size="small" style="margin-right: 4px;">{{ t }}</el-tag>
-          <span v-if="!job.tags?.length" style="color: #909399;">无标签</span>
+          <span v-if="!job.tags?.length" style="color: var(--app-text-secondary);">无标签</span>
           <el-button size="small" text type="primary" @click="startEditTags" style="margin-left: 4px;">编辑</el-button>
           <el-button
             size="small"
@@ -685,10 +697,11 @@ async function copyTranscript() {
         </template>
       </el-descriptions-item>
     </el-descriptions>
+    </el-card>
 
     <!-- ★ 历史版本面板（从后端加载） -->
-    <div v-if="summaryHistory.length > 0" style="margin-bottom: 16px;">
-      <div style="font-size: 13px; color: #909399; margin-bottom: 8px;">
+    <el-card v-if="summaryHistory.length > 0" class="app-card" shadow="never" style="margin-bottom: 16px;">
+      <div style="font-size: 13px; color: var(--app-text-secondary); margin-bottom: 8px;">
         历史版本 ({{ summaryHistory.length }})
         <el-button v-if="activeVersion > 0" size="small" text type="primary" @click="switchToVersion(0)" style="margin-left: 8px;">
           返回最新版
@@ -704,30 +717,30 @@ async function copyTranscript() {
         >
           <span style="font-weight: 500;">v{{ item.version }}</span>
           <el-tag v-if="item.version === 1" size="small" type="success" effect="plain" style="margin: 0 4px; font-size: 10px;">基础</el-tag>
-          <span style="font-size: 11px; color: #909399;">{{ item.summary_type }}</span>
-          <span style="font-size: 10px; color: #606266; margin-left: 4px;">{{ formatTime(item.created_at) }}</span>
-          <span style="font-size: 10px; color: #909399; margin-left: 4px;">{{ item.char_count }}字</span>
+          <span style="font-size: 11px; color: var(--app-text-secondary);">{{ item.summary_type }}</span>
+          <span style="font-size: 10px; color: var(--app-text-placeholder); margin-left: 4px;">{{ formatTime(item.created_at) }}</span>
+          <span style="font-size: 10px; color: var(--app-text-secondary); margin-left: 4px;">{{ item.char_count }}字</span>
         </div>
       </div>
-    </div>
+    </el-card>
 
     <!-- 结果展示区（固定栏，常驻显示） -->
     <div ref="resultSectionRef">
 
       <!-- ★ 标签切换：总结 / 思维导图 / 转录 -->
-      <div v-if="displayResult || isStreaming || (job?.files?.txt)" style="display: flex; align-items: center; gap: 0; margin-bottom: 12px; border-bottom: 2px solid #e4e7ed;">
+      <div v-if="displayResult || isStreaming || (job?.files?.txt)" style="display: flex; align-items: center; gap: 0; margin-bottom: 12px; border-bottom: 2px solid var(--app-border);">
         <div
           @click="resultTab = 'summary'"
-          :style="{ padding: '8px 16px', cursor: 'pointer', fontWeight: resultTab === 'summary' ? 600 : 400, color: resultTab === 'summary' ? '#409eff' : '#909399', borderBottom: resultTab === 'summary' ? '2px solid #409eff' : '2px solid transparent', marginBottom: '-2px' }"
+          :style="{ padding: '8px 16px', cursor: 'pointer', fontWeight: resultTab === 'summary' ? 600 : 400, color: resultTab === 'summary' ? 'var(--app-accent-1)' : 'var(--app-text-secondary)', borderBottom: resultTab === 'summary' ? '2px solid var(--app-accent-1)' : '2px solid transparent', marginBottom: '-2px' }"
         ><el-icon style="vertical-align: -2px; margin-right: 4px;"><FileText /></el-icon>AI 总结</div>
         <div
           @click="switchToMindmapTab"
-          :style="{ padding: '8px 16px', cursor: 'pointer', fontWeight: resultTab === 'mindmap' ? 600 : 400, color: resultTab === 'mindmap' ? '#409eff' : '#909399', borderBottom: resultTab === 'mindmap' ? '2px solid #409eff' : '2px solid transparent', marginBottom: '-2px' }"
+          :style="{ padding: '8px 16px', cursor: 'pointer', fontWeight: resultTab === 'mindmap' ? 600 : 400, color: resultTab === 'mindmap' ? 'var(--app-accent-1)' : 'var(--app-text-secondary)', borderBottom: resultTab === 'mindmap' ? '2px solid var(--app-accent-1)' : '2px solid transparent', marginBottom: '-2px' }"
         ><el-icon style="vertical-align: -2px; margin-right: 4px;"><Cpu /></el-icon>思维导图</div>
         <div
           v-if="job?.files?.txt"
           @click="switchToTranscriptTab"
-          :style="{ padding: '8px 16px', cursor: 'pointer', fontWeight: resultTab === 'transcript' ? 600 : 400, color: resultTab === 'transcript' ? '#409eff' : '#909399', borderBottom: resultTab === 'transcript' ? '2px solid #409eff' : '2px solid transparent', marginBottom: '-2px' }"
+          :style="{ padding: '8px 16px', cursor: 'pointer', fontWeight: resultTab === 'transcript' ? 600 : 400, color: resultTab === 'transcript' ? 'var(--app-accent-1)' : 'var(--app-text-secondary)', borderBottom: resultTab === 'transcript' ? '2px solid var(--app-accent-1)' : '2px solid transparent', marginBottom: '-2px' }"
         ><el-icon style="vertical-align: -2px; margin-right: 4px;"><FileText /></el-icon>转录文本
           <el-tag v-if="hasCorrection" size="small" type="warning" effect="plain" style="margin-left: 4px; font-size: 10px;">已校正</el-tag>
         </div>
@@ -749,7 +762,7 @@ async function copyTranscript() {
             <el-button :icon="Search" @click="doSearch" />
           </template>
         </el-input>
-        <span v-if="searchMatches.length" style="font-size: 12px; color: #909399;">
+        <span v-if="searchMatches.length" style="font-size: 12px; color: var(--app-text-secondary);">
           {{ currentMatch }}/{{ searchMatches.length }}
         </span>
         <div style="flex: 1;" />
@@ -758,7 +771,7 @@ async function copyTranscript() {
           <el-icon class="is-loading" style="margin-right: 2px;"><Loader2 /></el-icon>
           AI 生成中...
         </el-tag>
-        <el-button size="small" type="warning" :icon="RefreshCw" @click="openResummarize" :disabled="isStreaming || job?.status !== 'completed'">
+        <el-button size="small" type="warning" :icon="RefreshCw" @click="openResummarize" :disabled="!canResummarize">
           重新总结
         </el-button>
         <el-button size="small" type="primary" plain @click="goToWorkbench" :disabled="!canContinueInWorkbench && job?.status !== 'completed'">
@@ -777,9 +790,23 @@ async function copyTranscript() {
       </div>
 
       <!-- 结果内容 -->
-      <el-card v-if="displayResult || isStreaming || mindmapReady || resultTab === 'transcript'" shadow="never">
+      <el-card v-if="displayResult || isStreaming || mindmapReady || resultTab === 'transcript'" class="app-card" shadow="never">
+        <!-- ★ 失败任务横幅：可只重跑 AI 总结步骤，无需重新下载/转录 -->
+        <el-alert v-if="job?.status === 'failed'" type="error" :closable="false" show-icon style="margin-bottom: 12px;">
+          <template #title>
+            AI 处理失败：{{ job.error || '未知错误' }}
+          </template>
+          <div style="margin-top: 8px;">
+            重新总结只会重跑 AI 步骤（不重新下载、不重新转录）；也可到工作台重做完整流程。
+            <div style="display: flex; gap: 8px; margin-top: 10px;">
+              <el-button size="small" type="danger" plain :icon="RefreshCw" @click="openResummarize">重新总结</el-button>
+              <el-button size="small" type="primary" plain @click="goToWorkbench">到工作台重做</el-button>
+            </div>
+          </div>
+        </el-alert>
+
         <!-- 流式输出中但还没收到内容 -->
-        <div v-if="isStreaming && !streamingText" style="text-align: center; padding: 40px; color: #909399;">
+        <div v-if="isStreaming && !streamingText" style="text-align: center; padding: 40px; color: var(--app-text-secondary);">
           <el-icon class="is-loading" style="font-size: 24px;"><Loader2 /></el-icon>
           <div style="margin-top: 8px;">AI 正在生成...</div>
         </div>
@@ -801,7 +828,7 @@ async function copyTranscript() {
               <el-radio-button label="corrected">校正后</el-radio-button>
               <el-radio-button label="raw">校正前原文</el-radio-button>
             </el-radio-group>
-            <span v-else style="font-size: 12px; color: #909399;">未启用 AI 校正</span>
+            <span v-else style="font-size: 12px; color: var(--app-text-secondary);">未启用 AI 校正</span>
             <div style="flex: 1;" />
             <el-button size="small" type="success" plain @click="copyTranscript" :disabled="!displayTranscript">复制转录</el-button>
           </div>
@@ -825,7 +852,7 @@ async function copyTranscript() {
             ✅ AI 校正完成，{{ correctionStats.total_chunks }} 批全部通过完整性校验
           </div>
           <!-- 转录文本内容 -->
-          <div v-if="transcriptLoading" style="text-align: center; padding: 40px; color: #909399;">
+          <div v-if="transcriptLoading" style="text-align: center; padding: 40px; color: var(--app-text-secondary);">
             <el-icon class="is-loading" style="font-size: 24px;"><Loader2 /></el-icon>
             <div style="margin-top: 8px;">加载转录文本...</div>
           </div>
@@ -842,13 +869,13 @@ async function copyTranscript() {
         <!-- 思维导图 -->
         <div v-else-if="resultTab === 'mindmap'" style="min-height: 400px; position: relative;">
           <div v-if="mindmapLoading" style="position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.85);">
-            <div style="text-align: center; color: #909399;">
+            <div style="text-align: center; color: var(--app-text-secondary);">
               <el-icon class="is-loading" style="font-size: 24px;"><Loader2 /></el-icon>
               <div style="margin-top: 8px;">正在生成思维导图...</div>
             </div>
           </div>
           <div ref="mindmapContainer" class="mindmap-container" style="width: 100%; height: 560px; overflow: auto; background: #fff; border-radius: 4px;">
-            <div v-if="!mindmapReady && !mindmapLoading" style="text-align: center; padding: 40px; color: #909399;">
+            <div v-if="!mindmapReady && !mindmapLoading" style="text-align: center; padding: 40px; color: var(--app-text-secondary);">
               点击上方 <strong><el-icon style="vertical-align: -2px;"><Cpu /></el-icon> 思维导图</strong> 标签生成
             </div>
           </div>
@@ -887,18 +914,18 @@ async function copyTranscript() {
 
 <style scoped>
 .chat-bubble-user {
-  background: #409eff;
+  background: var(--app-accent-1);
   color: #fff;
 }
 .chat-bubble-ai {
-  background: rgba(255, 255, 255, 0.08);
-  color: #e0e0e0;
+  background: rgba(var(--app-dim-color, 11, 17, 32), 0.5);
+  color: var(--app-text);
 }
 .version-chip {
   display: inline-flex;
   align-items: center;
   padding: 6px 10px;
-  border: 1.5px solid #444;
+  border: 1.5px solid var(--app-border);
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.2s ease;
@@ -907,12 +934,12 @@ async function copyTranscript() {
   gap: 2px;
 }
 .version-chip:hover {
-  border-color: #409eff;
-  background: rgba(64, 158, 255, 0.08);
+  border-color: var(--app-accent-1);
+  background: rgba(var(--app-accent-1-rgb, 56, 189, 248), 0.08);
 }
 .version-chip.active {
-  border-color: #409eff;
-  background: rgba(64, 158, 255, 0.15);
+  border-color: var(--app-accent-1);
+  background: rgba(var(--app-accent-1-rgb, 56, 189, 248), 0.15);
 }
 
 /* 流式思考过程 */
@@ -953,7 +980,7 @@ async function copyTranscript() {
   word-break: break-word;
   font-size: 13.5px;
   line-height: 1.7;
-  background: var(--app-bg-2, #fafafa);
+  background: var(--app-preview-bg);
   border-radius: 6px;
   max-height: 70vh;
   overflow-y: auto;
@@ -964,7 +991,7 @@ async function copyTranscript() {
 .mindmap-container {
   width: 100%;
   min-height: 400px;
-  background: #fafafa;
+  background: var(--app-preview-bg);
   border-radius: 4px;
 }
 .mindmap-container :deep(svg) {
