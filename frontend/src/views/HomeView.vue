@@ -14,7 +14,7 @@ import {
   continueSummary, cancelPreview, cancelJob,
 } from '../utils/socket'
 import { renderMarkdown } from '../utils/markdown'
-import ResummarizeDialog from '../components/ResummarizeDialog.vue'
+import ResummarizeControl from '../components/ResummarizeControl.vue'
 import SplitPromptPanel from '../components/SplitPromptPanel.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 
@@ -1016,14 +1016,9 @@ async function saveEdit() {
 }
 
 // ============ 重新总结 ============
-const resummarizeDialog = ref(false)
-
-function openResummarize() {
-  resummarizeDialog.value = true
-}
-
-function onResummarizeSuccess(data) {
-  // 弹窗已关闭，重置流式输出状态
+// 相同提示词（沿用任务原始 dimensions/options），仅更换 AI 模型；跳过下载/转录直接重跑 AI 步骤
+async function handleResummarize(model) {
+  // 重置流式输出状态
   jobStore.aiTokens = []
   jobStore.resultText = ''
   jobStore.jobStatus = 'summarizing'
@@ -1033,7 +1028,6 @@ function onResummarizeSuccess(data) {
     document.getElementById('result-section')?.scrollIntoView({ behavior: 'smooth' })
   })
 
-  // ★ 修复：实际调用后端重新总结 API，否则 socket 永远不会推送 token
   const targetJobId = jobStore.currentJobId
   if (!targetJobId) {
     ElMessage.error('没有任务ID，无法重新总结')
@@ -1041,7 +1035,23 @@ function onResummarizeSuccess(data) {
     jobStore.isProcessing = false
     return
   }
-  jobsApi.summarize(targetJobId, data).then(() => {
+
+  // 相同提示词：取任务原始 dimensions/options 透传，只改 model；
+  // 拿不到任务详情时仅传 model，后端自动回退原始配置
+  const payload = { model }
+  try {
+    const job = await jobsApi.get(targetJobId)
+    const srcDims = job.dimensions || null
+    if (srcDims) {
+      payload.dimensions = srcDims
+      payload.options = { ...(job.options || {}), dimensions: srcDims }
+    } else {
+      payload.options = { ...(job.options || {}) }
+      payload.summary_type = job.summary_type || 'summary'
+    }
+  } catch { /* 忽略详情拉取失败，仅传 model */ }
+
+  jobsApi.summarize(targetJobId, payload).then(() => {
     // 结果通过 socket 流式推送，无需在此处理 result_text
     console.log('[重新总结] API 调用成功，等待 socket 流式输出')
   }).catch(err => {
@@ -1049,13 +1059,6 @@ function onResummarizeSuccess(data) {
     jobStore.jobStatus = 'failed'
     jobStore.isProcessing = false
   })
-}
-
-function onResummarizeCompleted(res) {
-  // ★ 后端通过 socket 流式推送 + done 信号 + emit_ai_token(done=True) 已经处理了完成状态
-  // 这里仅刷新 token 统计（HTTP 请求成功返回后调用）
-  loadTokenUsage()
-  loadTokenHistory()
 }
 
 // ============ 结果内搜索 ============
@@ -1560,10 +1563,13 @@ onDeactivated(() => {
             <el-tag v-if="isProcessing && jobStore.jobStatus === 'summarizing'" type="warning" size="small" effect="plain">
               AI 生成中...
             </el-tag>
-            <!-- 重新总结按钮 -->
-            <el-button v-if="jobStore.resultText && !editMode" size="small" type="warning" @click="openResummarize">
-              重新总结
-            </el-button>
+            <!-- 重新总结内联控件：相同提示词，换模型直接重跑 AI 步骤 -->
+            <ResummarizeControl
+              v-if="jobStore.resultText && !editMode"
+              :disabled="isProcessing"
+              button-type="warning"
+              @submit="handleResummarize"
+            />
           </div>
         </div>
       </template>
@@ -1820,14 +1826,6 @@ onDeactivated(() => {
         </div>
       </div>
     </el-card>
-
-    <!-- 重新总结对话框（共享组件） -->
-    <ResummarizeDialog
-      v-model="resummarizeDialog"
-      :job-id="jobStore.currentJobId || ''"
-      @success="onResummarizeSuccess"
-      @completed="onResummarizeCompleted"
-    />
 
   </div>
 </template>

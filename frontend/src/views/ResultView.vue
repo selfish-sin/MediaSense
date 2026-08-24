@@ -2,13 +2,13 @@
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, Search, RefreshCw, Loader2, Plus, FileText, Cpu, RefreshCcw } from 'lucide-vue-next'
+import { ArrowLeft, Search, Loader2, Plus, FileText, Cpu, RefreshCcw } from 'lucide-vue-next'
 import { jobsApi, exportApi, chatApi } from '../utils/api'
 import { renderMarkdown } from '../utils/markdown'
 import { useModelStore } from '../stores/modelStore'
 import { buildRerunRoute, buildRestoreRoute, getJobActionModel } from '../utils/jobActions'
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
-import ResummarizeDialog from '../components/ResummarizeDialog.vue'
+import ResummarizeControl from '../components/ResummarizeControl.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 import {
   onProgress, onLog, onAiToken, onAiDone, onAiThinking,
@@ -24,7 +24,6 @@ const loading = ref(false)
 const searchText = ref('')
 const searchMatches = ref([])
 const currentMatch = ref(0)
-const resummarizeDialog = ref(false)
 // 结果区容器引用（★ 模板 ref="resultSectionRef" 必须有同名顶层声明）
 const resultSectionRef = ref(null)
 // ★ Socket 监听解绑函数集合（卸载时逐个调用，只移除本组件注册的 handler）
@@ -168,31 +167,44 @@ function goBack() {
 }
 
 // ============ 重新总结 ============
-function openResummarize() {
-  resummarizeDialog.value = true
-}
-
-function onResummarizeSuccess(data) {
-  // 弹窗已关闭，准备流式输出
+// 相同提示词（沿用任务原始 dimensions/options），仅更换 AI 模型；跳过下载/转录直接重跑 AI 步骤
+function handleResummarize(model) {
+  const jobId = route.params.jobId
+  if (!jobId || !job.value) return
+  if (!model) {
+    ElMessage.warning('请选择 AI 模型')
+    return
+  }
+  // 重置流式输出状态
   activeVersion.value = 0
   streamingThinking.value = ''
   activeVersionResult.value = null
   isStreaming.value = true
   streamingText.value = ''
-  
+
   // 滚动到结果区
   nextTick(() => {
     resultSectionRef.value?.scrollIntoView({ behavior: 'smooth' })
   })
-  
-  // 异步提交重新总结请求（整包透传 dialog 的 dimensions/model/options）
-  const jobId = route.params.jobId
-  jobsApi.summarize(jobId, data).then(res => {
+
+  // 相同提示词：透传任务原始 dimensions/options，只改 model
+  const payload = { model }
+  const srcDims = job.value.dimensions || null
+  if (srcDims) {
+    payload.dimensions = srcDims
+    payload.options = { ...(job.value.options || {}), dimensions: srcDims }
+  } else {
+    payload.options = { ...(job.value.options || {}) }
+    payload.summary_type = job.value.summary_type || 'summary'
+  }
+
+  // 异步提交重新总结请求（整包透传 model + 原始提示词配置）
+  jobsApi.summarize(jobId, payload).then(res => {
     // HTTP 返回后，结果已通过 socket 流式推送完毕
     if (res?.result_text) {
       job.value.result_text = res.result_text
-      if (data.summary_type) job.value.summary_type = data.summary_type
-      if (data.dimensions) job.value.dimensions = data.dimensions
+      if (res.summary_type) job.value.summary_type = res.summary_type
+      if (res.dimensions) job.value.dimensions = res.dimensions
     }
     isStreaming.value = false
     streamingText.value = ''
@@ -771,9 +783,12 @@ async function copyTranscript() {
           <el-icon class="is-loading" style="margin-right: 2px;"><Loader2 /></el-icon>
           AI 生成中...
         </el-tag>
-        <el-button size="small" type="warning" :icon="RefreshCw" @click="openResummarize" :disabled="!canResummarize">
-          重新总结
-        </el-button>
+        <ResummarizeControl
+          :model="job?.model || ''"
+          :disabled="!canResummarize"
+          button-type="warning"
+          @submit="handleResummarize"
+        />
         <el-button size="small" type="primary" plain @click="goToWorkbench" :disabled="!canContinueInWorkbench && job?.status !== 'completed'">
           到工作台重做
         </el-button>
@@ -797,9 +812,15 @@ async function copyTranscript() {
             AI 处理失败：{{ job.error || '未知错误' }}
           </template>
           <div style="margin-top: 8px;">
-            重新总结只会重跑 AI 步骤（不重新下载、不重新转录）；也可到工作台重做完整流程。
-            <div style="display: flex; gap: 8px; margin-top: 10px;">
-              <el-button size="small" type="danger" plain :icon="RefreshCw" @click="openResummarize">重新总结</el-button>
+            重新总结沿用本次提示词（只重跑 AI 步骤，不重新下载/转录），可换用其他 AI 模型；也可到工作台重做，改提示词后完整重跑。
+            <div style="display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap;">
+              <ResummarizeControl
+                :model="job?.model || ''"
+                :disabled="isStreaming"
+                button-type="danger"
+                plain
+                @submit="handleResummarize"
+              />
               <el-button size="small" type="primary" plain @click="goToWorkbench">到工作台重做</el-button>
             </div>
           </div>
@@ -895,13 +916,6 @@ async function copyTranscript() {
       type="error"
       :closable="false"
       style="margin-top: 16px;"
-    />
-
-    <!-- 重新总结弹窗 -->
-    <ResummarizeDialog
-      v-model="resummarizeDialog"
-      :job-id="job?.id || ''"
-      @success="onResummarizeSuccess"
     />
 
     <!-- 追问聊天（ChatPanel：SSE 流式 + 思考过程 + 引用源 + 编辑/重发） -->
