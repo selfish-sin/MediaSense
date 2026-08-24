@@ -313,28 +313,31 @@ onMounted(() => {
 
 <template>
   <div style="max-width: 1200px; margin: 0 auto; padding: 24px;">
-    <!-- 标题 + 搜索 + 清空：合并成一个工具条 -->
-    <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap;">
-      <h2 style="margin: 0; margin-right: auto;">任务历史</h2>
-      <el-input
-        v-model="searchQuery"
-        placeholder="按标题或 URL 过滤"
-        clearable
-        @keyup.enter="doSearch"
-        @clear="clearSearch"
-        style="width: 260px;"
-      >
-        <template #prefix><el-icon><Search /></el-icon></template>
-      </el-input>
-      <el-button type="primary" :loading="searching" @click="doSearch">搜索</el-button>
-      <el-button type="success" plain size="small" @click="handleClearByStatus('completed', '成功')">清空成功</el-button>
-      <el-button type="danger" plain size="small" @click="handleClearFailed">清空失败/取消</el-button>
-      <el-button type="danger" plain size="small" @click="handleClearAll">清空全部</el-button>
-    </div>
+    <!-- 标题 + 搜索 + 清空：合并成一个工具条卡片 -->
+    <el-card class="app-card" shadow="never" style="margin-bottom: 16px;">
+      <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+        <h2 style="margin: 0; margin-right: auto;">任务历史</h2>
+        <el-input
+          v-model="searchQuery"
+          placeholder="按标题或 URL 过滤"
+          clearable
+          @keyup.enter="doSearch"
+          @clear="clearSearch"
+          style="width: 260px;"
+        >
+          <template #prefix><el-icon><Search /></el-icon></template>
+        </el-input>
+        <el-button type="primary" :loading="searching" @click="doSearch">搜索</el-button>
+        <el-button type="success" plain size="small" @click="handleClearByStatus('completed', '成功')">清空成功</el-button>
+        <el-button type="danger" plain size="small" @click="handleClearFailed">清空失败/取消</el-button>
+        <el-button type="danger" plain size="small" @click="handleClearAll">清空全部</el-button>
+      </div>
+    </el-card>
 
     <!-- 任务列表（搜索时按 keyword 过滤） -->
-    <!-- 批量操作栏（选中任务时显示） -->
-    <div v-if="selectedJobs.length > 0" class="batch-toolbar">
+    <el-card class="app-card" shadow="never">
+      <!-- 批量操作栏（选中任务时显示） -->
+      <div v-if="selectedJobs.length > 0" class="batch-toolbar">
         <span class="batch-toolbar__count">已选 {{ selectedJobs.length }} 项</span>
         <el-button size="small" type="warning" @click="handleBatchCancel">
           批量取消（{{ selectedJobs.filter(j => activeStatuses.includes(j.status)).length }}）
@@ -395,6 +398,7 @@ onMounted(() => {
         layout="prev, pager, next"
         @current-change="handlePageChange"
       />
+    </el-card>
   </div>
 </template>
 
@@ -431,10 +435,10 @@ onMounted(() => {
 }
 
 :root[data-theme="dark"] .batch-toolbar {
-  background: rgba(64, 158, 255, 0.12);
-  border: 1px solid rgba(64, 158, 255, 0.22);
+  background: rgba(var(--app-accent-1-rgb, 56, 189, 248), 0.12);
+  border: 1px solid rgba(var(--app-accent-1-rgb, 56, 189, 248), 0.22);
 }
 :root[data-theme="dark"] .batch-toolbar__count {
-  color: var(--el-text-color-secondary);
+  color: var(--app-accent-1, #38bdf8);
 }
 </style>

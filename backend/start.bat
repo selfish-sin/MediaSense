@@ -37,6 +37,11 @@ if errorlevel 1 (
 set PORT=7001
 for /f "delims=" %%P in ('%PYTHON% -c "from config import SERVER_PORT; print(SERVER_PORT)" 2^>nul') do set PORT=%%P
 
+rem 启动前清理端口占用（与 restart.bat 一致）
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":%PORT%" ^| findstr "LISTENING"') do (
+    taskkill /F /PID %%a >nul 2>&1 && echo [!] 端口 %PORT% 被占用，已终止旧进程 PID %%a
+)
+
 echo [3] 启动后端服务 (端口 %PORT%)...
 echo    Swagger UI: http://localhost:%PORT%/docs
 echo    API 根路径: http://localhost:%PORT%/api

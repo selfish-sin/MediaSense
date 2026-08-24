@@ -249,6 +249,12 @@ function scrollToBottom() {
   --app-search-hl-active-text: #111;
   --app-thinking-bg: rgba(var(--app-accent-1-rgb, 56, 189, 248), 0.1);
   --app-thinking-text: #bae6fd;
+  --app-engine-ok-bg: #1a3a1a;
+  --app-engine-ok-text: #4ade80;
+  --app-engine-ok-border: #2d5a2d;
+  --app-engine-err-bg: #2a1a1a;
+  --app-engine-err-text: #f87171;
+  --app-engine-err-border: #4a2020;
 }
 
 :root[data-theme="light"] {
@@ -305,9 +311,41 @@ function scrollToBottom() {
   --app-search-hl-active-text: #111;
   --app-thinking-bg: #f0f9ff;
   --app-thinking-text: #0369a1;
+  --app-engine-ok-bg: #dcfce7;
+  --app-engine-ok-text: #16a34a;
+  --app-engine-ok-border: #bbf7d0;
+  --app-engine-err-bg: #fee2e2;
+  --app-engine-err-text: #dc2626;
+  --app-engine-err-border: #fecaca;
 }
 
 /* ============ 全局背景层（图片 + 遮罩） ============ */
+
+/* ============ 全站通用卡片（透明 + 毛玻璃 + 悬停 glow） ============
+ * 首页 .wb-card 与各视图 .app-card 共用同一套视觉基准，
+ * 由 --app-dim-color（主题底色 RGB）+ --app-card-opacity（透明度滑块）驱动。
+ * el-card 上加 class="app-card" 即可继承圆角/悬停/透明；表格保持实底。 */
+.app-card,
+.wb-card {
+  border-radius: 12px;
+  border: 1px solid var(--app-border);
+  background: rgba(var(--app-dim-color), var(--app-card-opacity, 1));
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: box-shadow 0.2s, border-color 0.2s, transform 0.15s;
+  overflow: hidden;
+}
+.app-card:hover,
+.wb-card:hover {
+  box-shadow: var(--app-card-glow, 0 8px 28px rgba(0, 0, 0, 0.42));
+}
+/* el-card 默认有自己的圆角/阴影，加 app-card 后统一覆盖 */
+.el-card.app-card,
+.el-card.wb-card {
+  border-radius: 12px !important;
+  overflow: hidden;
+}
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
@@ -554,17 +592,28 @@ body::after {
   --el-drawer-bg-color: #ffffff;
 }
 
-/* 表格 */
+/* 表格 — 透明化，跟随卡片透明度透出背景图 */
 :root[data-theme="dark"] .el-table {
-  --el-table-bg-color: #111b2e;
-  --el-table-tr-bg-color: #111b2e;
-  --el-table-header-bg-color: #16223a;
-  --el-table-border-color: #1e2a3f;
-  --el-table-row-hover-bg-color: #18243c;
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: rgba(var(--app-dim-color), 0.5);
+  --el-table-border-color: var(--app-border);
+  --el-table-row-hover-bg-color: rgba(var(--app-accent-1-rgb, 56, 189, 248), 0.08);
 }
-/* ★ stripe 斑马纹行：贴合暗色背景，比奇数行略亮一点点（不突兀） */
+/* ★ stripe 斑马纹行：半透明叠加，比奇数行略亮一点点（不突兀） */
 :root[data-theme="dark"] .el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
-  background-color: #141f33 !important;
+  background-color: rgba(var(--app-dim-color), 0.25) !important;
+}
+/* 亮色主题表格透明化 */
+:root[data-theme="light"] .el-table {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: rgba(var(--app-dim-color), 0.5);
+  --el-table-border-color: var(--app-border);
+  --el-table-row-hover-bg-color: rgba(var(--app-accent-1-rgb, 14, 165, 233), 0.06);
+}
+:root[data-theme="light"] .el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
+  background-color: rgba(var(--app-dim-color), 0.25) !important;
 }
 
 /* 页面标题 */

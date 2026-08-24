@@ -331,14 +331,16 @@ async function applyLib(item) {
 <template>
   <div style="max-width: 1200px; margin: 0 auto; padding: 24px;">
     <!-- 顶部标题 + Tab 切换 -->
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-      <div>
-        <h2 style="margin: 0;">模板中心</h2>
-        <div style="font-size: 12px; color: var(--app-text-secondary); margin-top: 4px;">
-          维度模块编辑器（修改内置模块提示词） · 完全自定义提示词库（收集/应用完整 prompt）
+    <el-card class="app-card" shadow="never" style="margin-bottom: 16px;">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <h2 style="margin: 0;">模板中心</h2>
+          <div style="font-size: 12px; color: var(--app-text-secondary); margin-top: 4px;">
+            维度模块编辑器（修改内置模块提示词） · 完全自定义提示词库（收集/应用完整 prompt）
+          </div>
         </div>
       </div>
-    </div>
+    </el-card>
 
     <el-tabs v-model="activeTab" class="templates-tabs">
       <!-- Tab 1: 维度模块编辑器 -->
@@ -487,7 +489,7 @@ async function applyLib(item) {
           <el-button type="primary" :icon="Plus" size="small" @click="openAddLibDialog">添加提示词</el-button>
         </div>
 
-        <el-card shadow="never" v-loading="libraryLoading">
+        <el-card class="app-card" shadow="never" v-loading="libraryLoading">
           <el-table :data="library" style="width: 100%;" :empty-text="libraryLoading ? '加载中...' : '暂无提示词，点击右上角添加'">
             <el-table-column prop="name" label="名称" width="180" />
             <el-table-column label="描述" width="200">
@@ -578,11 +580,16 @@ async function applyLib(item) {
 
 <style scoped>
 .templates-tabs {
-  background: var(--app-card-bg);
+  background: rgba(var(--app-dim-color), var(--app-card-opacity, 1));
   border: 1px solid var(--app-border);
-  border-radius: 6px;
+  border-radius: 12px;
   padding: 16px;
-  transition: background 0.25s, border-color 0.25s;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+.templates-tabs:hover {
+  box-shadow: var(--app-card-glow, 0 8px 28px rgba(0, 0, 0, 0.42));
 }
 
 .editor-layout {
@@ -650,15 +657,20 @@ async function applyLib(item) {
   line-height: 1.5;
 }
 
-/* 左侧维度树（用主题变量） */
+/* 左侧维度树（透明卡片） */
 .dim-tree {
-  background: var(--app-hover-bg);
+  background: rgba(var(--app-dim-color), var(--app-card-opacity, 1));
   border: 1px solid var(--app-border);
-  border-radius: 6px;
+  border-radius: 12px;
   padding: 12px;
   max-height: 70vh;
   overflow-y: auto;
-  transition: background 0.25s, border-color 0.25s;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+.dim-tree:hover {
+  box-shadow: var(--app-card-glow, 0 8px 28px rgba(0, 0, 0, 0.42));
 }
 .dim-tree-item {
   margin-bottom: 16px;
@@ -695,7 +707,7 @@ async function applyLib(item) {
   background: var(--app-chip-hover-bg);
 }
 .module-tree-item.active {
-  background: #409eff;
+  background: var(--app-accent-1);
   color: #fff;
 }
 .module-tree-item.active :deep(.el-tag) {
@@ -708,15 +720,20 @@ async function applyLib(item) {
   text-overflow: ellipsis;
 }
 
-/* 右侧编辑区（用主题变量） */
+/* 右侧编辑区（透明卡片） */
 .edit-area {
-  background: var(--app-hover-bg);
+  background: rgba(var(--app-dim-color), var(--app-card-opacity, 1));
   border: 1px solid var(--app-border);
-  border-radius: 6px;
+  border-radius: 12px;
   padding: 16px;
   max-height: 70vh;
   overflow-y: auto;
-  transition: background 0.25s, border-color 0.25s;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+.edit-area:hover {
+  box-shadow: var(--app-card-glow, 0 8px 28px rgba(0, 0, 0, 0.42));
 }
 .edit-header {
   display: flex;
@@ -733,7 +750,7 @@ async function applyLib(item) {
 .default-text-ref {
   font-size: 12px;
   color: var(--app-text-secondary);
-  background: var(--app-card-bg);
+  background: var(--app-hover-bg);
   padding: 10px;
   border-radius: 4px;
   white-space: pre-wrap;

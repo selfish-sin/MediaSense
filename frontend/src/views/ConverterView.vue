@@ -238,8 +238,8 @@ onMounted(() => {
 
 <template>
   <div style="max-width: 1000px; margin: 0 auto; padding: 24px;">
-    <h2 style="margin-top: 0; color: #e8e8e8; display: flex; align-items: center; gap: 8px;"><el-icon><ArrowLeftRight /></el-icon> 万能格式转换器</h2>
-    <p style="color: #999; margin-bottom: 20px;">本地引擎驱动：Pandoc · LibreOffice · FFmpeg · Pillow</p>
+    <h2 style="margin-top: 0; color: var(--app-text-heading); display: flex; align-items: center; gap: 8px;"><el-icon><ArrowLeftRight /></el-icon> 万能格式转换器</h2>
+    <p style="color: var(--app-text-secondary); margin-bottom: 20px;">本地引擎驱动：Pandoc · LibreOffice · FFmpeg · Pillow</p>
 
     <!-- 引擎状态 -->
     <div style="display: flex; gap: 8px; margin-bottom: 24px; flex-wrap: wrap; align-items: center;">
@@ -249,9 +249,9 @@ onMounted(() => {
         :style="{
           display: 'inline-flex', alignItems: 'center', gap: '4px',
           padding: '4px 10px', borderRadius: '6px', fontSize: '12px',
-          background: engines[key] ? '#1a3a1a' : '#2a1a1a',
-          color: engines[key] ? '#4ade80' : '#f87171',
-          border: '1px solid ' + (engines[key] ? '#2d5a2d' : '#4a2020'),
+          background: engines[key] ? 'var(--app-engine-ok-bg)' : 'var(--app-engine-err-bg)',
+          color: engines[key] ? 'var(--app-engine-ok-text)' : 'var(--app-engine-err-text)',
+          border: '1px solid ' + (engines[key] ? 'var(--app-engine-ok-border)' : 'var(--app-engine-err-border)'),
         }"
       >
         <el-icon :size="14"><CircleCheck v-if="engines[key]" /><CircleX v-else /></el-icon>
@@ -273,7 +273,7 @@ onMounted(() => {
       style="margin-bottom: 16px;"
     />
 
-    <el-card shadow="never" style="margin-bottom: 20px;">
+    <el-card class="app-card" shadow="never" style="margin-bottom: 20px;">
       <!-- 文件上传区 -->
       <div v-if="!uploadedFile" style="text-align: center; padding: 36px 0;">
         <el-upload
@@ -285,10 +285,10 @@ onMounted(() => {
           accept="*"
         >
           <el-icon :size="48" color="var(--app-accent-1)"><UploadCloud /></el-icon>
-          <div style="margin-top: 12px; color: #ccc; font-size: 15px;">
+          <div style="margin-top: 12px; color: var(--app-text); font-size: 15px;">
             拖拽文件到此处 或 <em style="color: var(--app-accent-1); font-style: normal; font-weight: 600;">点击上传</em>
           </div>
-          <div style="margin-top: 6px; color: #555; font-size: 12px; line-height: 1.8;">
+          <div style="margin-top: 6px; color: var(--app-text-secondary); font-size: 12px; line-height: 1.8;">
             文档 (.md .docx .pdf .epub …)｜视频 (.mp4 .mkv .webm …)<br>
             音频 (.mp3 .wav .flac …)｜图片 (.png .jpg .webp …)
           </div>
@@ -307,8 +307,8 @@ onMounted(() => {
               <HelpCircle v-else />
             </el-icon>
             <div>
-              <div style="font-weight: 600; color: #e8e8e8; font-size: 15px;">{{ uploadedFile.name }}</div>
-              <div style="font-size: 12px; color: #888;">
+              <div style="font-weight: 600; color: var(--app-text-heading); font-size: 15px;">{{ uploadedFile.name }}</div>
+              <div style="font-size: 12px; color: var(--app-text-secondary);">
                 {{ formatSize(uploadedFile.size) }} · {{ uploadedFile.type.label }}
               </div>
             </div>
@@ -319,11 +319,11 @@ onMounted(() => {
         <!-- 目标格式选择 -->
         <div v-for="group in outputGroups" :key="group.label" style="margin-bottom: 16px;">
           <div style="display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px;">
-            <span style="font-size: 13px; color: #aaa; display: inline-flex; align-items: center; gap: 4px;">
+            <span style="font-size: 13px; color: var(--app-text-secondary); display: inline-flex; align-items: center; gap: 4px;">
               <el-icon :size="14"><FileText v-if="group.icon === 'document'" /><Video v-else-if="group.icon === 'video'" /><Music v-else-if="group.icon === 'audio'" /><Image v-else-if="group.icon === 'image'" /></el-icon>
               {{ group.label }}
             </span>
-            <span v-if="group.hint" style="font-size: 11px; color: #666;">— {{ group.hint }}</span>
+            <span v-if="group.hint" style="font-size: 11px; color: var(--app-text-placeholder);">— {{ group.hint }}</span>
           </div>
           <div style="display: flex; flex-wrap: wrap; gap: 6px;">
             <el-tooltip
@@ -348,25 +348,25 @@ onMounted(() => {
         </div>
 
         <!-- 选中的格式说明 -->
-        <div v-if="selectedFormatInfo" style="margin-bottom: 16px; padding: 8px 12px; background: #252535; border-radius: 6px; display: flex; align-items: center; gap: 8px; font-size: 12px;">
+        <div v-if="selectedFormatInfo" style="margin-bottom: 16px; padding: 8px 12px; background: var(--app-hover-bg); border-radius: 6px; display: flex; align-items: center; gap: 8px; font-size: 12px;">
           <el-icon color="var(--app-accent-1)" :size="14"><Info /></el-icon>
-          <span style="color: #aaa;">目标格式：<b style="color: #e0e0e0;">{{ selectedFormatInfo.name }}</b> — {{ selectedFormatInfo.desc }}</span>
+          <span style="color: var(--app-text-secondary);">目标格式：<b style="color: var(--app-text);">{{ selectedFormatInfo.name }}</b> — {{ selectedFormatInfo.desc }}</span>
         </div>
 
         <!-- 同格式提示 -->
-        <div v-if="sameFormatHint" style="margin-bottom: 12px; padding: 6px 12px; background: #2a2a1a; border-radius: 6px; color: #facc15; font-size: 12px; display: flex; align-items: center; gap: 6px;">
+        <div v-if="sameFormatHint" style="margin-bottom: 12px; padding: 6px 12px; background: var(--app-override-bar-bg); border-radius: 6px; color: #facc15; font-size: 12px; display: flex; align-items: center; gap: 6px;">
           <el-icon :size="14"><TriangleAlert /></el-icon>{{ sameFormatHint }}
         </div>
 
         <!-- 质量选择 -->
         <div v-if="selectedTarget" style="margin-top: 16px;">
-          <span style="font-size: 13px; color: #999; margin-right: 12px;">质量：</span>
+          <span style="font-size: 13px; color: var(--app-text-secondary); margin-right: 12px;">质量：</span>
           <el-radio-group v-model="quality" size="small">
             <el-radio-button value="low">低</el-radio-button>
             <el-radio-button value="medium">中（推荐）</el-radio-button>
             <el-radio-button value="high">高</el-radio-button>
           </el-radio-group>
-          <span style="margin-left: 12px; font-size: 12px; color: #666;">
+          <span style="margin-left: 12px; font-size: 12px; color: var(--app-text-secondary);">
             {{ quality === 'low' ? '体积小速度快' : quality === 'high' ? '画质/音质最优' : '平衡体积与质量' }}
           </span>
         </div>
@@ -382,7 +382,7 @@ onMounted(() => {
           >
             <el-icon v-if="!converting"><Send /></el-icon> {{ converting ? '转换中，请稍候...' : '开始转换' }}
           </el-button>
-          <span v-if="!selectedTarget" style="color: #888; font-size: 13px; display: inline-flex; align-items: center; gap: 4px;">
+          <span v-if="!selectedTarget" style="color: var(--app-text-secondary); font-size: 13px; display: inline-flex; align-items: center; gap: 4px;">
             <el-icon :size="14"><Crosshair /></el-icon> 请先选择目标格式
           </span>
         </div>
@@ -390,18 +390,18 @@ onMounted(() => {
     </el-card>
 
     <!-- 转换结果 -->
-    <el-card v-if="result && result.success" shadow="never" style="border: 1px solid #2d5a2d;">
+    <el-card v-if="result && result.success" class="app-card" shadow="never" style="border: 1px solid var(--app-engine-ok-border); margin-top: 16px;">
       <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
         <div style="display: flex; align-items: center; gap: 12px;">
-          <el-icon :size="24" color="#4ade80"><CheckCircle2 /></el-icon>
+          <el-icon :size="24" color="var(--app-engine-ok-text)"><CheckCircle2 /></el-icon>
           <div>
-            <div style="font-weight: 700; color: #4ade80; font-size: 15px;">
+            <div style="font-weight: 700; color: var(--app-engine-ok-text); font-size: 15px;">
               {{ result.input_name }} → {{ result.output_name }}
             </div>
-            <div style="font-size: 12px; color: #888; margin-top: 2px;">
-              引擎: <b style="color: #aaa;">{{ result.engine }}</b> ·
-              输出大小: <b style="color: #aaa;">{{ formatSize(result.output_size) }}</b> ·
-              耗时: <b style="color: #aaa;">{{ result.elapsed }}s</b>
+            <div style="font-size: 12px; color: var(--app-text-secondary); margin-top: 2px;">
+              引擎: <b style="color: var(--app-text);">{{ result.engine }}</b> ·
+              输出大小: <b style="color: var(--app-text);">{{ formatSize(result.output_size) }}</b> ·
+              耗时: <b style="color: var(--app-text);">{{ result.elapsed }}s</b>
             </div>
           </div>
         </div>
@@ -412,8 +412,8 @@ onMounted(() => {
     </el-card>
 
     <!-- 转换错误 -->
-    <el-card v-if="convertError" shadow="never" style="border: 1px solid #4a2020; margin-top: 16px;">
-      <div style="display: flex; align-items: flex-start; gap: 8px; color: #f87171;">
+    <el-card v-if="convertError" class="app-card" shadow="never" style="border: 1px solid var(--app-engine-err-border); margin-top: 16px;">
+      <div style="display: flex; align-items: flex-start; gap: 8px; color: var(--app-engine-err-text);">
         <el-icon :size="16" style="margin-top: 1px;"><XCircle /></el-icon>
         <div>
           <div style="font-weight: 600; margin-bottom: 4px;">转换失败</div>
@@ -428,14 +428,14 @@ onMounted(() => {
 .converter-upload :deep(.el-upload) { width: 100%; }
 .converter-upload :deep(.el-upload-dragger) {
   width: 100%;
-  background: #1a1a1e;
-  border: 2px dashed #333;
+  background: var(--app-input-bg);
+  border: 2px dashed var(--app-input-border);
   border-radius: 12px;
   padding: 44px 20px;
   transition: all 0.2s;
 }
 .converter-upload :deep(.el-upload-dragger:hover) {
   border-color: var(--app-accent-1);
-  background: #1e1e2e;
+  background: var(--app-hover-bg);
 }
 </style>

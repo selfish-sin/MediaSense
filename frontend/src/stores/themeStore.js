@@ -19,7 +19,7 @@ const BG_KEY = 'mediasense_background'
 /** 午夜青蓝默认主色。 */
 const DEFAULT_ACCENT = '#38BDF8'
 
-const DEFAULT_BG = { type: 'builtin', id: 'abyss', dim: 28, blur: 0, cardOpacity: 100 }
+const DEFAULT_BG = { type: 'builtin', id: 'abyss', dim: 22, blur: 0, cardOpacity: 72 }
 
 function loadJson(key, fallback) {
   try {
@@ -72,12 +72,12 @@ export const useThemeStore = defineStore('theme', () => {
       url = `url("${bg.url}")`
     }
     root.style.setProperty('--app-bg-image', url)
-    root.style.setProperty('--app-bg-dim', `${bg.dim ?? 0}%`)
+    // 遮罩浓度：纯数字 0-70，消费端用 calc(var(--app-bg-dim) / 100) 得到 0-0.7
+    // 注意：不能带 %，否则 calc(28% / 100) 在 opacity 上下文非法 → 滑块失效
+    root.style.setProperty('--app-bg-dim', `${bg.dim ?? 0}`)
     root.style.setProperty('--app-bg-blur', `${bg.blur ?? 0}px`)
     // 卡片透明度：0-100 → 0-1，让背景图透过卡片显出
     root.style.setProperty('--app-card-opacity', `${(bg.cardOpacity ?? 100) / 100}`)
-    // 标记是否有背景，控制背景层显隐
-    root.style.setProperty('--app-bg-on', bg.type === 'none' ? '0' : '1')
   }
 
   // 初始化：应用一次
