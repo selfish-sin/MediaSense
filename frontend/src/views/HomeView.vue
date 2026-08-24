@@ -78,8 +78,13 @@ watch([inputType, inputUrl, inputText, batchUrls], () => saveInputState(), { dee
 const showThinking = ref(true)
 // 模型是否被用户手动改过（决定是否按字数自动推荐）
 const modelTouched = ref(false)
+// ★ 旧内置默认 key：仅当选择还停留在这些值（用户没设过默认/没手选）时才自动推荐
+const LEGACY_MODEL_KEYS = new Set(['', 'glm-4.5-air', 'deepseek-v4-flash'])
+function isLegacyModelSelection(key) {
+  return LEGACY_MODEL_KEYS.has(key)
+}
 watch(() => settings.selectedDimensions.word_count, (wordCount) => {
-  if (!modelTouched.value) {
+  if (!modelTouched.value && isLegacyModelSelection(settings.selectedModel)) {
     settings.selectedModel = settings.recommendModel(wordCount)
   }
 }, { immediate: true })
@@ -294,6 +299,11 @@ onMounted(async () => {
     loadTokenHistory(),
   ])
   // 追问模型列表由 ChatPanel 自行加载
+
+  // ★ 默认模型：用户在模型管理页设置了默认模型且当前未手动选过时，工作台默认选中它
+  if (!modelTouched.value && isLegacyModelSelection(settings.selectedModel) && modelStore.defaultModel) {
+    settings.selectedModel = modelStore.defaultModel
+  }
 
   // 恢复输入内容（sessionStorage）
   loadInputState()
@@ -1831,12 +1841,7 @@ onDeactivated(() => {
 
 .wb-card {
   margin-bottom: 16px;
-  border-radius: 12px !important;
-  overflow: hidden;
-  transition: box-shadow 0.2s, border-color 0.2s, transform 0.15s;
-}
-.wb-card:hover {
-  box-shadow: var(--app-card-glow, 0 0 0 transparent);
+  /* 透明背景 + 毛玻璃 + 圆角 + 悬停 glow 已由 App.vue 全局 .wb-card 提供 */
 }
 .wb-card-title {
   font-weight: 650;

@@ -30,6 +30,38 @@ const form = reactive({
   max_tokens: null,
 })
 
+// ★ 常见服务商快捷模板：点击预填端点/认证/模型ID，减少手填
+const PROVIDER_PRESETS = [
+  { label: 'DeepSeek', endpoint: 'https://api.deepseek.com/v1/chat/completions', modelHint: 'deepseek-chat', auth: 'bearer' },
+  { label: '阿里云百炼', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', modelHint: 'qwen-plus', auth: 'bearer' },
+  { label: 'OpenAI', endpoint: 'https://api.openai.com/v1/chat/completions', modelHint: 'gpt-4o', auth: 'bearer' },
+  { label: '智谱 GLM', endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', modelHint: 'glm-4.5-air', auth: 'bearer' },
+  { label: '硅基流动', endpoint: 'https://api.siliconflow.cn/v1/chat/completions', modelHint: 'deepseek-ai/DeepSeek-V3', auth: 'bearer' },
+  { label: '本地 Ollama', endpoint: 'http://localhost:11434/v1/chat/completions', modelHint: 'llama3.1', auth: 'none' },
+]
+
+function applyPreset(p) {
+  form.endpoint = p.endpoint
+  form.auth_type = p.auth
+  form.model_id = p.modelHint
+  if (!form.key) form.key = deriveKey(p.modelHint)
+  if (!form.name) form.name = p.modelHint
+}
+
+function deriveKey(id) {
+  return String(id || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase()
+}
+
+function normalizeEndpoint(url) {
+  const u = (url || '').trim().replace(/\/+$/, '')
+  if (u && !u.includes('/chat/completions')) return `${u}/chat/completions`
+  return u
+}
+
+function isDefaultModel(row) {
+  return modelStore.defaultModel && row.key === modelStore.defaultModel
+}
+
 function openAddDialog() {
   dialogMode.value = 'add'
   showApiKey.value = false
@@ -66,12 +98,16 @@ async function handleSubmit() {
 }
 
 async function handleAdd() {
-  if (!form.key || !form.name || !form.endpoint) {
-    ElMessage.warning('请填写必填字段：Key、名称、端点')
+  // 自动派生/补全：key ← model_id/name，name ← model_id，endpoint 补 /chat/completions
+  const derivedKey = form.key.trim() || deriveKey(form.model_id || form.name)
+  const derivedName = form.name.trim() || form.model_id || derivedKey
+  const endpoint = normalizeEndpoint(form.endpoint)
+  if (!derivedKey || !derivedName || !endpoint) {
+    ElMessage.warning('请填写必填字段：Key、名称、端点（或点击上方服务商模板）')
     return
   }
   try {
-    await modelStore.addModel({ ...form })
+    await modelStore.addModel({ ...form, key: derivedKey, name: derivedName, endpoint })
     ElMessage.success('模型已添加')
     dialogVisible.value = false
   } catch (err) {
@@ -80,14 +116,25 @@ async function handleAdd() {
 }
 
 async function handleUpdate() {
-  if (!form.name || !form.endpoint) {
+  const name = form.name.trim() || form.model_id || form.key
+  const endpoint = normalizeEndpoint(form.endpoint)
+  if (!name || !endpoint) {
     ElMessage.warning('请填写必填字段：名称、端点')
     return
   }
   try {
-    await modelStore.updateModel(editingKey.value, { ...form })
+    await modelStore.updateModel(editingKey.value, { ...form, name, endpoint })
     ElMessage.success('模型已更新')
     dialogVisible.value = false
+  } catch (err) {
+    ElMessage.error(err.message)
+  }
+}
+
+async function handleSetDefault(key) {
+  try {
+    await modelStore.setDefaultModel(key)
+    ElMessage.success(`已设为默认模型：${key}`)
   } catch (err) {
     ElMessage.error(err.message)
   }
@@ -174,11 +221,29 @@ function handleFetchResult(res) {
   }
 }
 
-function handleQuickAdd(modelId) {
-  // 关闭获取列表弹窗，打开添加模型弹窗，预填 model_id
-  form.model_id = modelId
-  form.key = modelId.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase()
-  form.name = modelId
+async function handleQuickAdd(modelId) {
+  // ★ 一步保存：复用弹窗里已填的 endpoint/api_key，直接添加，不再弹回表单二次提交
+  if (!form.endpoint) {
+    ElMessage.warning('请先填写端点地址')
+    return
+  }
+  const key = deriveKey(modelId)
+  const payload = {
+    ...form,
+    key: form.key.trim() || key,
+    name: form.name.trim() || modelId,
+    model_id: modelId,
+    endpoint: normalizeEndpoint(form.endpoint),
+  }
+  try {
+    await modelStore.addModel(payload)
+    ElMessage.success(`模型 ${modelId} 已添加`)
+    fetchDialogVisible.value = false
+    // 添加模式下直接关掉表单弹窗；编辑模式下保留，避免打断正在进行的编辑
+    if (dialogMode.value === 'add') dialogVisible.value = false
+  } catch (err) {
+    ElMessage.error(err.message)
+  }
 }
 
 onMounted(() => {
@@ -188,12 +253,15 @@ onMounted(() => {
 
 <template>
   <div style="max-width: 1200px; margin: 0 auto; padding: 24px;">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-      <h2 style="margin: 0;">AI模型管理</h2>
-      <el-button type="primary" @click="openAddDialog">添加模型</el-button>
-    </div>
+    <el-card class="app-card" shadow="never" style="margin-bottom: 16px;">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h2 style="margin: 0;">AI模型管理</h2>
+        <el-button type="primary" @click="openAddDialog">添加模型</el-button>
+      </div>
+    </el-card>
 
-    <el-table :data="modelStore.models" v-loading="modelStore.loading" stripe style="width: 100%;">
+    <el-card class="app-card" shadow="never">
+      <el-table :data="modelStore.models" v-loading="modelStore.loading" stripe style="width: 100%;">
       <el-table-column prop="key" label="Key" width="150" />
       <el-table-column prop="name" label="名称" width="200" />
       <el-table-column prop="endpoint" label="端点" min-width="300" show-overflow-tooltip />
@@ -204,18 +272,44 @@ onMounted(() => {
           <el-tag v-if="row.is_builtin" type="info" size="small">内置</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="240" fixed="right">
+      <el-table-column label="默认" width="70" align="center">
+        <template #default="{ row }">
+          <el-tag v-if="isDefaultModel(row)" type="success" size="small">默认</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="320" fixed="right">
         <template #default="{ row }">
           <el-button size="small" link type="primary" @click="openEditDialog(row)">编辑</el-button>
           <el-button size="small" link @click="handleTest(row.key)" :loading="testing">测试</el-button>
+          <el-button
+            v-if="!isDefaultModel(row)"
+            size="small"
+            link
+            type="warning"
+            @click="handleSetDefault(row.key)"
+          >设为默认</el-button>
           <el-button size="small" type="danger" link @click="handleDelete(row.key)" :disabled="row.is_builtin">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
+    </el-card>
 
     <!-- 添加/编辑模型弹窗 -->
     <el-dialog v-model="dialogVisible" :title="dialogMode === 'add' ? '添加模型' : '编辑模型'" width="500px">
       <el-form :model="form" label-width="80px">
+        <el-form-item v-if="dialogMode === 'add'" label="快捷模板">
+          <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+            <el-tag
+              v-for="p in PROVIDER_PRESETS"
+              :key="p.label"
+              size="small"
+              effect="plain"
+              class="preset-tag"
+              style="cursor: pointer;"
+              @click="applyPreset(p)"
+            >{{ p.label }}</el-tag>
+          </div>
+        </el-form-item>
         <el-form-item label="Key" required>
           <el-input v-model="form.key" :disabled="dialogMode === 'edit'" placeholder="唯一标识，如 my-gpt4" />
         </el-form-item>
@@ -275,13 +369,23 @@ onMounted(() => {
         <el-table-column prop="id" label="模型ID" min-width="200" show-overflow-tooltip />
         <el-table-column label="操作" width="80" align="center">
           <template #default="{ row }">
-            <el-button size="small" type="primary" link @click="handleQuickAdd(row.id); fetchDialogVisible = false; dialogVisible = true">添加</el-button>
+            <el-button size="small" type="primary" link @click="handleQuickAdd(row.id)">添加</el-button>
           </template>
         </el-table-column>
       </el-table>
+      <div v-if="fetchedModels.length > 0" style="font-size: 11px; color: #909399; margin-top: 8px;">
+        点击「添加」直接用已填写的端点/API Key 保存该模型
+      </div>
       <div v-else-if="!fetchError" style="text-align: center; padding: 40px; color: #909399;">
         未获取到模型或接口不支持
       </div>
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.preset-tag:hover {
+  border-color: var(--el-color-primary);
+  color: var(--el-color-primary);
+}
+</style>

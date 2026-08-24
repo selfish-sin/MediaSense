@@ -81,6 +81,7 @@ export const modelsApi = {
   update: (key, data) => api.put(`/models/${key}`, data),
   delete: (key) => api.delete(`/models/${key}`),
   test: (data) => api.post('/models/test', data),
+  setDefault: (key) => api.post('/models/default', { key }),
   fetch: (keyOrParams) => {
     // 支持两种调用方式：传 key（字符串）或传 {endpoint, api_key}（对象）
     if (typeof keyOrParams === 'string') {

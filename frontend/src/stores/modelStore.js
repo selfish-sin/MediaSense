@@ -39,6 +39,11 @@ export const useModelStore = defineStore('model', () => {
     return await modelsApi.test({ key })
   }
 
+  async function setDefaultModel(key) {
+    await modelsApi.setDefault(key)
+    await loadModels()
+  }
+
   return {
     models,
     defaultModel,
@@ -48,5 +53,6 @@ export const useModelStore = defineStore('model', () => {
     updateModel,
     deleteModel,
     testModel,
+    setDefaultModel,
   }
 })

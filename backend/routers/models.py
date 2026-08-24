@@ -7,11 +7,18 @@ import httpx
 from fastapi import APIRouter, HTTPException
 
 from models.schemas import ModelConfigCreate, ModelConfigResponse, ModelTestRequest, ModelTestResponse
-from db.model_repo import get_all_models, get_model_by_key, add_model, update_model, delete_model
-from config import DEFAULT_MODEL
+from db.model_repo import get_all_models, get_model_by_key, add_model, update_model, delete_model, get_default_model_key, set_default_model
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _normalize_endpoint(endpoint: str) -> str:
+    """OpenAI 兼容端点补全：缺 /chat/completions 时自动补上（幂等）"""
+    url = (endpoint or '').strip().rstrip('/')
+    if url and '/chat/completions' not in url:
+        url = url + '/chat/completions'
+    return url
 
 
 @router.get("")
@@ -21,7 +28,18 @@ async def list_models():
     for m in models:
         if m.get('api_key') and len(m['api_key']) > 8:
             m['api_key'] = m['api_key'][:4] + '****' + m['api_key'][-4:]
-    return {"models": models, "default": DEFAULT_MODEL}
+    return {"models": models, "default": get_default_model_key()}
+
+
+@router.post("/default")
+async def set_default_model_api(body: dict):
+    """设置默认模型（校验模型存在）"""
+    key = (body or {}).get('key', '')
+    if not key:
+        raise HTTPException(status_code=400, detail="缺少 key 参数")
+    if not set_default_model(key):
+        raise HTTPException(status_code=404, detail=f"模型 {key} 不存在")
+    return {"success": True, "default": key, "message": f"默认模型已设为 {key}"}
 
 
 @router.post("")
@@ -30,7 +48,7 @@ async def add_model_api(model: ModelConfigCreate):
     success = add_model(
         key=model.key,
         name=model.name,
-        endpoint=model.endpoint,
+        endpoint=_normalize_endpoint(model.endpoint),
         api_key=model.api_key,
         model_id=model.model_id,
         auth_type=model.auth_type,
@@ -62,7 +80,7 @@ async def update_model_api(key: str, model: ModelConfigCreate):
         key=key,
         name=model.name,
         api_key=model.api_key if model.api_key is not None else existing.get('api_key', ''),
-        endpoint=model.endpoint,
+        endpoint=_normalize_endpoint(model.endpoint),
         model_id=model.model_id,
         auth_type=model.auth_type,
         temperature=model.temperature,
@@ -106,7 +124,8 @@ async def test_model(req: ModelTestRequest):
 
             if resp.status_code == 200:
                 data = resp.json()
-                content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+                choices = data.get('choices') or []
+                content = choices[0].get('message', {}).get('content', '') if choices else ''
                 return ModelTestResponse(success=True, response=content, latency_ms=latency_ms)
             else:
                 return ModelTestResponse(success=False, error=f"API返回 {resp.status_code}: {resp.text[:200]}",

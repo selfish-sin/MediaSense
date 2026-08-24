@@ -6,8 +6,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
-from config import TRANSLATE_LANGS, DEFAULT_MODEL
-from db.model_repo import get_model_by_key
+from config import TRANSLATE_LANGS
+from db.model_repo import get_model_by_key, get_default_model_key
 from db.job_repo import get_job, update_job
 
 router = APIRouter()
@@ -44,9 +44,9 @@ async def bilingual_translate(req: BilingualRequest):
     lang_cfg = TRANSLATE_LANGS.get(req.target_lang)
     lang_name = lang_cfg["name"] if lang_cfg else req.target_lang
 
-    # 获取模型
-    model_key = req.model or DEFAULT_MODEL
-    model_cfg = get_model_by_key(model_key) or get_model_by_key(DEFAULT_MODEL)
+    # 获取模型（未指定时用用户设置的默认模型）
+    model_key = req.model or get_default_model_key()
+    model_cfg = get_model_by_key(model_key) or get_model_by_key(get_default_model_key())
     if not model_cfg:
         raise HTTPException(status_code=400, detail=f"模型 {model_key} 不存在或未配置API Key")
 

@@ -25,6 +25,7 @@ from starlette.middleware.cors import CORSMiddleware
 from config import SERVER_HOST, SERVER_PORT, STATIC_DIR, DOWNLOAD_DIR, DEFAULT_MODEL, DATA_DIR
 from db.database import init_db, get_connection
 from db.job_repo import create_job, get_job, update_job, finish_job, fail_interrupted_jobs
+from db.model_repo import get_default_model_key
 from socket_handlers import emit_log, emit_progress
 
 # ============ 日志配置 ============
@@ -373,7 +374,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             import json
             options = json.loads(options)
 
-        model = job.get('model', DEFAULT_MODEL)
+        model = job.get('model') or get_default_model_key()
         summary_type = job.get('summary_type', 'summary')
         input_url = job.get('input_url', '')
         # ★ 清洗畸形URL（剪贴板可能带入截断BV片段等前缀垃圾）

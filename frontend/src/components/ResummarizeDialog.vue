@@ -35,12 +35,20 @@ const dimensions = ref({
   word_count: '3000',
 })
 
+// ★ 旧兜底值：settings.selectedModel 初始为 'glm-4.5-air'，用户没显式选择时
+//   应优先用数据库默认模型，而不是这个遗留占位值
+const LEGACY_PLACEHOLDER_KEYS = new Set(['', 'glm-4.5-air'])
+
 // 弹窗打开时初始化
 watch(visible, (v) => {
   if (v) {
-    // 同步当前 settings 的默认维度选择
+    // 同步当前 settings 的默认维度选择；模型优先用工作台选择，其次数据库默认模型
     dimensions.value = { ...settings.selectedDimensions }
-    if (settings.selectedModel) model.value = settings.selectedModel
+    if (LEGACY_PLACEHOLDER_KEYS.has(settings.selectedModel) && modelStore.defaultModel) {
+      model.value = modelStore.defaultModel
+    } else {
+      model.value = settings.selectedModel || 'glm-4.5-air'
+    }
   }
 })
 

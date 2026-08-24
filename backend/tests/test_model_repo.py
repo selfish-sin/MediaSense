@@ -8,6 +8,7 @@ from unittest.mock import patch
 from db.model_repo import (
     get_all_models, get_model_by_key, add_model,
     update_model, delete_model,
+    get_default_model_key, set_default_model,
 )
 
 CREATE_TABLES_SQL = """
@@ -22,6 +23,11 @@ CREATE TABLE IF NOT EXISTS model_configs (
     max_tokens INTEGER DEFAULT 4096,
     is_builtin INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 """
 
@@ -138,3 +144,31 @@ class TestDeleteModel:
         conn.commit()
         conn.close()
         assert delete_model("builtin") is False
+
+
+class TestDefaultModel:
+    def test_unset_falls_back_to_config_default(self):
+        from config import DEFAULT_MODEL
+        assert get_default_model_key() == DEFAULT_MODEL
+
+    def test_set_default(self):
+        add_model("m1", "Model 1", "https://api.example.com")
+        assert set_default_model("m1")
+        assert get_default_model_key() == "m1"
+
+    def test_set_default_nonexistent_model(self):
+        assert set_default_model("ghost") is False
+
+    def test_default_falls_back_when_model_deleted(self):
+        add_model("m1", "Model 1", "https://api.example.com")
+        set_default_model("m1")
+        delete_model("m1")
+        from config import DEFAULT_MODEL
+        assert get_default_model_key() == DEFAULT_MODEL
+
+    def test_set_default_overwrites(self):
+        add_model("a", "A", "https://a.com")
+        add_model("b", "B", "https://b.com")
+        set_default_model("a")
+        set_default_model("b")
+        assert get_default_model_key() == "b"

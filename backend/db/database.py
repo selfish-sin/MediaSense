@@ -235,6 +235,15 @@ def init_db():
         )
     """)
 
+    # 应用级设置表（键值对，如用户设置的默认模型）
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     # ★ 索引（IF NOT EXISTS，纯增量；加速列表/去重/批量/token汇总/追问历史查询）
     _index_stmts = [
         "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)",
