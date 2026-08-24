@@ -29,8 +29,8 @@ backend/data/bilibili_cookies.json
 backend/data/token_usage.json
 backend/data/custom_models.json
 
-# Whisper models (3.6GB, 共享旧目录)
-models/
+# Whisper models (3.6GB, 共享旧目录，仅根目录；勿写成 models/ 以免误忽略 backend/models 包)
+/models/
 
 # Binaries
 bin/
