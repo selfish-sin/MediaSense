@@ -1,6 +1,6 @@
 # youtube_tool_v2 CONTEXT
 
-> 最近核对：2026-08-09 | FastAPI + Socket.IO | 默认端口：7001
+> 最近核对：2026-08-24 | FastAPI + Socket.IO | 默认端口：7001
 
 ## 一分钟速览
 
@@ -59,3 +59,5 @@ python main.py
 - 批量 URL 已修（2026-08-09，task 08-09-fix-batch-url-dedup 已归档）：`batch_submit` 读取 `force_new`（默认 True，与单 URL 路径对齐），裸 BV/短链经 `sanitize_input_url` 补全。
 - 历史搜索已修（2026-08-09，task 08-09-fix-history-search 已归档）：`get_jobs`/`list_jobs` 加 `keyword` 参数（`title`/`input_url` LIKE，`%`/`_` 转义），前端搜索框从转录全文搜索改接列表过滤。
 - AI 校正展示与有效性已修（2026-08-09，task 08-09-fix-ai-correct-display-and-validity 已归档）：`correct_transcript` 加 4 项加固（标记完整性校验/长度异常检测/显式失败/边界分块），返回 4 元组含 stats；`correction_stats` 持久化到 jobs 表（新列）；`ResultView` 新增「转录文本」tab（原文/校正切换+校正统计告警），`do_summary=false` 时默认落转录 tab；`HomeView` 加校正模型选择器；backend pytest 370 全绿、frontend vitest 16 全绿。
+- 模型默认/失败重试/新增模板优化（2026-08-24，task 08-24-model-default-resume-template）：`app_settings` 键值表存默认模型（`db/model_repo.py` 的 `get_default_model_key`/`set_default_model`），`GET /api/models` 的 `default` 字段来自 DB（回退 config），新增 `POST /api/models/default`；运行时模型回退点（submit/resummarize/batch/translate/create_job/process_job）统一走 DB 默认；`POST /api/jobs/{id}/summarize` 放宽到 failed（保留转录文本即可，仅重跑 AI 步骤）并补 AI 哨兵串检查；修复流式 chunk `choices=[]` 越界（`services/ai_processor.py`，阿里云 MaaS usage chunk 引发）；模型管理页加「设为默认」/默认标签、6 个服务商快捷模板、拉列表一键添加、端点自动补全。
+- 总结失败根因记录：OpenAI 兼容流式接口（阿里云 MaaS）末尾发 `choices: []` 的 usage chunk，`chunk.get('choices', [{}])[0]` 会越界（dict.get 只在 key 缺失时给默认值）；已在 `ai_processor.py` 与 `routers/models.py` 测试接口统一改为 `(chunk.get('choices') or [])` 防护。
