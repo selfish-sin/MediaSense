@@ -11,8 +11,9 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from db.database import get_connection, get_readonly_connection
+from db.model_repo import get_default_model_key
 from models.schemas import JobStatus
-from config import DEFAULT_MODEL, DOWNLOAD_DIR
+from config import DOWNLOAD_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ def create_job(
     input_url: Optional[str] = None,
     input_text: Optional[str] = None,
     input_file: Optional[str] = None,
-    model: str = DEFAULT_MODEL,
+    model: Optional[str] = None,
     summary_type: str = "summary",
     options: Optional[Dict[str, Any]] = None,
     do_summary: bool = True,
@@ -48,6 +49,8 @@ def create_job(
     batch_id: Optional[str] = None,
 ) -> str:
     """创建新任务，返回 job_id"""
+    # 未指定模型时用用户设置的默认模型（DB 默认，未设置回退 config）
+    model = model or get_default_model_key()
     job_id = str(uuid.uuid4())[:8]
     opts = options or {}
     # 将 boolean options 嵌入 options JSON
