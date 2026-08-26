@@ -1,6 +1,6 @@
 # youtube_tool_v2 CONTEXT
 
-> 最近核对：2026-08-24 | FastAPI + Socket.IO | 默认端口：7001
+> 最近核对：2026-08-26 | FastAPI + Socket.IO | 默认端口：7001
 
 ## 一分钟速览
 
@@ -63,3 +63,5 @@ python main.py
 - 总结失败根因记录：OpenAI 兼容流式接口（阿里云 MaaS）末尾发 `choices: []` 的 usage chunk，`chunk.get('choices', [{}])[0]` 会越界（dict.get 只在 key 缺失时给默认值）；已在 `ai_processor.py` 与 `routers/models.py` 测试接口统一改为 `(chunk.get('choices') or [])` 防护。
 - 重新总结交互重构（2026-08-24，08-24 任务后续）：删除 `components/ResummarizeDialog.vue` 弹出页（70% 宽、完整 7 维选择器、形同视频处理主页），新增 `components/ResummarizeControl.vue` 内联控件（模型下拉 + 重新总结按钮），HomeView 结果栏与 ResultView 工具栏/失败横幅统一接入。「重新总结」= 相同提示词（透传任务原始 dimensions/options）+ 换模型，仅重跑 AI 步骤；「到工作台重做」= `?rerun=jobId` 跳工作台回填输入与原始提示词，可改提示词后完整重跑（已有能力，未改）。
 - 清理工作台实测正常（2026-08-24）：dry-run 预览出 41 项/约 24MB，候选表/计划有效期/操作日志/审计 tab 正常，「确认并执行」需输入 DELETE 的二次确认门槛生效。
+- B站字幕防错位加固（2026-08-26，未建 task）：B站 AI 字幕在换源/重传后可能返回旧内容（历史数据），此前被无条件信任并跳过本地转录，导致分段/总结基于错误文本。新增两道防线：①字幕时长校验（body 时间跨度 vs 视频时长，明显不符即拒，转本地转录）；②内容抽查（默认开启，`subtitle_check=false` 可关：抽取音频开头 ~90s 用 Whisper CPU 转写，与字幕开头文本相似度 <0.3 判定错位，丢弃字幕转全量 Whisper，复用抽查时已下载的音频不二次下载）。顺带修复：中文字幕选取不再把 `ai-en` 等非中文 AI 字幕当中文；faster-whisper 分片转录在 GPU 运行时缺失（cublas64_12.dll）于生成器迭代期抛出时也能自动回落 CPU（此前只在 transcribe 调用期兜底，漏掉惰性编码段，曾致任务 f40508bd 失败）。
+- B站 API 风控加固（2026-08-26，未建 task）：批量任务齐射触发 412（request was banned）后旧代码全部白等 yt-dlp auto-sub。六项修复，全在 `backend/services/downloader.py`/`transcriber.py`：①限流串行化：进程级锁 + 最小间隔 ≥1s（`BILI_API_MIN_INTERVAL` 环境变量可调，`_throttle_bili_api`）；②接口顺序反转：`_fetch_subtitles_via_player_v2` 先走实测更稳的旧版 `x/player/v2`（带 dm_img_str 等浏览器常参数），wbi/v2 降级备用，412 时强制刷新 wbi 签名密钥重试一次；③浏览器指纹：完整 Chrome UA（此前截断 UA 是风控高权重特征）+ 进程级缓存 buvid3/buvid4 + 真实视频页 Referer（`_bili_headers`），yt-dlp 兜底同样注入 buvid cookie 与完整 UA；④兜底提速：接口明确"无字幕"（api_ok=True 且空列表）时跳过 yt-dlp auto-sub 直转 Whisper，只有接口被风控/异常（api_ok=False）才走 yt-dlp；⑤412 文案可见化：拦截时提示"B站风控(412)，已自动回退"，不再只甩裸错误码；⑥Whisper 事前探测：`_cuda_runtime_usable()` 在模型加载点探测 cublas/cudnn DLL，缺失直接走 CPU。后端 pytest 398 全绿；真网实测 nav/view/player 接口在完整指纹下正常响应（含真实视频 ai-zh 字幕）。
