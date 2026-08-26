@@ -344,7 +344,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
         check_cancelled,
     )
     from services.downloader import (
-        download_video, extract_bilibili_subtitles,
+        download_video, extract_bilibili_subtitles, verify_subtitle_against_audio,
         handle_file_upload, handle_text_input, handle_subtitle_file,
         detect_platform, prevent_sleep, allow_sleep,
     )
@@ -473,6 +473,8 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             #   适用于B站AI字幕质量差、需要更高准确度、或不想依赖B站登录态的场景
             force_transcribe = options.get('force_transcribe', False)
             is_bilibili = 'bilibili' in input_url.lower() or 'b23.tv' in input_url.lower()
+            # 字幕内容抽查时预下载的音频；校验不过时复用，避免二次下载
+            pre_downloaded_audio = None
 
             if is_bilibili and force_transcribe:
                 await emit_log(sio, job_id, '🔧 已开启「强制转录」，跳过B站字幕提取，直接下载音频用Whisper转录（更慢但准确度更高）')
@@ -518,6 +520,35 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                         await emit_log(sio, job_id, f'✅ 字幕提取成功：{sub_result.get("message", "已获取字幕")}')
                         update_job(job_id, title=title, platform=platform, status='transcribing',
                                    progress_msg='B站字幕已获取（跳过下载和转录）')
+
+                        # ★ B站字幕内容抽查（默认开启，subtitle_check=false 可关）：
+                        # B站 AI 字幕在换源/重传后可能仍是旧内容（“历史数据”），
+                        # 与当前视频对不上却会被一路送进分段/总结。用本地音频开头
+                        # 与字幕开头做相似度比对，对不上就丢弃字幕改走 Whisper 转录。
+                        if not force_transcribe and options.get('subtitle_check', True):
+                            try:
+                                await emit_log(sio, job_id, '🧪 B站字幕内容抽查：下载音频并与字幕开头比对（防旧/错误字幕）...')
+                                audio_path, _, _ = await download_video(
+                                    input_url, job_dir, only_audio=True, sio=sio, job_id=job_id
+                                )
+                                ok, _detail = await verify_subtitle_against_audio(
+                                    txt_path, str(audio_path), sio=sio, job_id=job_id
+                                )
+                                if ok:
+                                    await emit_log(sio, job_id, f'✅ B站字幕内容抽查通过（{_detail}），使用该字幕')
+                                else:
+                                    await emit_log(sio, job_id, f'⚠ B站字幕内容抽查未通过（{_detail}）：疑似旧/错误字幕，丢弃，转本地Whisper转录')
+                                    for _p in (srt_path, txt_path):
+                                        try:
+                                            Path(_p).unlink(missing_ok=True)
+                                        except OSError:
+                                            pass
+                                    pre_downloaded_audio = str(audio_path)
+                                    srt_path = None
+                                    txt_path = None
+                            except Exception as e:
+                                logger.warning(f'B站字幕抽查异常（保留原字幕结果）: {e}')
+                                await emit_log(sio, job_id, f'⚠ B站字幕抽查不可用（{e}），按原结果使用字幕')
                     else:
                         await emit_log(sio, job_id, f'⚠️ 字幕提取失败：{sub_result.get("message", "")}')
 
@@ -545,7 +576,12 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                 _retry = options.get('_retry', False)
                 file_path = None
                 skip_download = False
-                if _retry:
+                if pre_downloaded_audio:
+                    # ★ 字幕内容抽查时已下载音频，校验不过直接复用，避免二次下载
+                    file_path = Path(pre_downloaded_audio)
+                    skip_download = True
+                    await emit_log(sio, job_id, '↩ 复用字幕抽查时下载的音频，跳过重复下载')
+                elif _retry:
                     # 搜索 job_dir 下已有音频/视频文件
                     audio_exts = ('.m4a', '.mp3', '.wav', '.opus', '.aac', '.webm', '.mp4', '.mkv')
                     for f in sorted(job_dir.glob('*'), key=lambda x: x.stat().st_mtime, reverse=True):

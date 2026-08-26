@@ -14,6 +14,11 @@ from services.downloader import (
     handle_subtitle_file,
     _extract_bilibili_subtitles_ytdlp,
     _fetch_subtitles_via_player_v2,
+    _subtitle_head_text,
+    _text_similarity,
+    verify_subtitle_against_audio,
+    _bili_headers,
+    _ensure_buvid,
     PLATFORM_CONFIG,
 )
 
@@ -228,7 +233,7 @@ class TestExtractYoutubeSubtitles:
 
 
 class TestExtractBilibiliSubtitlesYtdlp:
-    def test_player_api_prefers_wbi_and_returns_subtitles(self, monkeypatch):
+    def test_player_api_prefers_legacy_v2_then_wbi(self, monkeypatch):
         calls = []
 
         class FakeResponse:
@@ -236,10 +241,7 @@ class TestExtractBilibiliSubtitlesYtdlp:
                 return {"code": 0, "data": {"subtitle": {"subtitles": [{"lan": "zh-CN"}]}}}
 
         monkeypatch.setattr("services.downloader.load_cookies", lambda: {})
-        monkeypatch.setattr(
-            "services.downloader._build_wbi_url",
-            lambda base, params: f"{base}?signed=1",
-        )
+        monkeypatch.setattr("services.downloader._throttle_bili_api", lambda: None)
 
         def fake_get(url, headers, timeout):
             calls.append(url)
@@ -249,8 +251,66 @@ class TestExtractBilibiliSubtitlesYtdlp:
 
         result = _fetch_subtitles_via_player_v2(1, 2, "BV1abc123456")
 
-        assert result["subtitles"][0]["lan"] == "zh-CN"
-        assert calls[0].startswith("https://api.bilibili.com/x/player/wbi/v2")
+        assert result[0]["subtitles"][0]["lan"] == "zh-CN"
+        assert result[2] is True
+        # 接口顺序反转：实测更稳的旧版 player/v2 优先，wbi/v2 只作备用
+        assert calls[0].startswith("https://api.bilibili.com/x/player/v2")
+        assert "wbi" not in calls[0]
+
+    def test_player_api_confirms_no_subtitle_when_code_ok(self, monkeypatch):
+        class FakeResponse:
+            def json(self):
+                return {"code": 0, "data": {"subtitle": {"subtitles": []}}}
+
+        monkeypatch.setattr("services.downloader.load_cookies", lambda: {})
+        monkeypatch.setattr("services.downloader._throttle_bili_api", lambda: None)
+        monkeypatch.setattr(
+            "services.downloader.httpx.get",
+            lambda url, headers, timeout: FakeResponse(),
+        )
+
+        subtitle, tl, api_ok = _fetch_subtitles_via_player_v2(1, 2, "BV1abc123456")
+
+        assert subtitle == {}
+        assert api_ok is True  # B站正常响应但无字幕：跳过 yt-dlp 兜底，直接转 Whisper
+
+    def test_player_api_marks_banned_on_412(self, monkeypatch):
+        class FakeResponse:
+            def json(self):
+                return {"code": -412, "message": "request was banned"}
+
+        monkeypatch.setattr("services.downloader.load_cookies", lambda: {})
+        monkeypatch.setattr("services.downloader._throttle_bili_api", lambda: None)
+        monkeypatch.setattr(
+            "services.downloader.httpx.get",
+            lambda url, headers, timeout: FakeResponse(),
+        )
+
+        subtitle, tl, api_ok = _fetch_subtitles_via_player_v2(1, 2, "BV1abc123456")
+
+        assert subtitle == {}
+        assert api_ok is False  # 接口全部被风控：状态未知，必须走 yt-dlp/Whisper 兜底
+
+
+class TestBiliFingerprint:
+    """浏览器指纹（完整 UA + buvid）与 B站 API 限流纯逻辑测试"""
+
+    def test_headers_include_full_ua_buvid_and_referer(self, monkeypatch):
+        monkeypatch.setattr(
+            "services.downloader.load_cookies", lambda: {"SESSDATA": "test-sessdata"}
+        )
+        headers = _bili_headers("BV1abc123456")
+        assert "Chrome/126" in headers["User-Agent"]
+        assert headers["Referer"] == "https://www.bilibili.com/video/BV1abc123456"
+        assert "buvid3=" in headers["Cookie"] and "buvid4=" in headers["Cookie"]
+        assert "SESSDATA=test-sessdata" in headers["Cookie"]
+
+    def test_buvid_stable_per_process(self):
+        first = _ensure_buvid()
+        second = _ensure_buvid()
+        assert first is second  # 进程级缓存，会话内保持一致
+        assert first["buvid3"].endswith("infoc")
+        assert first["buvid4"].endswith("infoc")
 
     @pytest.mark.asyncio
     async def test_accepts_valid_srt_when_ytdlp_returns_nonzero(self, tmp_path, monkeypatch):
@@ -270,3 +330,81 @@ class TestExtractBilibiliSubtitlesYtdlp:
         assert result["success"] is True
         assert result["srt_path"].name == "video.zh-CN.srt"
         assert result["txt_path"].exists()
+
+
+class TestSubtitleContentCheck:
+    """B站字幕内容抽查（防旧/错误字幕）纯逻辑测试"""
+
+    def test_head_text_respects_max_seconds(self, tmp_path):
+        txt = tmp_path / "bilibili_subtitle.txt"
+        txt.write_text(
+            "[00:00 - 00:03] 第一句开场白\n"
+            "[00:03 - 00:10] 第二句引入主题\n"
+            "[01:40 - 01:45] 超过90秒不应被取到\n",
+            encoding="utf-8",
+        )
+        head = _subtitle_head_text(txt, max_seconds=90)
+        assert "第一句开场白" in head
+        assert "第二句引入主题" in head
+        assert "超过90秒" not in head
+
+    def test_head_text_falls_back_for_plain_lines(self, tmp_path):
+        txt = tmp_path / "plain.txt"
+        txt.write_text("没有时间戳的文本行一\n没有时间戳的文本行二\n", encoding="utf-8")
+        head = _subtitle_head_text(txt, max_seconds=90)
+        assert "文本行一" in head and "文本行二" in head
+
+    def test_text_similarity_same_content_high(self):
+        assert _text_similarity("今天我们讲芯片产业的历史发展脉络", "今天我们讲芯片产业的历史发展脉络") > 0.9
+
+    def test_text_similarity_diff_content_low(self):
+        assert _text_similarity("芯片产业为何走向失败的历史分析", "今天天气很好我们出去散步吧") < 0.2
+
+    @pytest.mark.asyncio
+    async def test_verify_keeps_subtitle_when_similar(self, tmp_path, monkeypatch):
+        txt = tmp_path / "sub.txt"
+        txt.write_text(
+            "[00:00 - 00:05] 芯片简史第一集，我们开讲\n"
+            "[00:05 - 00:10] 今天要聊晶体管的发明与故事\n",
+            encoding="utf-8",
+        )
+        # 模拟本地 Whisper 转写开头，内容与字幕开头一致（个别词/语气稍有出入）
+        async def fake_to_thread(fn, *args):
+            return "芯片简史第一集我们开讲，今天要聊晶体管的发明还有故事"
+        monkeypatch.setattr("services.downloader.asyncio.to_thread", fake_to_thread)
+
+        ok, detail = await verify_subtitle_against_audio(txt, "audio.m4a")
+        assert ok is True
+        assert "相似度" in detail
+
+    @pytest.mark.asyncio
+    async def test_verify_rejects_subtitle_when_content_differs(self, tmp_path, monkeypatch):
+        txt = tmp_path / "sub.txt"
+        txt.write_text(
+            "[00:00 - 00:05] 苏联芯片产业为何走向失败\n[00:05 - 00:10] 巨人之殇的历史回顾\n",
+            encoding="utf-8",
+        )
+        # 模拟本地 Whisper 转写开头是另一段内容（换源后的新音频）
+        async def fake_to_thread(fn, *args):
+            return "今天天气很好，我们出去散步，顺便买点菜回家做饭"
+        monkeypatch.setattr("services.downloader.asyncio.to_thread", fake_to_thread)
+
+        ok, _detail = await verify_subtitle_against_audio(txt, "audio.m4a")
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_verify_keeps_subtitle_when_sampler_broken(self, tmp_path, monkeypatch):
+        """Whisper 抽查不可用时保留原字幕，不让校验本身拖垮任务"""
+        txt = tmp_path / "sub.txt"
+        txt.write_text("[00:00 - 00:05] 内容\n", encoding="utf-8")
+
+        def boom(path, max_seconds, language):
+            raise RuntimeError("model missing")
+
+        monkeypatch.setattr(
+            "services.downloader.asyncio.to_thread", lambda fn, *a: boom(*a)
+        )
+
+        ok, detail = await verify_subtitle_against_audio(txt, "audio.m4a")
+        assert ok is True
+        assert "抽查不可用" in detail

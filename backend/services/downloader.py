@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -31,6 +32,61 @@ MIXIN_KEY_ENC_TAB = [
 ]
 _wbi_key_cache = {"img_key": None, "sub_key": None, "expires": 0}
 
+# 完整 Chrome UA：之前截断的 UA 没有浏览器版本号，配合无 buvid 指纹，
+# 是 B站 风控判定“脚本”的高权重特征
+FULL_CHROME_UA = (
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+)
+
+# 进程级 buvid 指纹缓存（B站 风控核心维度之一，会话内保持一致，不每次现造）
+_BUVID_CACHE = {}
+
+
+def _ensure_buvid() -> dict:
+    """生成/缓存 buvid3/buvid4 指纹 cookie，返回 {"buvid3": ..., "buvid4": ...}"""
+    global _BUVID_CACHE
+    if _BUVID_CACHE:
+        return _BUVID_CACHE
+    import uuid
+    _BUVID_CACHE = {
+        'buvid3': uuid.uuid4().hex.upper() + 'infoc',
+        'buvid4': uuid.uuid4().hex.upper() + 'infoc',
+    }
+    logger.info(f'[buvid] 已生成会话指纹 buvid3={_BUVID_CACHE["buvid3"][:8]}...')
+    return _BUVID_CACHE
+
+
+def _bili_headers(bvid: str = '') -> dict:
+    """构造尽量接近浏览器的 B站 API 请求头：完整 UA + buvid 指纹 + 真实视频页 Referer"""
+    headers = {
+        'User-Agent': FULL_CHROME_UA,
+        'Referer': f'https://www.bilibili.com/video/{bvid}' if bvid else 'https://www.bilibili.com',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    }
+    cookies = load_cookies() or {}
+    cookies.update(_ensure_buvid())
+    headers['Cookie'] = '; '.join(f'{k}={v}' for k, v in cookies.items())
+    return headers
+
+
+# B站 API 限流：进程级锁 + 最小请求间隔。批量任务几乎同时启动时会“齐射”
+# 大量同源请求（今天 4 个任务 4 秒内打了 8+ 次），这是触发风控的最大诱因。
+_BILI_API_LOCK = threading.Lock()
+_BILI_API_LAST_TS = 0.0
+_BILI_API_MIN_INTERVAL = float(os.environ.get('BILI_API_MIN_INTERVAL', '1.0'))
+
+
+def _throttle_bili_api():
+    """串行化 + 限速 B站 API 调用；可被测试 monkeypatch 为 no-op"""
+    global _BILI_API_LAST_TS
+    with _BILI_API_LOCK:
+        wait = _BILI_API_MIN_INTERVAL - (time.time() - _BILI_API_LAST_TS)
+        if wait > 0:
+            time.sleep(wait)
+        _BILI_API_LAST_TS = time.time()
+
 
 def _get_wbi_keys() -> Tuple[Optional[str], Optional[str]]:
     """获取 B站 wbi img_key 和 sub_key（带缓存）
@@ -41,15 +97,8 @@ def _get_wbi_keys() -> Tuple[Optional[str], Optional[str]]:
     if _wbi_key_cache["expires"] > now and _wbi_key_cache["img_key"]:
         return _wbi_key_cache["img_key"], _wbi_key_cache["sub_key"]
     try:
-        cookies = load_cookies()
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://www.bilibili.com",
-        }
-        if cookies:
-            cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
-            headers["Cookie"] = cookie_str
-        resp = httpx.get("https://api.bilibili.com/x/web-interface/nav", headers=headers, timeout=10.0)
+        _throttle_bili_api()
+        resp = httpx.get("https://api.bilibili.com/x/web-interface/nav", headers=_bili_headers(), timeout=10.0)
         data = resp.json()
         # wbi_img 在未登录时也会返回（即使 code=-101），所以不检查 code
         wbi = data.get("data", {}).get("wbi_img", {})
@@ -226,52 +275,73 @@ def detect_platform(url: str) -> Tuple[str, bool]:
 def _fetch_subtitles_via_player_v2(aid, cid, bvid):
     """同步调用 B 站播放器 API 获取字幕列表。
 
-    B 站逐步收紧了未签名的 ``player/v2`` 接口。先走当前的 WBI
-    接口，再用浏览器常见参数尝试旧接口，避免把“接口返回空字幕”和
-    “请求被风控”混为一谈。
+    接口顺序：先走实测更稳的旧版 ``player/v2``（带浏览器常参数），
+    wbi/v2 降级为备用；wbi 若被风控(412)则强制刷新签名密钥重试一次。
+    返回 (subtitle_dict, timelength_ms, api_ok)：
+    - timelength 为视频时长（毫秒），用于字幕时长校验（防旧/错误字幕），取不到为 0
+    - api_ok 表示是否至少有一个接口正常响应（code==0，即使字幕为空）——
+      用于区分“B站确认无字幕”（可跳过 yt-dlp 兜底）和“接口被风控/异常”（必须兜底）
     """
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://www.bilibili.com',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-    }
-    cookies = load_cookies() or {}
-    if cookies:
-        headers['Cookie'] = '; '.join(f'{k}={v}' for k, v in cookies.items())
+    headers = _bili_headers(bvid)
 
-    urls = [
-        _build_wbi_url(
-            'https://api.bilibili.com/x/player/wbi/v2',
-            {'aid': aid, 'cid': cid, 'bvid': bvid},
-        ),
-        'https://api.bilibili.com/x/player/v2?' + urlencode({
-            'aid': aid,
-            'cid': cid,
-            'part': 1,
-            'dm_img_str': 'V2ViR0VuR2FyOlxyZXR1cm4gTmV3cyBLZXkgUGFnZSBMaXN0Ig==',
-            'dm_cover_img_str': '',
-            'dm_img_list': '[]',
-            'dm_img_crypto': '',
-            'web_location': '1315875',
-        }),
-    ]
-    for url in urls:
+    def _try(url: str):
+        _throttle_bili_api()
         try:
             resp = httpx.get(url, headers=headers, timeout=15.0)
             data = resp.json()
-            if data.get('code') != 0:
-                logger.warning(
-                    f'B站字幕接口返回错误: code={data.get("code")}, '
-                    f'msg={data.get("message")}'
-                )
-                continue
-            subtitle = data.get('data', {}).get('subtitle', {})
-            if subtitle.get('subtitles'):
-                return subtitle
         except Exception as e:
             logger.warning(f'B站字幕接口调用失败: {e}')
-    return {}
+            return {}, 0, False
+        code = data.get('code')
+        if code != 0:
+            if code == -412:
+                logger.warning('B站风控拦截(412 request was banned)，自动回退备用接口')
+            else:
+                logger.warning(
+                    f'B站字幕接口返回错误: code={code}, msg={data.get("message")}'
+                )
+            return {}, 0, False
+        sub = data.get('data', {}) or {}
+        subtitle = sub.get('subtitle', {})
+        return subtitle, sub.get('timelength', 0), True
+
+    # 1) 旧版 player/v2 优先（今天实测未被风控，先拿字幕再考虑更严的签名接口）
+    legacy_url = 'https://api.bilibili.com/x/player/v2?' + urlencode({
+        'aid': aid,
+        'cid': cid,
+        'part': 1,
+        'dm_img_str': 'V2ViR0VuR2FyOlxyZXR1cm4gTmV3cyBLZXkgUGFnZSBMaXN0Ig==',
+        'dm_cover_img_str': '',
+        'dm_img_list': '[]',
+        'dm_img_crypto': '',
+        'web_location': '1315875',
+    })
+    subtitle, tl, _ = _try(legacy_url)
+    if subtitle.get('subtitles'):
+        return subtitle, tl, True
+
+    # 2) wbi/v2 备用
+    wbi_url = _build_wbi_url(
+        'https://api.bilibili.com/x/player/wbi/v2',
+        {'aid': aid, 'cid': cid, 'bvid': bvid},
+    )
+    subtitle, tl, api_ok = _try(wbi_url)
+    if subtitle.get('subtitles'):
+        return subtitle, tl, True
+
+    # 3) wbi 被风控(412) → 强制刷新签名密钥重试一次（换一批 img/sub 密钥常常能过）
+    if not api_ok:
+        _wbi_key_cache['expires'] = 0  # 强制下次重建时重新拉取 nav 密钥
+        wbi_url2 = _build_wbi_url(
+            'https://api.bilibili.com/x/player/wbi/v2',
+            {'aid': aid, 'cid': cid, 'bvid': bvid},
+        )
+        if wbi_url2 != wbi_url:
+            subtitle, tl, api_ok2 = _try(wbi_url2)
+            if subtitle.get('subtitles'):
+                return subtitle, tl, True
+            api_ok = api_ok or api_ok2
+    return {}, 0, api_ok
 
 
 async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_id: str = '') -> dict:
@@ -348,10 +418,16 @@ async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_i
         """同步函数：在线程池中执行，使用 bilibili-api-python 提取字幕"""
         v = bili_video.Video(bvid=bvid, credential=credential)
         # Step 1: 获取视频信息（aid/cid/标题/分P列表）
+        _throttle_bili_api()
         info = bili_sync(v.get_info())
         aid = info.get('aid', 0)
         cid = info.get('cid', 0)
         video_title = info.get('title', bvid)
+        # 视频时长（秒），供字幕时长校验（防旧/错误字幕）
+        try:
+            video_duration = float(info.get('duration') or 0)
+        except (TypeError, ValueError):
+            video_duration = 0.0
         pages = info.get('pages', []) or []
 
         # 多P：根据 ?p=N 从 pages 取对应分P的 cid
@@ -363,14 +439,25 @@ async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_i
                 if page_cid:
                     cid = page_cid
                     video_title = f'{video_title} - P{page} {page_title}'
+                try:
+                    page_dur = float(page_info.get('duration') or 0)
+                except (TypeError, ValueError):
+                    page_dur = 0.0
+                if page_dur:
+                    video_duration = page_dur
             # 页数不足则用第1P（已在上方获取）
 
         # Step 2: 获取字幕列表
         # v17.4.2+: get_subtitle 内部用 player/wbi/v2 需要 SESSDATA，无登录时会抛异常
         # 无登录态时改用 player/v2 直接调用（无需 WBI 签名）
+        api_ok = False
         if credential is not None:
             try:
+                _throttle_bili_api()
                 sub_data = bili_sync(v.get_subtitle(cid=cid))
+                # 库返回了字幕列表结构（即使为空）即视为接口正常响应
+                if isinstance(sub_data, dict) and 'subtitles' in sub_data:
+                    api_ok = True
             except Exception as e:
                 logger.warning(f'bilibili-api-python 字幕接口失败: {e}')
                 sub_data = {}
@@ -380,19 +467,31 @@ async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_i
         # 账号 Cookie 不完整、接口版本变化或 WBI 签名要求变化时，
         # 统一回退到直接播放器 API，而不是立刻放弃字幕。
         if not isinstance(sub_data, dict) or not sub_data.get('subtitles'):
-            sub_data = _fetch_subtitles_via_player_v2(aid, cid, bvid)
+            fb_data, tl_ms, fb_ok = _fetch_subtitles_via_player_v2(aid, cid, bvid)
+            sub_data = fb_data if fb_data else sub_data
+            api_ok = api_ok or fb_ok
+            if tl_ms:
+                video_duration = tl_ms / 1000.0
         # sub_data 格式: {"allow_submit":..., "lan":..., "subtitles":[{lan, lan_doc, subtitle_url, ai_status}], ...}
         subtitles = sub_data.get('subtitles', []) if isinstance(sub_data, dict) else []
 
-        # 优先选中文（AI字幕 > 中文自动 > 中文 > 任何中文）
-        zh_subs = [s for s in subtitles if 'zh' in s.get('lan', '').lower() or 'ai' in s.get('lan', '').lower()]
+        # 优先选中文：中文AI字幕(ai-zh) / 中文CC字幕(zh-*) 都算；
+        # 绝不把 ai-en / ai-jp 之类的非中文字幕误当中文用
+        zh_subs = [
+            s for s in subtitles
+            if (s.get('lan') or '').lower().startswith('zh')
+            or (s.get('lan') or '').lower().startswith('ai-zh')
+        ]
+        if not zh_subs:
+            # 退而求其次：任意 AI 字幕（视频本身可能是外文）
+            zh_subs = [s for s in subtitles if (s.get('lan') or '').lower().startswith('ai')]
         if not zh_subs:
             zh_subs = subtitles
 
-        return aid, cid, video_title, zh_subs
+        return aid, cid, video_title, zh_subs, video_duration, api_ok
 
     try:
-        aid, cid, video_title, zh_subs = await asyncio.to_thread(_do_extract)
+        aid, cid, video_title, zh_subs, video_duration, api_ok = await asyncio.to_thread(_do_extract)
     except Exception as e:
         logger.warning(f'bilibili-api-python 提取字幕失败: {e}')
         if sio:
@@ -401,10 +500,18 @@ async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_i
         return await _extract_bilibili_subtitles_ytdlp(url, output_dir, sio, job_id)
 
     if not zh_subs:
+        if api_ok:
+            # B站确认无字幕（接口正常响应且字幕列表为空）→ 跳过 yt-dlp 兜底
+            # （yt-dlp 读的是同一个接口，只会白等 412 或重复确认无字幕），直接走 Whisper
+            if sio:
+                from socket_handlers import emit_log
+                await emit_log(sio, job_id, '⚠ B站确认无可用字幕，跳过yt-dlp兜底，直接走Whisper转录')
+            logger.info(f'B站确认无字幕 bvid={bvid}，跳过yt-dlp，转Whisper')
+            return {"success": False, "message": "B站确认无可用字幕（直接Whisper转录）", "reason": "no_subtitle"}
         if sio:
             from socket_handlers import emit_log
-            await emit_log(sio, job_id, '⚠ 该视频无可用字幕（B站未生成AI字幕+无CC字幕），将走Whisper转录')
-        logger.info(f'B站无字幕 bvid={bvid}，转yt-dlp/Whisper')
+            await emit_log(sio, job_id, '⚠ 字幕接口状态未知（可能被风控/异常），转yt-dlp兜底')
+        logger.info(f'B站字幕接口状态未知 bvid={bvid}，转yt-dlp兜底')
         return await _extract_bilibili_subtitles_ytdlp(url, output_dir, sio, job_id)
 
     if sio:
@@ -428,11 +535,8 @@ async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_i
 
     logger.info(f'字幕下载: bvid={bvid}, aid={aid}, cid={cid}, lan={chosen.get("lan","")}')
 
-    # 下载字幕内容
-    api_headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://www.bilibili.com',
-    }
+    # 下载字幕内容（带上完整浏览器指纹，避免 aisubtitle 也被风控）
+    api_headers = _bili_headers(bvid)
     try:
         async with httpx.AsyncClient(timeout=15.0, headers=api_headers) as sub_client:
             resp = await sub_client.get(sub_url)
@@ -452,6 +556,29 @@ async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_i
         body = []
     if not body:
         return {"success": False, "message": "字幕JSON内容为空"}
+
+    # ★ 字幕时长校验：B站 AI 字幕在换源/重传后可能仍是旧内容（相当于“历史数据”），
+    # 与当前视频对不上却会被当成转录结果一路送到分段/总结。字幕时间覆盖范围
+    # 明显偏离视频时长时判定可疑，回退本地转录而不是导出错误内容。
+    sub_duration = 0.0
+    try:
+        ends = [
+            float(item['to']) for item in body
+            if isinstance(item, dict) and item.get('to') is not None
+        ]
+        if ends:
+            sub_duration = max(ends)
+    except (TypeError, ValueError):
+        pass
+    if video_duration and sub_duration:
+        if sub_duration < video_duration * 0.5 - 30 or sub_duration > video_duration + 120:
+            msg = (f'B站字幕时长校验不通过：字幕覆盖 {sub_duration:.0f}s，'
+                   f'视频 {video_duration:.0f}s，疑似旧/错误字幕，转本地转录')
+            logger.warning(msg)
+            if sio:
+                from socket_handlers import emit_log
+                await emit_log(sio, job_id, f'⚠ {msg}')
+            return {"success": False, "message": "字幕时长与视频时长不匹配，疑似旧字幕", "reason": "duration_mismatch"}
 
     # 写入SRT和TXT（固定文件名，避免 Windows 非法字符 / ADS 旁路）
     # 视频标题只存返回字段，不进路径
@@ -501,6 +628,75 @@ def _write_subtitle_files(sub_json, srt_path: Path, txt_path: Path):
             f_txt.write(f"[{mm_start} - {mm_end}] {text}\n")
 
 
+# ============ B站字幕内容抽查（防旧/错误字幕） ============
+def _subtitle_head_text(txt_path, max_seconds: float = 90.0) -> str:
+    """从字幕 TXT（每行 `[MM:SS - MM:SS] 文本`）提取开头到 max_seconds 的文本。
+
+    用于和音频开头做内容比对。无时间戳的纯文本行（兜底格式）只收前几条防止失控。
+    """
+    head: list = []
+    try:
+        with open(txt_path, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                m = re.match(r'\[\s*(\d+):(\d+)\s*-\s*\d+:\d+\s*\]\s*(.*)', stripped)
+                if m:
+                    start = int(m.group(1)) * 60 + int(m.group(2))
+                    if start > max_seconds:
+                        break
+                    head.append(m.group(3))
+                else:
+                    if len(head) < 30:
+                        head.append(stripped)
+    except OSError:
+        return ''
+    return '\n'.join(head)
+
+
+def _text_similarity(text_a: str, text_b: str) -> float:
+    """两段文本的相似度（0~1）。归一化去标点/空白后按字符序列比对；
+    太短（<20 字符）无法可靠判定，按是否完全相同返回。"""
+    def _norm(s: str) -> str:
+        return re.sub(r'[^0-9a-zA-Z\u4e00-\u9fff]+', '', (s or '').lower())
+
+    na, nb = _norm(text_a), _norm(text_b)
+    if not na or not nb:
+        return 0.0
+    if len(na) < 20 or len(nb) < 20:
+        return 1.0 if na == nb else 0.0
+    from difflib import SequenceMatcher
+    return SequenceMatcher(None, na, nb).ratio()
+
+
+async def verify_subtitle_against_audio(txt_path, audio_path, sio=None, job_id: str = '',
+                                        max_seconds: float = 90.0, threshold: float = 0.3) -> Tuple[bool, str]:
+    """校验字幕内容与音频开头是否一致（防 B站 返回旧/错误字幕）。
+
+    用本地 Whisper 转写音频开头 max_seconds 秒，与字幕开头文本做相似度比对；
+    字幕与音频是两个独立来源，内容对不上即说明字幕不是当前视频的。
+    返回 (是否保留字幕, 说明)。任何抽查异常都按“保留字幕”处理，
+    不让校验本身拖垮任务（异常时宁可慢也不能出错误内容的前提另行兜底）。
+    """
+    try:
+        from services.transcriber import transcribe_audio_sample
+        sub_head = _subtitle_head_text(txt_path, max_seconds)
+        wh_text = await asyncio.to_thread(
+            transcribe_audio_sample, str(audio_path), max_seconds, None
+        )
+        ratio = _text_similarity(sub_head, wh_text)
+        detail = f'相似度 {ratio:.2f}（字幕头 {len(sub_head)} 字 vs 音频转写 {len(wh_text)} 字）'
+        logger.info(f'字幕内容抽查: {detail}')
+        if sio:
+            from socket_handlers import emit_log
+            await emit_log(sio, job_id, f'  字幕-音频相似度 {ratio:.2f}，阈值 {threshold}')
+        return ratio >= threshold, detail
+    except Exception as e:
+        logger.warning(f'字幕内容抽查失败，按保留字幕处理: {e}')
+        return True, f'抽查不可用（{type(e).__name__}: {e}）'
+
+
 async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None, job_id: str = '') -> dict:
     """yt-dlp兜底提取B站字幕（带cookie）
     关键防误认：只认"本次调用新增"的srt，避免把旧任务残留当成成功结果
@@ -508,10 +704,13 @@ async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None
     bilibili_headers = [
         '--add-header', 'Origin:https://www.bilibili.com',
         '--add-header', 'Referer:https://www.bilibili.com',
+        '--add-header', f'User-Agent:{FULL_CHROME_UA}',
     ]
 
-    # 把 cookie 写成 Netscape 格式文件给 yt-dlp 用
-    cookies_dict = load_cookies()
+    # 把 cookie 写成 Netscape 格式文件给 yt-dlp 用（注入 buvid 指纹，yt-dlp 自己的
+    # BiliBili 提取器同样会被风控 412，带上指纹能显著降低拦截概率）
+    cookies_dict = load_cookies() or {}
+    cookies_dict.update(_ensure_buvid())
     cookie_file = output_dir / '.bilibili_cookies.txt'
     cookie_args = []
     if cookies_dict:
@@ -552,7 +751,8 @@ async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None
             if not new_srt_names:
                 stderr = result.stderr.decode('utf-8', errors='ignore')[:200] if result.stderr else ''
                 if result.returncode != 0:
-                    logger.warning(f'yt-dlp字幕提取失败(returncode={result.returncode}): {stderr}')
+                    hint = '（B站风控412拦截，自动转Whisper转录）' if '412' in stderr or 'Precondition Failed' in stderr else ''
+                    logger.warning(f'yt-dlp字幕提取失败(returncode={result.returncode}){hint}: {stderr}')
                 else:
                     logger.info(f'yt-dlp {sub_flag} 成功但未生成新srt（可能视频无字幕）')
                 continue  # 没新增就继续试下一个 flag

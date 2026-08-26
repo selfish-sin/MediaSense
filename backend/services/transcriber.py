@@ -115,6 +115,32 @@ def _is_cuda_runtime_missing(e: Exception) -> bool:
     )
 
 
+def _cuda_runtime_usable() -> bool:
+    """Windows 下探测 CUDA 运行时 DLL 是否真的能加载。
+
+    ctranslate2.get_cuda_device_count() 在有 GPU 但缺 cublas/cudnn 时
+    仍会报告可用，直到矩阵运算才崩（本机实测 cublas64_12.dll 缺失）。
+    提前探测可以直接一开始就走 CPU，避免先白跑一段推理再降级。
+    非 Windows 交给 ctranslate2 自身探测。
+    """
+    if os.name != 'nt':
+        return True
+    import ctypes
+
+    def _find(prefixes):
+        for p in prefixes:
+            try:
+                ctypes.WinDLL(p)
+                return True
+            except OSError:
+                continue
+        return False
+
+    cublas = _find(('cublas64_12.dll', 'cublas64_11.dll'))
+    cudnn = _find(('cudnn64_8.dll', 'cudnn64_9.dll', 'cudnn64_7.dll'))
+    return bool(cublas and cudnn)
+
+
 def _transcribe_with_model(model, audio_path, language, progress_callback, speaker_diarization):
     """用已加载的模型完成转录并写入 SRT/TXT，返回 (srt_path, txt_path, seg_count)。
 
@@ -318,7 +344,7 @@ def _transcribe_chunked(
     # ── 模型加载（一次） ──
     try:
         import ctranslate2
-        use_cuda = ctranslate2.get_cuda_device_count() > 0
+        use_cuda = ctranslate2.get_cuda_device_count() > 0 and _cuda_runtime_usable()
     except Exception:
         use_cuda = False
     if os.environ.get('WHISPER_FORCE_CPU', '').lower() in ('1', 'true', 'yes'):
@@ -381,6 +407,10 @@ def _transcribe_chunked(
 
         try:
             segs, info = model.transcribe(chunk_path, language=language, beam_size=5, vad_filter=True)
+            # ★ 物化生成器：faster-whisper 是惰性编码，CUDA 运行时缺失类错误
+            # （如 cublas64_12.dll 找不到）在迭代时才抛出；必须把迭代收进 try
+            # 才能触发 GPU→CPU 降级，否则分片任务会整段失败。
+            chunk_segments = list(segs)
         except RuntimeError as e:
             if use_cuda and _is_cuda_runtime_missing(e):
                 logger.warning('GPU 推理失败，降级 CPU')
@@ -391,13 +421,14 @@ def _transcribe_chunked(
                     local_files_only=local_only, cpu_threads=4, num_workers=1,
                 )
                 segs, info = model.transcribe(chunk_path, language=language, beam_size=5, vad_filter=True)
+                chunk_segments = list(segs)
             else:
                 raise
 
         current_speaker = 0
         last_seg_end = 0
         last_emit_time = 0.0
-        for seg in segs:
+        for seg in chunk_segments:
             seg_start = seg.start + offset
             seg_end_val = seg.end + offset
             segment_idx += 1
@@ -531,7 +562,7 @@ def _transcribe_sync_single(
     # 自动检测 CUDA，有GPU就用GPU（快3-5倍），没有就CPU
     try:
         import ctranslate2
-        use_cuda = ctranslate2.get_cuda_device_count() > 0
+        use_cuda = ctranslate2.get_cuda_device_count() > 0 and _cuda_runtime_usable()
     except Exception:
         use_cuda = False
 
@@ -605,6 +636,45 @@ def _transcribe_sync_single(
         else:
             raise
     return srt_path, txt_path, total
+
+
+def transcribe_audio_sample(audio_path: str, max_seconds: float = 90.0, language: Optional[str] = None) -> str:
+    """转写音频开头片段（用于字幕内容抽查校验），返回拼接后的纯文本。
+
+    固定走 CPU int8 + 最轻的可用模型：抽查只关心“开头说了什么”，
+    不依赖本机 CUDA 环境（避免 cublas 缺失把校验本身搞挂）。
+    失败抛异常，由调用方决定是否保留原字幕。
+    """
+    src = Path(audio_path)
+    sample_wav = src.with_name(f'{src.stem}_sample.wav')
+    ffmpeg = shutil.which('ffmpeg') or _FFMPEG_BIN
+    cmd = [
+        ffmpeg, '-y', '-v', 'quiet',
+        '-i', str(src),
+        '-t', str(max_seconds),
+        '-acodec', 'pcm_s16le',
+        str(sample_wav),
+    ]
+    result = subprocess.run(cmd, capture_output=True, check=False, timeout=120)
+    if not sample_wav.exists() or sample_wav.stat().st_size <= 0:
+        raise Exception(f'ffmpeg 截取音频开头失败（returncode={result.returncode}）')
+    try:
+        model_path, _actual_size, local_only = _select_model('base')
+        from faster_whisper import WhisperModel
+        model = WhisperModel(
+            model_path, device='cpu', compute_type='int8',
+            local_files_only=local_only, cpu_threads=4, num_workers=1,
+        )
+        segs, _info = model.transcribe(
+            str(sample_wav), language=language, beam_size=1, vad_filter=False
+        )
+        parts = [seg.text.strip() for seg in segs]
+        return ' '.join(p for p in parts if p)
+    finally:
+        try:
+            sample_wav.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 async def transcribe_audio(
