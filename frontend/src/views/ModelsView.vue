@@ -262,22 +262,16 @@ onMounted(() => {
 
     <el-card class="app-card" shadow="never">
       <el-table :data="modelStore.models" v-loading="modelStore.loading" stripe style="width: 100%;">
-      <el-table-column prop="key" label="Key" width="150" />
-      <el-table-column prop="name" label="名称" width="200" />
-      <el-table-column prop="endpoint" label="端点" min-width="300" show-overflow-tooltip />
-      <el-table-column prop="model_id" label="模型ID" width="150" />
-      <el-table-column prop="auth_type" label="认证" width="80" />
-      <el-table-column label="内置" width="60">
-        <template #default="{ row }">
-          <el-tag v-if="row.is_builtin" type="info" size="small">内置</el-tag>
-        </template>
-      </el-table-column>
+      <el-table-column prop="name" label="名称" width="160" show-overflow-tooltip />
+      <el-table-column prop="endpoint" label="端点" min-width="260" show-overflow-tooltip />
+      <el-table-column prop="model_id" label="模型ID" width="160" show-overflow-tooltip />
+      <el-table-column prop="auth_type" label="认证" width="76" show-overflow-tooltip />
       <el-table-column label="默认" width="70" align="center">
         <template #default="{ row }">
           <el-tag v-if="isDefaultModel(row)" type="success" size="small">默认</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="320" fixed="right">
+      <el-table-column label="操作" width="220" fixed="right">
         <template #default="{ row }">
           <el-button size="small" link type="primary" @click="openEditDialog(row)">编辑</el-button>
           <el-button size="small" link @click="handleTest(row.key)" :loading="testing">测试</el-button>
