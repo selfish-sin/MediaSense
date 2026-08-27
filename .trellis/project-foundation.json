@@ -1,14 +1,21 @@
 {
-  "workflow": "trellis",
+  "workflow": "ai-agent-workflow",
+  "workflowAuthority": "AI_AGENT_WORKFLOW.md",
   "contextFile": "CONTEXT.md",
   "specDir": ".trellis/spec/",
   "taskDir": ".trellis/tasks/",
   "contractAuthority": "none",
   "applicationServiceBoundary": "backend/main.py (FastAPI+Socket.IO ASGI) ↔ frontend/src/main.js (Vue3 SPA, build → backend/static/)",
-  "preflightCommand": "none",
-  "verifyCommand": "cd frontend && npm run test && npm run build; cd ../backend && venv/Scripts/python.exe -m pytest",
-  "verifyFullCommand": "none",
+  "preflightCommand": "git status --porcelain",
+  "framework": "vue3-spa (frontend) + fastapi (backend)",
+  "componentLibrary": "Element Plus",
+  "tokenSource": "frontend/src/style.css CSS variables + data-theme attr",
+  "contractSource": "none (single-repo local app, no external API contract)",
+  "deliveryState": "prototype",
+  "verifyCommand": "cd backend && venv/Scripts/python.exe -m pytest && cd ../frontend && npm run test && npm run build",
+  "verifyFullCommand": "cd backend && venv/Scripts/python.exe -m pytest && cd ../frontend && npm run test && npm run build",
+  "browserSmokeCommand": "cd backend && python main.py (port 7001) → http://localhost:7001",
   "frontendFoundation": "none",
   "createdAt": "2026-08-09",
-  "lastUpdated": "2026-08-09"
+  "lastUpdated": "2026-08-27"
 }

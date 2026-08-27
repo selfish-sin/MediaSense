@@ -8,10 +8,18 @@
 
 ## 工作流基础设施
 
-- **硬性前置条件**：开始任何需要修改或调查项目的任务前，必须读取本目录的 `CONTEXT.md`、`.trellis/workflow.md`、与当前任务相关的 `.trellis/spec/` 和 active task。若本地规范文件不存在或无法读取，停止并报告，不使用项目外路径猜测规范内容。
-- 任务流程由 Trellis 管理：Plan -> Execute -> Finish。
+- **总规范（强制）**：本仓库根目录的 `AI_AGENT_WORKFLOW.md`（v6.4）是唯一工作流权威来源，会话启动协议（§0）、风险分级 S/M0-M2/L 与流程路由（§1）、四件套调用规则（§2）、Open→Design→Build→Verify→Archive 各阶段（§3-§7）、质量门禁（§10）均以其为准。**任何会话开始改动项目前必须先读它**；Trellis 的 `.trellis/workflow.md` 只负责任务状态机，两者冲突时以 `AI_AGENT_WORKFLOW.md` 的阶段/门禁要求为补充约束。
+- **硬性前置条件**：开始任何需要修改或调查项目的任务前，必须读取本目录的 `CONTEXT.md`、`AI_AGENT_WORKFLOW.md`、与当前任务相关的 `.trellis/spec/` 和 active task。若本地规范文件不存在或无法读取，停止并报告，不使用项目外路径猜测规范内容。
+- 任务流程由 Trellis 管理：Open → Design → Build → Verify → Archive（对应 Trellis 的 Plan -> Execute -> Finish）。
 - 长期约定写入 `.trellis/spec/`，当前任务工件写入 `.trellis/tasks/<name>/`，临时想法写入 `ideas.md`。
 - 修改代码前先运行 `codegraph explore "<目标符号或问题>"`；没有可靠索引时明确记录不适用原因。
+
+### 风险分级与 COMMIT-DISCIPLINE（摘自 AI_AGENT_WORKFLOW §1/§2，冲突以原文为准）
+
+- 收到任务先判级：S（定位→改→定向验证→commit）/ M0-M2（按 Open→Design→Build→Verify→Archive 裁剪）/ L（全流程 + verify-full）。等级上下调必须用户本轮确认，不得代决。
+- **COMMIT-DISCIPLINE（强制）**：一个逻辑单元完成即当场 `git commit`，禁止攒批；失败单元也要提交 `[WIP-FAIL]` 标记 commit 留痕；严禁用 `git stash` 躲避提交纪律。
+- **PUSH-GATE（强制）**：任何 `git push` / 部署必须获用户本轮对话明确授权；静默 push 视为严重违规。
+- 禁止 `except: return []` / `.catch(() => [])` 静默吞错；错误必须可见可行动。
 
 ## CONTEXT.md 维护（强制）
 
