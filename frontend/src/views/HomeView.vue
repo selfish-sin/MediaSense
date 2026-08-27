@@ -103,15 +103,24 @@ const autoScroll = ref(true)
 let logTimer = null
 let lastTotal = 0
 
+// 连续拉取失败计数：≥3 次只提示一次，避免定时器刷屏；成功即重置
+let logFetchFailures = 0
+
 async function fetchLogs() {
   try {
     const res = await jobsApi.getLogs(200)
+    logFetchFailures = 0
     if (res.total < lastTotal) {
       backendLogs.value = []
       lastTotal = 0
     }
     const delta = res.total - lastTotal
-    if (delta > 0 && delta <= 200) {
+    if (delta > 200) {
+      // 增量超出单次拉取上限（日志爆发增长）：回退全量重载，禁止静默丢更新
+      await loadAllHistory()
+      return
+    }
+    if (delta > 0) {
       backendLogs.value = backendLogs.value.concat(res.lines.slice(-delta))
       lastTotal = res.total
       if (backendLogs.value.length > 1000) backendLogs.value = backendLogs.value.slice(-1000)
@@ -120,19 +129,30 @@ async function fetchLogs() {
       const el = document.getElementById('log-panel')
       if (el) el.scrollTop = el.scrollHeight
     })
-  } catch {}
+  } catch {
+    logFetchFailures++
+    if (logFetchFailures === 3) {
+      ElMessage.warning(`系统日志拉取失败（已连续 ${logFetchFailures} 次），稍后自动重试`)
+    }
+  }
 }
 
 async function loadAllHistory() {
   try {
     const res = await jobsApi.getLogs(2000)
+    logFetchFailures = 0
     backendLogs.value = res.lines
     lastTotal = res.total
     nextTick(() => {
       const el = document.getElementById('log-panel')
       if (el) el.scrollTop = el.scrollHeight
     })
-  } catch {}
+  } catch {
+    logFetchFailures++
+    if (logFetchFailures === 3) {
+      ElMessage.warning('系统日志加载失败，请检查后端服务是否正常')
+    }
+  }
 }
 
 function clearLogs() { backendLogs.value = []; lastTotal = 0 }
@@ -183,13 +203,6 @@ function scrollToJobProgress() {
     })
   })
 }
-
-// ============ 旧总结类型筛选状态（已迁移到 DimensionSelector，保留空变量避免模板引用报错） ============
-const typeSearchQuery = ref('')
-const typeFilterCategory = ref('all')
-const categoryTabs = []
-const categoryNames = {}
-const filteredSummaryTypes = computed(() => [])
 
 // ============ 路由参数处理（rerun / restore，供 onMounted 和 onActivated 复用） ============
 let _routeQueryHandled = false
