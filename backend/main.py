@@ -292,7 +292,254 @@ from socket_handlers import register_socket_events
 register_socket_events(sio)
 
 
-# ============ 任务处理主流程 ============
+# ============ 输入获取策略函数（_process_job_impl Step 1 拆分） ============
+# 按输入类型获取转录文本，统一返回 (srt_path, txt_path, seg_count, title, platform, files)。
+# ★ emit_* 在函数内 import（与原 _process_job_impl 一致），保证测试能以
+#   patch("socket_handlers.emit_xxx") 方式替换。
+
+
+class JobCancelledError(Exception):
+    """策略函数内部检测到用户取消；由 _process_job_impl 统一收尾（信号量交由外层释放）。"""
+
+
+async def _extract_bvid(input_url: str):
+    """从B站 URL 提取 BV 号；短链 b23.tv 通过 HEAD 重定向解析。"""
+    if '/BV' in input_url:
+        return input_url.split('/BV')[1].split('?')[0].split('/')[0]
+    if '@' in input_url:
+        try:
+            import requests as _req
+
+            def _resolve_redirect():
+                resp = _req.head(input_url, allow_redirects=False, timeout=5)
+                return resp.headers.get('Location', '')
+
+            real_url = await asyncio.to_thread(_resolve_redirect)
+            if '/BV' in real_url:
+                return real_url.split('/BV')[1].split('?')[0].split('/')[0]
+        except Exception:
+            pass
+    return None
+
+
+async def _handle_text_input(text, job_dir, sio, job_id, title, platform, progress_msg):
+    """纯文本/文本文件输入：直接生成 txt+srt，跳过下载与转录。"""
+    from socket_handlers import emit_progress
+    from services.downloader import handle_text_input as _text_input
+    txt_path_obj, srt_path_obj = await _text_input(text, job_dir, sio, job_id)
+    update_job(job_id, title=title, platform=platform, status='transcribing',
+               progress_msg=progress_msg)
+    await emit_progress(sio, job_id, 'transcribe', 100, progress_msg)
+    return str(srt_path_obj), str(txt_path_obj), len(text) // 1000 + 1, title, platform, {}
+
+
+async def _handle_subtitle_file(input_file, job_dir, sio, job_id):
+    """字幕文件输入（.srt/.vtt）：直接转换，跳过下载与转录。"""
+    from socket_handlers import emit_progress
+    from services.downloader import handle_subtitle_file
+    txt_path_obj, srt_path_obj = await handle_subtitle_file(
+        input_file, job_dir, sio=sio, job_id=job_id
+    )
+    title = Path(input_file).stem
+    update_job(job_id, title=title, platform='文本文件', status='transcribing',
+               progress_msg='文本文件已读取，跳过转录')
+    await emit_progress(sio, job_id, 'transcribe', 100, '文本文件已读取，跳过转录')
+    return str(srt_path_obj), str(txt_path_obj), 0, title, '文本文件', {}
+
+
+async def _handle_media_file(input_file, job_dir, sio, job_id, model_size, speaker_diarization, language):
+    """音视频文件上传：提取音频后 Whisper 转录。"""
+    from services.downloader import handle_file_upload
+    from services.transcriber import transcribe_audio
+    audio_path, title, platform = await handle_file_upload(input_file, job_dir, sio, job_id)
+    files = {'audio': str(audio_path)}
+    update_job(job_id, status='transcribing', progress_msg='开始转录上传文件')
+    srt_path, txt_path, seg_count = await transcribe_audio(
+        audio_path, model_size=model_size, platform=platform,
+        speaker_diarization=speaker_diarization, language=language,
+        sio=sio, job_id=job_id
+    )
+    return srt_path, txt_path, seg_count, title, platform, files
+
+
+async def _handle_url_input(input_url, job_dir, sio, job_id, options,
+                            model_size, speaker_diarization, language):
+    """URL 输入：B站字幕（含内容抽查）→ 平台原文字幕 → 下载+Whisper 转录（含断点续传）。"""
+    from socket_handlers import check_cancelled
+    from services.downloader import (
+        download_video, extract_bilibili_subtitles, verify_subtitle_against_audio,
+        detect_platform, extract_youtube_subtitles,
+    )
+    from services.transcriber import transcribe_audio
+
+    platform, _ = detect_platform(input_url)
+    title = ''
+    files = {}
+    srt_path = None
+    txt_path = None
+    seg_count = 0
+
+    # B站特殊路径：优先尝试提取字幕（CC + AI 双路径）
+    # ★ force_transcribe=True 时跳过B站字幕，直接下载音频+Whisper转录
+    #   适用于B站AI字幕质量差、需要更高准确度、或不想依赖B站登录态的场景
+    force_transcribe = options.get('force_transcribe', False)
+    is_bilibili = 'bilibili' in input_url.lower() or 'b23.tv' in input_url.lower()
+    # 字幕内容抽查时预下载的音频；校验不过时复用，避免二次下载
+    pre_downloaded_audio = None
+
+    if is_bilibili and force_transcribe:
+        await emit_log(sio, job_id, '🔧 已开启「强制转录」，跳过B站字幕提取，直接下载音频用Whisper转录（更慢但准确度更高）')
+    elif is_bilibili:
+        bvid = await _extract_bvid(input_url)
+        # 短链不一定在输入中直接包含 BV，仍交给提取器做重定向解析。
+        if not bvid:
+            bvid = '待解析'
+        if bvid:
+            await emit_log(sio, job_id, f'📄 检测到B站视频，尝试提取字幕（BV={bvid}）...')
+
+            # 读取登录态 cookie（需要AI字幕时必须）
+            from services.bilibili_cookies import load_cookies
+            _cookies = load_cookies() or {}
+            if not _cookies.get('SESSDATA'):
+                await emit_log(sio, job_id, '⚠️ 未登录B站，AI字幕可能无法获取（仅CC字幕可用）')
+
+            # 调用字幕提取（异步，不阻塞事件循环）
+            sub_result = await extract_bilibili_subtitles(input_url, job_dir, sio, job_id)
+
+            if sub_result.get('success'):
+                srt_path = sub_result['srt_path']
+                txt_path = sub_result['txt_path']
+                # 用B站API返回的视频标题（不是字幕内容第一行）
+                title = sub_result.get('title') or bvid
+                await emit_log(sio, job_id, f'✅ 字幕提取成功：{sub_result.get("message", "已获取字幕")}')
+                update_job(job_id, title=title, platform=platform, status='transcribing',
+                           progress_msg='B站字幕已获取（跳过下载和转录）')
+
+                # ★ B站字幕内容抽查（默认开启，subtitle_check=false 可关）：
+                # B站 AI 字幕在换源/重传后可能仍是旧内容（“历史数据”），
+                # 与当前视频对不上却会被一路送进分段/总结。用本地音频开头
+                # 与字幕开头做相似度比对，对不上就丢弃字幕改走 Whisper 转录。
+                if not force_transcribe and options.get('subtitle_check', True):
+                    try:
+                        await emit_log(sio, job_id, '🧪 B站字幕内容抽查：下载音频并与字幕开头比对（防旧/错误字幕）...')
+                        audio_path, _, _ = await download_video(
+                            input_url, job_dir, only_audio=True, sio=sio, job_id=job_id
+                        )
+                        ok, _detail = await verify_subtitle_against_audio(
+                            txt_path, str(audio_path), sio=sio, job_id=job_id
+                        )
+                        if ok:
+                            await emit_log(sio, job_id, f'✅ B站字幕内容抽查通过（{_detail}），使用该字幕')
+                        else:
+                            await emit_log(sio, job_id, f'⚠ B站字幕内容抽查未通过（{_detail}）：疑似旧/错误字幕，丢弃，转本地Whisper转录')
+                            for _p in (srt_path, txt_path):
+                                try:
+                                    Path(_p).unlink(missing_ok=True)
+                                except OSError:
+                                    pass
+                            pre_downloaded_audio = str(audio_path)
+                            srt_path = None
+                            txt_path = None
+                    except Exception as e:
+                        logger.warning(f'B站字幕抽查异常（保留原字幕结果）: {e}')
+                        await emit_log(sio, job_id, f'⚠ B站字幕抽查不可用（{e}），按原结果使用字幕')
+            else:
+                await emit_log(sio, job_id, f'⚠️ 字幕提取失败：{sub_result.get("message", "")}')
+
+    # YouTube / 通用平台：优先抓官方字幕（CC + 自动生成），比 Whisper 更快更准更省
+    # 抓取失败（无字幕/超时）则自动回退到下面的下载+Whisper 转录
+    if not srt_path and not is_bilibili and not force_transcribe:
+        await emit_log(sio, job_id, '📄 尝试抓取YouTube/平台原文字幕（CC+自动）...')
+        yt_sub = await extract_youtube_subtitles(
+            input_url, job_dir, sio, job_id, target_lang=language or 'zh'
+        )
+        if yt_sub.get('success'):
+            srt_path = yt_sub['srt_path']
+            txt_path = yt_sub['txt_path']
+            title = yt_sub.get('title') or title
+            await emit_log(sio, job_id, f'✅ 原文字幕抓取成功：{yt_sub.get("message", "已获取字幕")}')
+            update_job(job_id, title=title, platform=platform, status='transcribing',
+                       progress_msg='原文字幕已获取（跳过转录）')
+        else:
+            await emit_log(sio, job_id, f'⚠️ 原文字幕抓取失败：{yt_sub.get("message", "")}，转Whisper转录')
+
+    # 如果没有B站字幕 → 正常下载+转录
+    if not srt_path:
+        # ★ 断点续传：检测是否已有下载完的文件（重试场景）
+        _retry = options.get('_retry', False)
+        file_path = None
+        skip_download = False
+        if pre_downloaded_audio:
+            # ★ 字幕内容抽查时已下载音频，校验不过直接复用，避免二次下载
+            file_path = Path(pre_downloaded_audio)
+            skip_download = True
+            await emit_log(sio, job_id, '↩ 复用字幕抽查时下载的音频，跳过重复下载')
+        elif _retry:
+            # 搜索 job_dir 下已有音频/视频文件
+            audio_exts = ('.m4a', '.mp3', '.wav', '.opus', '.aac', '.webm', '.mp4', '.mkv')
+            for f in sorted(job_dir.glob('*'), key=lambda x: x.stat().st_mtime, reverse=True):
+                if f.suffix.lower() in audio_exts and f.stat().st_size > 1000:
+                    file_path = f
+                    title = title or f.stem
+                    skip_download = True
+                    await emit_log(sio, job_id, f'🔁 断点续传：发现已有文件 {f.name}（{f.stat().st_size//1024}KB），跳过下载')
+                    break
+
+        if not skip_download:
+            update_job(job_id, status='downloading', progress_msg='开始下载')
+
+            # 下载
+            if options.get('download_video_only', False):
+                file_path, title, platform = await download_video(
+                    input_url, job_dir, only_audio=False, video_only=True, sio=sio, job_id=job_id
+                )
+                files['video'] = str(file_path)
+            elif options.get('download_video', False):
+                file_path, title, platform = await download_video(
+                    input_url, job_dir, only_audio=False, sio=sio, job_id=job_id
+                )
+                files['video'] = str(file_path)
+            else:
+                file_path, title, platform = await download_video(
+                    input_url, job_dir, only_audio=True, sio=sio, job_id=job_id
+                )
+                files['audio'] = str(file_path)
+
+        if not file_path:
+            raise Exception("下载失败，未获取到音频/视频文件")
+
+        update_job(job_id, title=title, platform=platform)
+
+        if check_cancelled(job_id):
+            raise JobCancelledError(job_id)
+
+        # ★ 断点续传：检查是否已有转录文件（重试场景）
+        skip_transcribe = False
+        if _retry:
+            # ★ download_video 返回的是 str，统一成 Path 才能 with_suffix
+            file_path = Path(file_path)
+            expected_srt = file_path.with_suffix('.srt')
+            expected_txt = file_path.with_suffix('.txt')
+            if expected_srt.exists() and expected_txt.exists() \
+               and expected_srt.stat().st_size > 100 \
+               and expected_txt.stat().st_size > 100:
+                srt_path = str(expected_srt)
+                txt_path = str(expected_txt)
+                skip_transcribe = True
+                await emit_log(sio, job_id, f'🔁 断点续传：发现已有转录文件，跳过转录（SRT:{expected_srt.stat().st_size}字节 TXT:{expected_txt.stat().st_size}字节）')
+
+        if not skip_transcribe:
+            # 转录
+            update_job(job_id, status='transcribing', progress_msg='开始转录')
+            srt_path, txt_path, seg_count = await transcribe_audio(
+                file_path, model_size=model_size, platform=platform,
+                speaker_diarization=speaker_diarization, language=language,
+                sio=sio, job_id=job_id
+            )
+
+    return srt_path, txt_path, seg_count, title, platform, files
+
+
 async def process_job(job_id: str):
     """
     主处理流程：串联下载→转录→预览→AI总结→翻译→标签
@@ -365,12 +612,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
         emit_ai_token, set_preview_event, pop_preview_event,
         check_cancelled,
     )
-    from services.downloader import (
-        download_video, extract_bilibili_subtitles, verify_subtitle_against_audio,
-        handle_file_upload, handle_text_input, handle_subtitle_file,
-        detect_platform, prevent_sleep, allow_sleep,
-    )
-    from services.transcriber import transcribe_audio
+    from services.downloader import prevent_sleep, allow_sleep
     from services.ai_processor import (
         ai_process, translate_subtitles, generate_tags, TaskCancelledError,
     )
@@ -421,253 +663,56 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             # 但前端默认是 'zh'，所以走到这里通常意味着前端没传或传了空
             # 为安全起见，兜底中文
             language = 'zh'
-        download_video_opt = options.get('download_video', False)
-        download_video_only = options.get('download_video_only', False)
 
         # 每个任务独立目录
         job_dir = DOWNLOAD_DIR / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
 
         result = {'files': {}, 'title': '', 'platform': ''}
-        srt_path = None
-        txt_path = None
-        title = ''
-        platform = ''
-        seg_count = 0
 
         await emit_log(sio, job_id, '=' * 60)
         await emit_log(sio, job_id, f'开始处理任务 {job_id}')
         await emit_log(sio, job_id, f'输入类型: {input_type} | 模型: {model} | 总结类型: {summary_type}')
 
-        # ===== Step 1: 获取转录文本 =====
+        # ===== Step 1: 获取转录文本（按输入类型分发到策略函数） =====
         if input_type == 'text':
-            # 纯文本输入：直接创建txt+srt
-            txt_path_obj, srt_path_obj = await handle_text_input(input_text, job_dir, sio, job_id)
-            txt_path = str(txt_path_obj)
-            srt_path = str(srt_path_obj)
-            title = '文本输入'
-            platform = '纯文本'
-            seg_count = len(input_text) // 1000 + 1
-            update_job(job_id, title=title, platform=platform, status='transcribing', progress_msg='文本已准备')
-            await emit_progress(sio, job_id, 'transcribe', 100, '文本已准备，跳过转录')
-
+            srt_path, txt_path, seg_count, title, platform, step_files = await _handle_text_input(
+                input_text, job_dir, sio, job_id,
+                title='文本输入', platform='纯文本', progress_msg='文本已准备',
+            )
         elif input_type == 'file':
             from services.storage_cleanup import validate_job_input_path
             input_file = str(validate_job_input_path(input_file, DOWNLOAD_DIR, job_id))
             # 本地文件上传 — 音频/视频/文本类
             file_ext = Path(input_file).suffix.lower()
 
-            if file_ext in ('.txt', '.md', '.srt', '.vtt'):
-                # 文本文件/字幕文件：直接读取 → 跳过转录
-                if file_ext in ('.srt', '.vtt'):
-                    txt_path_obj, srt_path_obj = await handle_subtitle_file(
-                        input_file, job_dir, sio=sio, job_id=job_id
-                    )
-                else:
-                    txt_path_obj, srt_path_obj = await handle_text_input(
-                        Path(input_file).read_text(encoding='utf-8'),
-                        job_dir, sio=sio, job_id=job_id,
-                    )
-                txt_path = str(txt_path_obj)
-                srt_path = str(srt_path_obj)
-                title = Path(input_file).stem
-                platform = '文本文件'
-                update_job(job_id, title=title, platform=platform, status='transcribing',
-                           progress_msg='文本文件已读取，跳过转录')
-                await emit_progress(sio, job_id, 'transcribe', 100, '文本文件已读取，跳过转录')
+            if file_ext in ('.txt', '.md'):
+                # 文本文件：直接读取 → 跳过转录
+                srt_path, txt_path, seg_count, title, platform, step_files = await _handle_text_input(
+                    Path(input_file).read_text(encoding='utf-8'), job_dir, sio, job_id,
+                    title=Path(input_file).stem, platform='文本文件',
+                    progress_msg='文本文件已读取，跳过转录',
+                )
+            elif file_ext in ('.srt', '.vtt'):
+                # 字幕文件：直接转换 → 跳过转录
+                srt_path, txt_path, seg_count, title, platform, step_files = await _handle_subtitle_file(
+                    input_file, job_dir, sio, job_id
+                )
             else:
                 # 音频/视频文件：需要转录
-                audio_path, title, platform = await handle_file_upload(input_file, job_dir, sio, job_id)
-                result['files']['audio'] = str(audio_path)
-                update_job(job_id, status='transcribing', progress_msg='开始转录上传文件')
-                srt_path, txt_path, seg_count = await transcribe_audio(
-                    audio_path, model_size=model_size, platform=platform,
-                    speaker_diarization=speaker_diarization, language=language,
-                    sio=sio, job_id=job_id
+                srt_path, txt_path, seg_count, title, platform, step_files = await _handle_media_file(
+                    input_file, job_dir, sio, job_id,
+                    model_size=model_size, speaker_diarization=speaker_diarization,
+                    language=language,
                 )
-
         else:
             # URL输入
-            platform, _ = detect_platform(input_url)
-
-            # B站特殊路径：优先尝试提取字幕（CC + AI 双路径）
-            # ★ force_transcribe=True 时跳过B站字幕，直接走下载音频+Whisper转录
-            #   适用于B站AI字幕质量差、需要更高准确度、或不想依赖B站登录态的场景
-            force_transcribe = options.get('force_transcribe', False)
-            is_bilibili = 'bilibili' in input_url.lower() or 'b23.tv' in input_url.lower()
-            # 字幕内容抽查时预下载的音频；校验不过时复用，避免二次下载
-            pre_downloaded_audio = None
-
-            if is_bilibili and force_transcribe:
-                await emit_log(sio, job_id, '🔧 已开启「强制转录」，跳过B站字幕提取，直接下载音频用Whisper转录（更慢但准确度更高）')
-            elif is_bilibili:
-                # 从 URL 提取 BV 号
-                bvid = None
-                if '/BV' in input_url:
-                    bvid = input_url.split('/BV')[1].split('?')[0].split('/')[0]
-                if not bvid and '@' in input_url:
-                    # 短链接 b23.tv/xxx 需先解析
-                    try:
-                        import requests as _req
-                        resp = _req.head(input_url, allow_redirects=False, timeout=5)
-                        real_url = resp.headers.get('Location', '')
-                        if '/BV' in real_url:
-                            bvid = real_url.split('/BV')[1].split('?')[0].split('/')[0]
-                    except Exception:
-                        pass
-
-                # 短链不一定在输入中直接包含 BV，仍交给提取器做重定向解析。
-                if not bvid:
-                    bvid = '待解析'
-                if bvid:
-                    await emit_log(sio, job_id, f'📄 检测到B站视频，尝试提取字幕（BV={bvid}）...')
-
-                    # 读取登录态 cookie（需要AI字幕时必须）
-                    from services.bilibili_cookies import load_cookies
-                    _cookies = load_cookies() or {}
-                    cookie_str = '; '.join(f'{k}={v}' for k, v in _cookies.items())
-
-                    if not _cookies.get('SESSDATA'):
-                        await emit_log(sio, job_id, '⚠️ 未登录B站，AI字幕可能无法获取（仅CC字幕可用）')
-
-                    # 调用字幕提取（异步，不阻塞事件循环）
-                    from services.downloader import extract_bilibili_subtitles
-                    sub_result = await extract_bilibili_subtitles(input_url, job_dir, sio, job_id)
-
-                    if sub_result.get('success'):
-                        srt_path = sub_result['srt_path']
-                        txt_path = sub_result['txt_path']
-                        # 用B站API返回的视频标题（不是字幕内容第一行）
-                        title = sub_result.get('title') or bvid
-                        await emit_log(sio, job_id, f'✅ 字幕提取成功：{sub_result.get("message", "已获取字幕")}')
-                        update_job(job_id, title=title, platform=platform, status='transcribing',
-                                   progress_msg='B站字幕已获取（跳过下载和转录）')
-
-                        # ★ B站字幕内容抽查（默认开启，subtitle_check=false 可关）：
-                        # B站 AI 字幕在换源/重传后可能仍是旧内容（“历史数据”），
-                        # 与当前视频对不上却会被一路送进分段/总结。用本地音频开头
-                        # 与字幕开头做相似度比对，对不上就丢弃字幕改走 Whisper 转录。
-                        if not force_transcribe and options.get('subtitle_check', True):
-                            try:
-                                await emit_log(sio, job_id, '🧪 B站字幕内容抽查：下载音频并与字幕开头比对（防旧/错误字幕）...')
-                                audio_path, _, _ = await download_video(
-                                    input_url, job_dir, only_audio=True, sio=sio, job_id=job_id
-                                )
-                                ok, _detail = await verify_subtitle_against_audio(
-                                    txt_path, str(audio_path), sio=sio, job_id=job_id
-                                )
-                                if ok:
-                                    await emit_log(sio, job_id, f'✅ B站字幕内容抽查通过（{_detail}），使用该字幕')
-                                else:
-                                    await emit_log(sio, job_id, f'⚠ B站字幕内容抽查未通过（{_detail}）：疑似旧/错误字幕，丢弃，转本地Whisper转录')
-                                    for _p in (srt_path, txt_path):
-                                        try:
-                                            Path(_p).unlink(missing_ok=True)
-                                        except OSError:
-                                            pass
-                                    pre_downloaded_audio = str(audio_path)
-                                    srt_path = None
-                                    txt_path = None
-                            except Exception as e:
-                                logger.warning(f'B站字幕抽查异常（保留原字幕结果）: {e}')
-                                await emit_log(sio, job_id, f'⚠ B站字幕抽查不可用（{e}），按原结果使用字幕')
-                    else:
-                        await emit_log(sio, job_id, f'⚠️ 字幕提取失败：{sub_result.get("message", "")}')
-
-            # YouTube / 通用平台：优先抓官方字幕（CC + 自动生成），比 Whisper 更快更准更省
-            # 抓取失败（无字幕/超时）则自动回退到下面的下载+Whisper 转录
-            if not srt_path and not is_bilibili and not force_transcribe:
-                from services.downloader import extract_youtube_subtitles
-                await emit_log(sio, job_id, '📄 尝试抓取YouTube/平台原文字幕（CC+自动）...')
-                yt_sub = await extract_youtube_subtitles(
-                    input_url, job_dir, sio, job_id, target_lang=language or 'zh'
-                )
-                if yt_sub.get('success'):
-                    srt_path = yt_sub['srt_path']
-                    txt_path = yt_sub['txt_path']
-                    title = yt_sub.get('title') or title
-                    await emit_log(sio, job_id, f'✅ 原文字幕抓取成功：{yt_sub.get("message", "已获取字幕")}')
-                    update_job(job_id, title=title, platform=platform, status='transcribing',
-                               progress_msg='原文字幕已获取（跳过转录）')
-                else:
-                    await emit_log(sio, job_id, f'⚠️ 原文字幕抓取失败：{yt_sub.get("message", "")}，转Whisper转录')
-
-            # 如果没有B站字幕 → 正常下载+转录
-            if not srt_path:
-                # ★ 断点续传：检测是否已有下载完的文件（重试场景）
-                _retry = options.get('_retry', False)
-                file_path = None
-                skip_download = False
-                if pre_downloaded_audio:
-                    # ★ 字幕内容抽查时已下载音频，校验不过直接复用，避免二次下载
-                    file_path = Path(pre_downloaded_audio)
-                    skip_download = True
-                    await emit_log(sio, job_id, '↩ 复用字幕抽查时下载的音频，跳过重复下载')
-                elif _retry:
-                    # 搜索 job_dir 下已有音频/视频文件
-                    audio_exts = ('.m4a', '.mp3', '.wav', '.opus', '.aac', '.webm', '.mp4', '.mkv')
-                    for f in sorted(job_dir.glob('*'), key=lambda x: x.stat().st_mtime, reverse=True):
-                        if f.suffix.lower() in audio_exts and f.stat().st_size > 1000:
-                            file_path = f
-                            title = title or f.stem
-                            skip_download = True
-                            await emit_log(sio, job_id, f'🔁 断点续传：发现已有文件 {f.name}（{f.stat().st_size//1024}KB），跳过下载')
-                            break
-
-                if not skip_download:
-                    update_job(job_id, status='downloading', progress_msg='开始下载')
-
-                    # 下载
-                    if download_video_only:
-                        file_path, title, platform = await download_video(
-                            input_url, job_dir, only_audio=False, video_only=True, sio=sio, job_id=job_id
-                        )
-                        result['files']['video'] = str(file_path)
-                    elif download_video_opt:
-                        file_path, title, platform = await download_video(
-                            input_url, job_dir, only_audio=False, sio=sio, job_id=job_id
-                        )
-                        result['files']['video'] = str(file_path)
-                    else:
-                        file_path, title, platform = await download_video(
-                            input_url, job_dir, only_audio=True, sio=sio, job_id=job_id
-                        )
-                        result['files']['audio'] = str(file_path)
-
-                if not file_path:
-                    raise Exception("下载失败，未获取到音频/视频文件")
-
-                update_job(job_id, title=title, platform=platform)
-
-                if check_cancelled(job_id):
-                    await emit_log(sio, job_id, '⏹ 任务已取消')
-                    update_job(job_id, status='cancelled', error='用户取消')
-                    await _safe_emit('done', {'job_id': job_id, 'success': False, 'error': '用户取消'})
-                    return sem_state['held']
-
-                # ★ 断点续传：检查是否已有转录文件（重试场景）
-                skip_transcribe = False
-                if _retry:
-                    # ★ download_video 返回的是 str，统一成 Path 才能 with_suffix
-                    file_path = Path(file_path)
-                    expected_srt = file_path.with_suffix('.srt')
-                    expected_txt = file_path.with_suffix('.txt')
-                    if expected_srt.exists() and expected_txt.exists() \
-                       and expected_srt.stat().st_size > 100 \
-                       and expected_txt.stat().st_size > 100:
-                        srt_path = str(expected_srt)
-                        txt_path = str(expected_txt)
-                        skip_transcribe = True
-                        await emit_log(sio, job_id, f'🔁 断点续传：发现已有转录文件，跳过转录（SRT:{expected_srt.stat().st_size}字节 TXT:{expected_txt.stat().st_size}字节）')
-
-                if not skip_transcribe:
-                    # 转录
-                    update_job(job_id, status='transcribing', progress_msg='开始转录')
-                    srt_path, txt_path, seg_count = await transcribe_audio(
-                        file_path, model_size=model_size, platform=platform,
-                        speaker_diarization=speaker_diarization, language=language,
-                        sio=sio, job_id=job_id
-                    )
+            srt_path, txt_path, seg_count, title, platform, step_files = await _handle_url_input(
+                input_url, job_dir, sio, job_id, options,
+                model_size=model_size, speaker_diarization=speaker_diarization,
+                language=language,
+            )
+        result['files'].update(step_files)
 
         result['title'] = title
         result['platform'] = platform
@@ -978,6 +1023,12 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
         logger.info(f"任务 {job_id} 完成: title={result.get('title', '')}")
         return sem_state['held']
 
+    except JobCancelledError:
+        # ★ 策略函数内部（下载完成后）检测到取消：不写结果，交由外层释放信号量
+        await emit_log(sio, job_id, '⏹ 任务已取消')
+        update_job(job_id, status='cancelled', error='用户取消')
+        await _safe_emit('done', {'job_id': job_id, 'success': False, 'error': '用户取消'})
+        return sem_state['held']
     except Exception as e:
         # ★ 区分用户取消 vs 真正异常
         from services.ai_processor import TaskCancelledError
