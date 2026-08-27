@@ -16,6 +16,13 @@
 - socket 监听解绑函数收进数组，`onUnmounted`/`onDeactivated` 统一清理，禁止跨组件残留监听
 - 定时器（轮询）同样必须在 `onDeactivated`/`onUnmounted` 回收；HomeView 被 `keep-alive` 缓存，恢复逻辑放 `onActivated`
 
+### Composable（2026-08-27 从 HomeView 拆出）
+
+- `useBackendLogs`：日志面板——增量拉取（delta 超界回退全量重载，禁止静默丢弃）、连续失败 ≥3 次才告警一次（成功重置计数）
+- `useBatchProgress`：批量进度——默认订阅 Socket.IO `batch_progress` 事件，断线降级 10s 轮询、恢复后停表；新增批量面板字段改 summary 结构即可
+- `useJobRestore`：路由参数回填（`?rerun=jobId` 等），依赖通过参数注入（route/router/store 等），不直接 import
+- 新 composable 必须先补 `src/__tests__/` 测试再迁移视图代码；mock 用注入/stub，不引真实后端
+
 ### 状态与 API
 
 - 跨视图共享状态进 Pinia store（jobStore/modelStore/settingsStore/themeStore），视图私有状态留在视图

@@ -39,8 +39,26 @@
 - 禁止 `except: return []` 静默吞错；异常要么处理（降级 + 日志）要么上抛（转成用户可见的 job error）
 - 任务失败必须 `update_job(status='failed', error=...)`，不留 pending 僵尸
 
+### 路由组织（2026-08-27 拆分，勿回退）
+
+- `routers/jobs.py` 按域拆为三路由，全部挂 `/api/jobs` 前缀，对外路径零变化：
+  - `jobs.py`（核心域：上传/提交/列表/删除/清理/取消/重试/编辑结果）+ 共享工具 `normalize_url`/`extract_urls`
+  - `jobs_ai.py`（AI 域：重新总结/总结历史/标签/思维导图）
+  - `jobs_batch.py`（批量域：批量提交/批量状态/转录搜索）
+- 新增任务相关端点时先判断归属域，不要再往 `jobs.py` 堆
+- 跨域共享的纯函数（如 URL 规范化）放核心 `jobs.py`，其他路由 `from routers.jobs import` 复用
+
+### 任务编排（2026-08-27 拆分）
+
+- `process_job` 保持"信号量包装 + finally 单一收尾出口"结构；输入获取已拆为策略函数
+  `_handle_text_input`/`_handle_subtitle_file`/`_handle_media_file`/`_handle_url_input`（统一返回
+  `(srt_path, txt_path, seg_count, title, platform, files)`），新输入类型加策略函数，不要往
+  `_process_job_impl` 回填大段 if/else
+- 批量任务终态推送走 `_emit_batch_progress`（`process_job` finally 调用，负载复用
+  `get_batch_summary` 单一事实源）；新增批量面板数据字段时同步改 summary 而不是另造事件
+
 ## Quality Check
 
-- [ ] `cd backend && venv/Scripts/python.exe -m pytest` 全绿（基线 398+）
+- [ ] `cd backend && venv/Scripts/python.exe -m pytest` 全绿（基线 402+，必须用项目 venv——沙箱默认 Python 缺 pytest-asyncio，异步用例会批量假失败）
 - [ ] 新增/修改的 service 函数有对应测试（成功 + 主要错误路径）
 - [ ] 没有在 async 函数中引入新的同步阻塞调用

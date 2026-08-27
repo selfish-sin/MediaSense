@@ -1,6 +1,6 @@
 # youtube_tool_v2 CONTEXT
 
-> 最近核对：2026-08-26 | FastAPI + Socket.IO | 默认端口：7001
+> 最近核对：2026-08-27 | FastAPI + Socket.IO | 默认端口：7001
 
 ## 一分钟速览
 
@@ -24,15 +24,20 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 
 | 文件 | 核心内容 | 何时读 |
 |---|---|---|
-| `backend/main.py` | FastAPI、Socket.IO、`process_job`、启动恢复和 SPA 路由 | 改任务编排、HTTP 或 websocket |
+| `backend/main.py` | FastAPI、Socket.IO、`process_job`（策略函数拆分：`_handle_text_input`/`_handle_subtitle_file`/`_handle_media_file`/`_handle_url_input`）、`_emit_batch_progress`、启动恢复和 SPA 路由 | 改任务编排、输入处理策略或批量进度推送 |
 | `backend/config.py` | 数据目录、7001、Whisper 模型和清理 TTL | 改路径、端口或默认值 |
 | `backend/db/` | SQLite 初始化、job、模型、token 用量仓储 | 改持久化或任务状态 |
 | `backend/services/downloader.py` | yt-dlp 下载/媒体准备 | 改 URL 下载和代理 |
 | `backend/services/transcriber.py` | 字幕读取、Whisper 转录、语言/模型 | 改转录回退 |
 | `backend/services/` | 分段、摘要、翻译、导出、搜索等处理 | 改具体媒体流程 |
-| `backend/routers/` | API 路由，包括 storage cleanup | 加/改 HTTP API |
+| `backend/routers/jobs.py` | 任务核心域：上传/提交/列表/删除/清理/取消/重试/编辑结果 + 共享的 `normalize_url`/`extract_urls` | 改任务生命周期 API |
+| `backend/routers/jobs_ai.py` | AI 域：重新总结/总结历史/标签/思维导图 | 改 AI 重跑相关端点 |
+| `backend/routers/jobs_batch.py` | 批量域：批量提交/批量状态/转录全文搜索 | 改批量提交或跨任务搜索 |
+| `backend/routers/` | 其余 API 路由（models/summary/export/translate/bilibili/download/templates/chat/search/storage cleanup） | 加/改其他 HTTP API |
 | `backend/socket_handlers.py` | 实时日志和进度事件 | 改前端实时反馈 |
 | `backend/scripts/cleanup_storage.py` | staged/orphan/export/media 清理 | 改清理策略；删除必须显式确认 |
+| `frontend/src/views/HomeView.vue` | 核心工作台视图（业务逻辑已拆到 composables） | 改表单/提交/结果展示 |
+| `frontend/src/composables/` | `useBackendLogs`（日志增量拉取+全量回退）、`useBatchProgress`（Socket 推送+断线降级轮询）、`useJobRestore`（路由参数回填） | 改日志面板、批量进度或任务恢复逻辑 |
 | `frontend/`、`static/` | 页面和同源静态资源 | 改 UI |
 
 ## 服务与任务
@@ -65,3 +70,5 @@ python main.py
 - 清理工作台实测正常（2026-08-24）：dry-run 预览出 41 项/约 24MB，候选表/计划有效期/操作日志/审计 tab 正常，「确认并执行」需输入 DELETE 的二次确认门槛生效。
 - B站字幕防错位加固（2026-08-26，未建 task）：B站 AI 字幕在换源/重传后可能返回旧内容（历史数据），此前被无条件信任并跳过本地转录，导致分段/总结基于错误文本。新增两道防线：①字幕时长校验（body 时间跨度 vs 视频时长，明显不符即拒，转本地转录）；②内容抽查（默认开启，`subtitle_check=false` 可关：抽取音频开头 ~90s 用 Whisper CPU 转写，与字幕开头文本相似度 <0.3 判定错位，丢弃字幕转全量 Whisper，复用抽查时已下载的音频不二次下载）。顺带修复：中文字幕选取不再把 `ai-en` 等非中文 AI 字幕当中文；faster-whisper 分片转录在 GPU 运行时缺失（cublas64_12.dll）于生成器迭代期抛出时也能自动回落 CPU（此前只在 transcribe 调用期兜底，漏掉惰性编码段，曾致任务 f40508bd 失败）。
 - B站 API 风控加固（2026-08-26，未建 task）：批量任务齐射触发 412（request was banned）后旧代码全部白等 yt-dlp auto-sub。六项修复，全在 `backend/services/downloader.py`/`transcriber.py`：①限流串行化：进程级锁 + 最小间隔 ≥1s（`BILI_API_MIN_INTERVAL` 环境变量可调，`_throttle_bili_api`）；②接口顺序反转：`_fetch_subtitles_via_player_v2` 先走实测更稳的旧版 `x/player/v2`（带 dm_img_str 等浏览器常参数），wbi/v2 降级备用，412 时强制刷新 wbi 签名密钥重试一次；③浏览器指纹：完整 Chrome UA（此前截断 UA 是风控高权重特征）+ 进程级缓存 buvid3/buvid4 + 真实视频页 Referer（`_bili_headers`），yt-dlp 兜底同样注入 buvid cookie 与完整 UA；④兜底提速：接口明确"无字幕"（api_ok=True 且空列表）时跳过 yt-dlp auto-sub 直转 Whisper，只有接口被风控/异常（api_ok=False）才走 yt-dlp；⑤412 文案可见化：拦截时提示"B站风控(412)，已自动回退"，不再只甩裸错误码；⑥Whisper 事前探测：`_cuda_runtime_usable()` 在模型加载点探测 cublas/cudnn DLL，缺失直接走 CPU。后端 pytest 398 全绿；真网实测 nav/view/player 接口在完整指纹下正常响应（含真实视频 ai-zh 字幕）。
+- 质量与实时性重构（2026-08-27，task 08-27-quality-realtime-refactor 已归档）：①批量进度改 Socket.IO 推送——`process_job` finally 单一出口调 `_emit_batch_progress`（负载与 `GET /api/jobs/batch/{id}` 同构，单一事实源 `get_batch_summary`），前端 `useBatchProgress` 订阅更新，断线降级 10s 轮询；②前端日志增量修复——`delta > 200` 超界不再静默丢弃，回退 `loadAllHistory()` 全量重载，连续失败 ≥3 次才告警一次（成功重置）；③`_process_job_impl` Step 1 拆为 `_handle_text_input`/`_handle_subtitle_file`/`_handle_media_file`/`_handle_url_input`/`_extract_bvid` 策略函数，统一返回 `(srt_path, txt_path, seg_count, title, platform, files)`；④`routers/jobs.py` 按域拆为 core/`jobs_ai`/`jobs_batch` 三路由（对外路径零变化）；⑤HomeView 拆出 `useBackendLogs`/`useBatchProgress`/`useJobRestore` 三个 composable 并清理死代码。后端 pytest 402 全绿（须用 `backend/venv` 跑，含 pytest-asyncio）、前端 vitest 24 全绿。
+- 测试环境坑：沙箱默认 Python 缺 pytest-asyncio，异步用例会以 "async def functions are not natively supported" 批量失败；跑后端测试必须用 `backend/venv/Scripts/python.exe -m pytest`。
