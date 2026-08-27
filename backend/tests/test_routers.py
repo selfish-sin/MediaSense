@@ -14,6 +14,8 @@ from fastapi.testclient import TestClient
 def app():
     app = FastAPI()
     from routers.jobs import router as jobs_router
+    from routers.jobs_ai import router as jobs_ai_router
+    from routers.jobs_batch import router as jobs_batch_router
     from routers.models import router as models_router
     from routers.summary import router as summary_router
     from routers.export import router as export_router
@@ -25,6 +27,8 @@ def app():
     from routers.search import router as search_router
 
     app.include_router(jobs_router, prefix="/api/jobs")
+    app.include_router(jobs_ai_router, prefix="/api/jobs")
+    app.include_router(jobs_batch_router, prefix="/api/jobs")
     app.include_router(models_router, prefix="/api/models")
     app.include_router(summary_router, prefix="/api/summary")
     app.include_router(export_router, prefix="/api/export")
@@ -275,9 +279,9 @@ class TestJobsRouter:
         assert resp.status_code == 400
         assert "options" in resp.json()["detail"]
 
-    @patch("routers.jobs.create_job", return_value="job-1")
+    @patch("routers.jobs_batch.create_job", return_value="job-1")
     @patch("main.start_job")
-    @patch("routers.jobs.find_job_by_url")
+    @patch("routers.jobs_batch.find_job_by_url")
     def test_batch_force_new_skips_history_dedup(self, mock_find, mock_start, mock_create, client):
         """force_new=True 时跳过 find_job_by_url 跨历史去重，允许重跑已处理过的 URL"""
         resp = client.post("/api/jobs/batch", json={
@@ -292,9 +296,9 @@ class TestJobsRouter:
         mock_create.assert_called_once()
         mock_start.assert_called_once_with("job-1")
 
-    @patch("routers.jobs.create_job", return_value="job-2")
+    @patch("routers.jobs_batch.create_job", return_value="job-2")
     @patch("main.start_job")
-    @patch("routers.jobs.find_job_by_url")
+    @patch("routers.jobs_batch.find_job_by_url")
     def test_batch_force_new_false_dedups_existing(self, mock_find, mock_start, mock_create, client):
         """force_new=False 时已有 completed 任务的 URL 被跳过，返回 duplicates"""
         mock_find.return_value = {"id": "old-job", "status": "completed", "title": "旧任务"}
@@ -308,7 +312,7 @@ class TestJobsRouter:
         mock_find.assert_called_once()
         mock_create.assert_not_called()
 
-    @patch("routers.jobs.create_job", return_value="job-bv")
+    @patch("routers.jobs_batch.create_job", return_value="job-bv")
     @patch("main.start_job")
     def test_batch_accepts_bare_bv(self, mock_start, mock_create, client):
         """裸 BV 号（无 https:// 前缀）经 sanitize_input_url 补全后能提交"""
@@ -335,8 +339,8 @@ class TestResummarizeRouter:
             "result_text": None, "summary_version": 1, "tags": [], "token_usage": {},
         }
 
-    @patch("routers.jobs.get_job")
-    @patch("routers.jobs.update_job")
+    @patch("routers.jobs_ai.get_job")
+    @patch("routers.jobs_ai.update_job")
     def test_failed_job_can_resummarize(self, mock_update, mock_get, client, tmp_path):
         mock_get.return_value = self._job(tmp_path, status="failed")
         with patch("services.ai_processor.ai_process",
@@ -350,8 +354,8 @@ class TestResummarizeRouter:
         # 任务被标记回 completed
         assert any(c.kwargs.get("status") == "completed" for c in mock_update.call_args_list)
 
-    @patch("routers.jobs.get_job")
-    @patch("routers.jobs.update_job")
+    @patch("routers.jobs_ai.get_job")
+    @patch("routers.jobs_ai.update_job")
     def test_sentinel_failure_not_written_as_result(self, mock_update, mock_get, client, tmp_path):
         """AI 层返回 [处理失败: ...] 哨兵串时不得写盘并标记 completed"""
         mock_get.return_value = self._job(tmp_path, status="failed")
@@ -365,13 +369,13 @@ class TestResummarizeRouter:
         assert any(c.kwargs.get("status") == "failed" for c in mock_update.call_args_list)
         assert not any(c.kwargs.get("status") == "completed" for c in mock_update.call_args_list)
 
-    @patch("routers.jobs.get_job")
+    @patch("routers.jobs_ai.get_job")
     def test_cancelled_job_rejected(self, mock_get, client, tmp_path):
         mock_get.return_value = self._job(tmp_path, status="cancelled")
         resp = client.post("/api/jobs/j1/summarize", json={})
         assert resp.status_code == 400
 
-    @patch("routers.jobs.get_job")
+    @patch("routers.jobs_ai.get_job")
     def test_failed_job_without_txt_rejected(self, mock_get, client):
         mock_get.return_value = {"id": "j1", "status": "failed", "files": {}, "options": {}}
         resp = client.post("/api/jobs/j1/summarize", json={})
