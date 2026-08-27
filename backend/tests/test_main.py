@@ -239,6 +239,63 @@ class TestMainUtils:
             m._job_semaphore = None
 
 
+class TestBatchProgressEmit:
+    """batch_progress 推送：批量子任务终态后经 process_job finally 单一出口触发"""
+
+    @pytest.mark.asyncio
+    async def test_emit_batch_progress_for_batch_job(self):
+        import main as m
+
+        fake_job = {"id": "j1", "batch_id": "b1"}
+        fake_summary = {"batch_id": "b1", "total": 2, "completed": 1}
+        emitted = []
+
+        def fake_emit(event, *args, **kwargs):
+            emitted.append((event, args))
+
+        with patch("db.job_repo.get_job", return_value=fake_job), \
+             patch("db.job_repo.get_batch_summary", return_value=fake_summary), \
+             patch.object(m.sio, "emit", side_effect=fake_emit):
+            await m._emit_batch_progress("j1")
+
+        assert emitted == [("batch_progress", (fake_summary,))]
+
+    @pytest.mark.asyncio
+    async def test_emit_batch_progress_skips_non_batch_job(self):
+        import main as m
+        with patch("db.job_repo.get_job", return_value={"id": "j2"}), \
+             patch.object(m.sio, "emit") as mock_emit:
+            await m._emit_batch_progress("j2")
+        mock_emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_emit_batch_progress_tolerates_db_error(self):
+        import main as m
+        # get_job 抛异常不得外抛：finally 单一出口不容失败
+        with patch("db.job_repo.get_job", side_effect=RuntimeError("db down")):
+            await m._emit_batch_progress("j3")
+
+    @pytest.mark.asyncio
+    async def test_process_job_finally_emits_batch_progress(self):
+        import main as m
+        from socket_handlers import request_cancel
+
+        m.RUNNING_JOBS.clear()
+        m._job_semaphore = asyncio.Semaphore(0)
+        request_cancel("batchjob")
+        try:
+            with patch("main.update_job"), \
+                 patch("db.job_repo.get_job", return_value={"id": "batchjob", "batch_id": "b1"}), \
+                 patch("db.job_repo.get_batch_summary", return_value={"batch_id": "b1"}), \
+                 patch.object(m.sio, "emit", return_value=None) as mock_emit:
+                await m.process_job("batchjob")
+            events = [c.args[0] for c in mock_emit.call_args_list]
+            assert "batch_progress" in events
+        finally:
+            m.RUNNING_JOBS.clear()
+            m._job_semaphore = None
+
+
 class TestTokenEndpoints:
     @pytest.fixture
     def app(self):

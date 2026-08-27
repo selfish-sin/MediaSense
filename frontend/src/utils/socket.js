@@ -65,6 +65,23 @@ export function onPreview(callback) {
   return () => socket.off('preview', handler)
 }
 
+export function onBatchProgress(callback) {
+  const handler = (summary) => callback(summary)
+  socket.on('batch_progress', handler)
+  return () => socket.off('batch_progress', handler)
+}
+
+// 连接/断开生命周期（批量进度等依赖连接状态的逻辑用：断线降级轮询、重连补拉）
+export function onSocketConnect(callback) {
+  socket.on('connect', callback)
+  return () => socket.off('connect', callback)
+}
+
+export function onSocketDisconnect(callback) {
+  socket.on('disconnect', callback)
+  return () => socket.off('disconnect', callback)
+}
+
 // ============ 事件发送辅助函数 ============
 
 export function continueSummary(jobId, editedText = '') {

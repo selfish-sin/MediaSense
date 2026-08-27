@@ -9,8 +9,9 @@ import { useModelStore } from '../stores/modelStore'
 import { jobsApi, exportApi, translateApi, tokenApi, resultApi, chatApi, summaryApi } from '../utils/api'
 import { ACTIVE_JOB_STATUSES } from '../utils/jobActions'
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
-import {
+import socket, {
   onProgress, onLog, onAiToken, onAiDone, onPreview, onAiThinking,
+  onBatchProgress, onSocketConnect, onSocketDisconnect,
   continueSummary, cancelPreview, cancelJob,
 } from '../utils/socket'
 import { renderMarkdown } from '../utils/markdown'
@@ -161,31 +162,46 @@ function scrollLogTop() {
 }
 function refreshLogs() { fetchLogs() }
 
-// ★ 批量任务结果与进度
+// ★ 批量任务结果与进度：Socket.IO batch_progress 实时推送为主；
+//   socket 断开时降级为低频（10s）HTTP 轮询，重连后补拉一次对齐状态
 const batchResult = ref(null)  // {batch_id, count, skipped, summary}
+
+function applyBatchSummary(summary) {
+  // 只接受当前批次的推送，防止串台
+  if (!batchResult.value || !summary || summary.batch_id !== batchResult.value.batch_id) return
+  batchResult.value.summary = summary
+}
 
 async function refreshBatchStatus() {
   if (!batchResult.value?.batch_id) return
   try {
     const s = await jobsApi.batchStatus(batchResult.value.batch_id)
-    batchResult.value.summary = s
+    applyBatchSummary(s)
   } catch (err) {
     console.error('查询批量进度失败:', err)
   }
 }
 
-// 批量进度自动刷新定时器
+// 降级轮询定时器：仅在 socket 断开期间兜底
 let batchTimer = null
 function startBatchPolling() {
   stopBatchPolling()
-  batchTimer = setInterval(() => {
-    refreshBatchStatus()
-    // 全部完成停止轮询
-    if (batchResult.value?.summary?.all_done) stopBatchPolling()
-  }, 3000)
+  batchTimer = setInterval(refreshBatchStatus, 10000)
 }
 function stopBatchPolling() {
   if (batchTimer) { clearInterval(batchTimer); batchTimer = null }
+}
+
+// socket 连接状态变化时切换 数据源（推送↔轮询）
+function syncBatchPollingWithSocket(connected) {
+  const active = !!batchResult.value && !batchResult.value.summary?.all_done
+  if (!active) { stopBatchPolling(); return }
+  if (connected) {
+    stopBatchPolling()
+    refreshBatchStatus()  // 重连补拉，弥补断线期间错过的推送
+  } else {
+    startBatchPolling()
+  }
 }
 
 // 跳转到任务详情页（批量任务的子任务点击）
@@ -330,10 +346,7 @@ onMounted(async () => {
     if (data.job_id === jobStore.currentJobId) {
       jobStore.updateProgress(data)
     }
-    // 批量子任务进度变化时也刷新批量面板
-    if (batchResult.value?.batch_id) {
-      refreshBatchStatus()
-    }
+    // 批量面板进度由 batch_progress 推送驱动（终态触发），不再随 progress 高频刷新
   }))
   socketUnsubs.push(onLog((data) => {
     if (data.job_id === jobStore.currentJobId) {
@@ -395,6 +408,12 @@ onMounted(async () => {
     })
   }))
 
+  // ── 批量进度：socket 推送为主，断线降级轮询 ──
+  socketUnsubs.push(onBatchProgress(applyBatchSummary))
+  socketUnsubs.push(onSocketConnect(() => syncBatchPollingWithSocket(true)))
+  socketUnsubs.push(onSocketDisconnect(() => syncBatchPollingWithSocket(false)))
+  syncBatchPollingWithSocket(socket.connected)
+
   // ── 启动日志轮询（系统日志仅在展开时轮询） ──
   if (showBackendLogs.value) {
     fetchLogs()
@@ -426,9 +445,9 @@ onActivated(async () => {
   // keep-alive 切回时处理路由参数（rerun / restore）
   await handleRouteQuery()
 
-  // 恢复批量进度轮询
+  // 恢复批量进度：socket 在线则补拉一次对齐（离开期间错过的推送），断线则降级轮询
   if (batchResult.value?.summary && !batchResult.value.summary.all_done) {
-    startBatchPolling()
+    syncBatchPollingWithSocket(socket.connected)
   }
   if (showBackendLogs.value && !logTimer) {
     fetchLogs()
@@ -597,9 +616,9 @@ async function handleSubmit() {
         })
       }
       ElMessage.success(`已提交 ${res.count} 个批量任务${res.skipped ? `（跳过 ${res.skipped} 个无效/重复）` : ''}`)
-      // 立即拉一次进度 + 启动轮询
+      // 立即拉一次进度；后续由 batch_progress 推送实时更新（断线时自动降级轮询）
       refreshBatchStatus()
-      startBatchPolling()
+      syncBatchPollingWithSocket(socket.connected)
       scrollToJobProgress()
       return
     } catch (err) {

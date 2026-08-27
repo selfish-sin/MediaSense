@@ -82,6 +82,25 @@ async def _safe_emit(event: str, *args, **kwargs):
     if inspect.isawaitable(result):
         await result
 
+
+async def _emit_batch_progress(job_id: str):
+    """批量任务子任务到终态（完成/失败/取消）后，推送该批次整体进度。
+
+    负载与 GET /api/jobs/batch/{id} 的 summary 同构（单一事实源：
+    get_batch_summary）。非批量任务直接跳过；前端据此实时更新批量面板，
+    替代高频 HTTP 轮询。
+    """
+    try:
+        from db.job_repo import get_job, get_batch_summary
+        job = get_job(job_id)
+        if not job or not job.get('batch_id'):
+            return
+        summary = get_batch_summary(job['batch_id'])
+        if summary:
+            await _safe_emit('batch_progress', summary)
+    except Exception as e:
+        logger.warning(f'batch_progress 推送失败 (job={job_id}): {e}')
+
 # ============ FastAPI 应用 ============
 app = FastAPI(
     title="YouTube Tool V2",
@@ -321,6 +340,9 @@ async def process_job(job_id: str):
             sem_state['held'] = False
         raise
     finally:
+        # ★ 批量任务子任务终态后推送整体进度（单一出口：所有终态路径都流经此处，
+        #   含排队期取消/正常完成/失败/异常，无需在各 return 点散落 emit）
+        await _emit_batch_progress(job_id)
         current_task = asyncio.current_task()
         registered_task = RUNNING_JOBS.get(job_id, {}).get('task')
         if registered_task is None or registered_task is current_task:
