@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "异步纪律（to_thread）、faster-whisper 惰性编码、B站风控、错误处理红线——slice-2/3/4 实现必须遵守"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "composable 拆分约定、socket 解绑纪律、四态覆盖——slice-1/5 实现必须遵守"}
+{"file": "AI_AGENT_WORKFLOW.md", "reason": "COMMIT-DISCIPLINE、切片完成定义、PUSH-GATE 等强制流程规则"}
