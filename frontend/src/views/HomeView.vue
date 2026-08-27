@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, onActivated, onDeactivated, computed, watch, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, onActivated, computed, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadCloud, Pencil, Check, X, Copy, Loader2, ArrowDown } from 'lucide-vue-next'
@@ -11,9 +11,11 @@ import { ACTIVE_JOB_STATUSES } from '../utils/jobActions'
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
 import socket, {
   onProgress, onLog, onAiToken, onAiDone, onPreview, onAiThinking,
-  onBatchProgress, onSocketConnect, onSocketDisconnect,
   continueSummary, cancelPreview, cancelJob,
 } from '../utils/socket'
+import { useBackendLogs } from '../composables/useBackendLogs'
+import { useBatchProgress } from '../composables/useBatchProgress'
+import { useJobRestore } from '../composables/useJobRestore'
 import { renderMarkdown } from '../utils/markdown'
 import ResummarizeControl from '../components/ResummarizeControl.vue'
 import SplitPromptPanel from '../components/SplitPromptPanel.vue'
@@ -98,111 +100,16 @@ const showJobProgress = ref(true)
 const jobLogAutoScroll = ref(true)
 
 // ── 系统日志（后端文件，默认收起，避免和任务进度抢视线） ──
-const showBackendLogs = ref(true)
-const backendLogs = ref([])
-const autoScroll = ref(true)
-let logTimer = null
-let lastTotal = 0
-
-// 连续拉取失败计数：≥3 次只提示一次，避免定时器刷屏；成功即重置
-let logFetchFailures = 0
-
-async function fetchLogs() {
-  try {
-    const res = await jobsApi.getLogs(200)
-    logFetchFailures = 0
-    if (res.total < lastTotal) {
-      backendLogs.value = []
-      lastTotal = 0
-    }
-    const delta = res.total - lastTotal
-    if (delta > 200) {
-      // 增量超出单次拉取上限（日志爆发增长）：回退全量重载，禁止静默丢更新
-      await loadAllHistory()
-      return
-    }
-    if (delta > 0) {
-      backendLogs.value = backendLogs.value.concat(res.lines.slice(-delta))
-      lastTotal = res.total
-      if (backendLogs.value.length > 1000) backendLogs.value = backendLogs.value.slice(-1000)
-    }
-    if (autoScroll.value) nextTick(() => {
-      const el = document.getElementById('log-panel')
-      if (el) el.scrollTop = el.scrollHeight
-    })
-  } catch {
-    logFetchFailures++
-    if (logFetchFailures === 3) {
-      ElMessage.warning(`系统日志拉取失败（已连续 ${logFetchFailures} 次），稍后自动重试`)
-    }
-  }
-}
-
-async function loadAllHistory() {
-  try {
-    const res = await jobsApi.getLogs(2000)
-    logFetchFailures = 0
-    backendLogs.value = res.lines
-    lastTotal = res.total
-    nextTick(() => {
-      const el = document.getElementById('log-panel')
-      if (el) el.scrollTop = el.scrollHeight
-    })
-  } catch {
-    logFetchFailures++
-    if (logFetchFailures === 3) {
-      ElMessage.warning('系统日志加载失败，请检查后端服务是否正常')
-    }
-  }
-}
-
-function clearLogs() { backendLogs.value = []; lastTotal = 0 }
-function scrollLogTop() {
-  document.getElementById('log-panel')?.scrollTo({ top: 0, behavior: 'smooth' })
-}
-function refreshLogs() { fetchLogs() }
+// 逻辑抽离到 composables/useBackendLogs（增量拉取+超界全量回退+生命周期自管理）
+const {
+  showBackendLogs, backendLogs, autoScroll,
+  fetchLogs, loadAllHistory, clearLogs, scrollLogTop, refreshLogs,
+} = useBackendLogs()
 
 // ★ 批量任务结果与进度：Socket.IO batch_progress 实时推送为主；
 //   socket 断开时降级为低频（10s）HTTP 轮询，重连后补拉一次对齐状态
-const batchResult = ref(null)  // {batch_id, count, skipped, summary}
-
-function applyBatchSummary(summary) {
-  // 只接受当前批次的推送，防止串台
-  if (!batchResult.value || !summary || summary.batch_id !== batchResult.value.batch_id) return
-  batchResult.value.summary = summary
-}
-
-async function refreshBatchStatus() {
-  if (!batchResult.value?.batch_id) return
-  try {
-    const s = await jobsApi.batchStatus(batchResult.value.batch_id)
-    applyBatchSummary(s)
-  } catch (err) {
-    console.error('查询批量进度失败:', err)
-  }
-}
-
-// 降级轮询定时器：仅在 socket 断开期间兜底
-let batchTimer = null
-function startBatchPolling() {
-  stopBatchPolling()
-  batchTimer = setInterval(refreshBatchStatus, 10000)
-}
-function stopBatchPolling() {
-  if (batchTimer) { clearInterval(batchTimer); batchTimer = null }
-}
-
-// socket 连接状态变化时切换 数据源（推送↔轮询）
-function syncBatchPollingWithSocket(connected) {
-  const active = !!batchResult.value && !batchResult.value.summary?.all_done
-  if (!active) { stopBatchPolling(); return }
-  if (connected) {
-    stopBatchPolling()
-    refreshBatchStatus()  // 重连补拉，弥补断线期间错过的推送
-  } else {
-    startBatchPolling()
-  }
-}
+// 逻辑抽离到 composables/useBatchProgress（socket 绑定+降级轮询自管理）
+const { batchResult, refreshBatchStatus, syncWithSocket } = useBatchProgress()
 
 // 跳转到任务详情页（批量任务的子任务点击）
 function viewBatchJob(jobId) {
@@ -218,105 +125,6 @@ function scrollToJobProgress() {
       block: 'start',
     })
   })
-}
-
-// ============ 路由参数处理（rerun / restore，供 onMounted 和 onActivated 复用） ============
-let _routeQueryHandled = false
-
-function applyJobConfig(job) {
-  const options = job?.options && typeof job.options === 'object' ? job.options : {}
-  const sourceType = options.input_type || (job.input_url ? 'url' : job.input_text ? 'text' : 'file')
-  inputType.value = sourceType
-  inputUrl.value = job.input_url || ''
-  inputText.value = job.input_text || ''
-  uploadedFilePath.value = job.input_file || ''
-  uploadedFileName.value = uploadedFilePath.value.split(/[\\/]/).pop() || ''
-
-  if (job.model) settings.selectedModel = job.model
-  if (job.summary_type) settings.selectedSummaryType = job.summary_type
-
-  const dimensions = options.dimensions && typeof options.dimensions === 'object'
-    ? { ...settings.selectedDimensions, ...options.dimensions }
-    : { ...settings.selectedDimensions }
-  settings.selectedDimensions = dimensions
-
-  const restoredOptions = { ...options, dimensions }
-  delete restoredOptions._retry
-  delete restoredOptions.input_type
-  delete restoredOptions.do_summary
-  delete restoredOptions.do_translate
-  delete restoredOptions.do_subtitle
-  delete restoredOptions.preview_before_summary
-  delete restoredOptions.output_options
-  settings.advancedOptions = { ...settings.advancedOptions, ...restoredOptions, dimensions }
-
-  settings.doSummary = options.do_summary ?? true
-  settings.doTranslate = options.do_translate ?? false
-  settings.doSubtitle = options.do_subtitle ?? false
-  settings.previewBeforeSummary = options.preview_before_summary ?? true
-  outputOptions.value = Array.isArray(options.output_options)
-    ? [...options.output_options]
-    : ['result_md', 'srt', 'txt']
-
-  customPrompt.value = options.custom_prompt || ''
-  settings.fullOverride = options.full_override || ''
-  settings.useFullOverride = Boolean(options.full_override)
-  promptOverride.value = options.edited_prompt || ''
-  usePromptOverride.value = Boolean(options.edited_prompt)
-}
-
-async function handleRouteQuery() {
-  const rerunJobId = route.query.rerun && route.query.rerun !== '1'
-    ? route.query.rerun
-    : route.query.rerun === '1' ? route.query.restore : null
-  let restoreJobId = null
-
-  if (rerunJobId) {
-    try {
-      const sourceJob = await jobsApi.get(rerunJobId)
-      jobStore.reset()
-      applyJobConfig(sourceJob)
-      rerunSourceJobId.value = rerunJobId
-      ElMessage.info('已载入原任务配置，可修改后重新处理')
-    } catch (err) {
-      rerunSourceJobId.value = null
-      ElMessage.error(`加载原任务配置失败: ${err.message}`)
-    }
-  } else if (route.query.restore) {
-    restoreJobId = route.query.restore
-  }
-  else if (!_routeQueryHandled && jobStore.tryRestore()) {
-    restoreJobId = jobStore.currentJobId
-  }
-
-  if (restoreJobId) {
-    try {
-      const loadedJob = await jobStore.loadJob(restoreJobId)
-      applyJobConfig(loadedJob)
-      rerunSourceJobId.value = null
-
-      const freshStatus = jobStore.jobStatus
-      if (ACTIVE_JOB_STATUSES.includes(freshStatus)) {
-        jobStore.isProcessing = true
-        jobStore.addLog(`已恢复任务 ${restoreJobId}（状态: ${freshStatus}）`)
-        if (freshStatus === 'preview' && jobStore.previewText) {
-          jobStore.addLog('转录预览待确认，请在下方检查并继续')
-        }
-        scrollToJobProgress()
-      } else {
-        jobStore.isProcessing = false
-      }
-    } catch (err) {
-      jobStore.reset()
-    }
-  }
-
-  // 恢复完成后再清除 query 参数（避免 router.replace 与加载并发导致状态错乱）
-  if (route.query.restore || route.query.rerun) {
-    await router.replace({ path: '/', query: {} }).catch(() => {})
-  }
-
-  _routeQueryHandled = true
 }
 
 // ============ 组件挂载 ============
@@ -407,52 +215,15 @@ onMounted(async () => {
       document.getElementById('preview-section')?.scrollIntoView({ behavior: 'smooth' })
     })
   }))
-
-  // ── 批量进度：socket 推送为主，断线降级轮询 ──
-  socketUnsubs.push(onBatchProgress(applyBatchSummary))
-  socketUnsubs.push(onSocketConnect(() => syncBatchPollingWithSocket(true)))
-  socketUnsubs.push(onSocketDisconnect(() => syncBatchPollingWithSocket(false)))
-  syncBatchPollingWithSocket(socket.connected)
-
-  // ── 启动日志轮询（系统日志仅在展开时轮询） ──
-  if (showBackendLogs.value) {
-    fetchLogs()
-    logTimer = setInterval(fetchLogs, 3000)
-  }
+  // 批量进度 socket 订阅与日志轮询由 useBatchProgress / useBackendLogs 自管理
 })
 
-// keep-alive: 切出页面时停止轮询，切回时恢复
-onDeactivated(() => {
-  stopBatchPolling()
-  if (logTimer) {
-    clearInterval(logTimer)
-    logTimer = null
-  }
-})
-
-// 展开系统日志时才开始轮询；收起则停
-watch(showBackendLogs, (on) => {
-  if (on) {
-    fetchLogs()
-    if (!logTimer) logTimer = setInterval(fetchLogs, 3000)
-  } else if (logTimer) {
-    clearInterval(logTimer)
-    logTimer = null
-  }
-}, { immediate: true })
-
+// keep-alive: 批量进度与系统日志的轮询启停由各自 composable 的
+// onActivated/onDeactivated 钩子处理，这里只保留任务相关的恢复逻辑
 onActivated(async () => {
   // keep-alive 切回时处理路由参数（rerun / restore）
   await handleRouteQuery()
 
-  // 恢复批量进度：socket 在线则补拉一次对齐（离开期间错过的推送），断线则降级轮询
-  if (batchResult.value?.summary && !batchResult.value.summary.all_done) {
-    syncBatchPollingWithSocket(socket.connected)
-  }
-  if (showBackendLogs.value && !logTimer) {
-    fetchLogs()
-    logTimer = setInterval(fetchLogs, 3000)
-  }
   // 检查任务是否已完成（切页期间可能跑完了）
   if (jobStore.currentJobId && jobStore.isProcessing) {
     jobsApi.get(jobStore.currentJobId).then(job => {
@@ -473,8 +244,6 @@ onUnmounted(() => {
   // ★ 只移除本组件注册的 socket 监听（不用全局 removeAllListeners，避免误清 keep-alive 其他组件）
   socketUnsubs.forEach(off => off())
   socketUnsubs = []
-  stopBatchPolling()
-  clearInterval(logTimer)
   // ★ 清理 rAF 渲染回调，避免组件销毁后更新已卸载的 ref
   if (_rafId !== null) {
     cancelAnimationFrame(_rafId)
@@ -618,7 +387,7 @@ async function handleSubmit() {
       ElMessage.success(`已提交 ${res.count} 个批量任务${res.skipped ? `（跳过 ${res.skipped} 个无效/重复）` : ''}`)
       // 立即拉一次进度；后续由 batch_progress 推送实时更新（断线时自动降级轮询）
       refreshBatchStatus()
-      syncBatchPollingWithSocket(socket.connected)
+      syncWithSocket(socket.connected)
       scrollToJobProgress()
       return
     } catch (err) {
@@ -943,6 +712,17 @@ const promptPreviewLoading = ref(false)
 const promptOverride = ref('')
 const usePromptOverride = ref(false)
 
+// ============ rerun/restore 路由参数处理与任务配置回填 ============
+// 逻辑抽离到 composables/useJobRestore（依赖注入视图状态，供 onMounted/onActivated 复用）
+const { handleRouteQuery } = useJobRestore({
+  inputType, inputUrl, inputText,
+  uploadedFilePath, uploadedFileName,
+  outputOptions, customPrompt, promptOverride, usePromptOverride,
+  rerunSourceJobId,
+  settings, jobStore, route, router,
+  scrollToJobProgress,
+})
+
 async function fetchPromptPreview() {
   promptPreviewLoading.value = true
   try {
@@ -1220,11 +1000,6 @@ function formatTokenTime(t) {
 }
 
 /* 追问聊天逻辑已抽离到 ChatPanel 组件，统一支持 SSE 流式/思考过程/引用源/编辑重发 */
-
-// keep-alive: 切出时停止轮询
-onDeactivated(() => {
-  stopBatchPolling()
-})
 </script>
 
 <template>
