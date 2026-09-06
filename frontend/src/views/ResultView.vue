@@ -6,7 +6,9 @@ import { ArrowLeft, Search, Loader2, Plus, FileText, Cpu, RefreshCcw } from 'luc
 import { jobsApi, exportApi, chatApi } from '../utils/api'
 import { useModelStore } from '../stores/modelStore'
 import { useRafMarkdown } from '../composables/useMarkdownRender'
-import { buildRerunRoute, buildRestoreRoute, getJobActionModel } from '../utils/jobActions'
+import { copyText } from '../utils/clipboard'
+import { createFailureNotifier } from '../utils/errorNotice'
+import { buildRerunRoute, buildRestoreRoute, getJobActionModel, buildSamePromptPayload } from '../utils/jobActions'
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
 import ResummarizeControl from '../components/ResummarizeControl.vue'
 import ChatPanel from '../components/ChatPanel.vue'
@@ -17,6 +19,9 @@ import {
 const route = useRoute()
 const router = useRouter()
 const modelStore = useModelStore()
+
+// 版本历史拉取失败提示（连续 3 次才提示一次）
+const summaryHistoryNotifier = createFailureNotifier('总结版本历史加载失败')
 
 const job = ref(null)
 const loading = ref(false)
@@ -125,7 +130,9 @@ async function loadSummaryHistory() {
   try {
     const res = await jobsApi.getSummaryHistory(jobId)
     summaryHistory.value = res.versions || []
+    summaryHistoryNotifier.ok()
   } catch {
+    summaryHistoryNotifier.fail()
     summaryHistory.value = []
   }
 }
@@ -188,15 +195,7 @@ function handleResummarize(model) {
   })
 
   // 相同提示词：透传任务原始 dimensions/options，只改 model
-  const payload = { model }
-  const srcDims = job.value.dimensions || null
-  if (srcDims) {
-    payload.dimensions = srcDims
-    payload.options = { ...(job.value.options || {}), dimensions: srcDims }
-  } else {
-    payload.options = { ...(job.value.options || {}) }
-    payload.summary_type = job.value.summary_type || 'summary'
-  }
+  const payload = buildSamePromptPayload(job.value, model)
 
   // 异步提交重新总结请求（整包透传 model + 原始提示词配置）
   jobsApi.summarize(jobId, payload).then(res => {
@@ -303,22 +302,7 @@ async function handleExport(format) {
 
 // ============ 一键复制 ============
 async function handleCopyResult() {
-  const text = displayResult.value
-  if (!text) { ElMessage.warning('没有可复制的内容'); return }
-  try {
-    await navigator.clipboard.writeText(text)
-    ElMessage.success(`已复制 ${text.length} 字符到剪贴板`)
-  } catch {
-    // fallback 兼容旧浏览器/非 HTTPS
-    const ta = document.createElement('textarea')
-    ta.value = text
-    ta.style.position = 'fixed'; ta.style.left = '-9999px'
-    document.body.appendChild(ta)
-    ta.select()
-    try { document.execCommand('copy'); ElMessage.success(`已复制 ${text.length} 字符到剪贴板`) }
-    catch { ElMessage.error('复制失败，请手动选择文本') }
-    finally { document.body.removeChild(ta) }
-  }
+  return copyText(displayResult.value)
 }
 
 // ============ HTML 预览 ============
@@ -605,21 +589,7 @@ const displayTranscript = computed(() => {
 
 // 复制转录文本
 async function copyTranscript() {
-  const text = displayTranscript.value
-  if (!text) { ElMessage.warning('没有可复制的内容'); return }
-  try {
-    await navigator.clipboard.writeText(text)
-    ElMessage.success(`已复制 ${text.length} 字符到剪贴板`)
-  } catch {
-    const ta = document.createElement('textarea')
-    ta.value = text
-    ta.style.position = 'fixed'; ta.style.left = '-9999px'
-    document.body.appendChild(ta)
-    ta.select()
-    try { document.execCommand('copy'); ElMessage.success(`已复制 ${text.length} 字符到剪贴板`) }
-    catch { ElMessage.error('复制失败，请手动选择文本') }
-    finally { document.body.removeChild(ta) }
-  }
+  return copyText(displayTranscript.value)
 }
 </script>
 

@@ -7,6 +7,7 @@
 import { ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '../stores/settingsStore'
+import { matchRecipeKey } from '../utils/recipes'
 import { Check } from 'lucide-vue-next'
 import DimensionSelector from './DimensionSelector.vue'
 import CustomPromptPanel from './CustomPromptPanel.vue'
@@ -16,8 +17,6 @@ const router = useRouter()
 // 'dimensions' | 'custom'
 const activeTab = ref('dimensions')
 const appliedRecipeKey = ref('')
-
-const DIM_KEYS = ['role', 'mode', 'content_type', 'rules', 'depth', 'output', 'tone', 'word_count']
 
 function switchTab(tab) {
   activeTab.value = tab
@@ -48,14 +47,7 @@ function isUserRecipe(key) {
 watch(
   () => settings.selectedDimensions,
   (cur) => {
-    if (!cur || !settings.recipes?.length) {
-      appliedRecipeKey.value = ''
-      return
-    }
-    const match = settings.recipes.find(
-      (r) => r.dimensions && DIM_KEYS.every((k) => (r.dimensions[k] || '') === (cur[k] || '')),
-    )
-    appliedRecipeKey.value = match ? match.key : ''
+    appliedRecipeKey.value = matchRecipeKey(settings.recipes, cur)
   },
   { deep: true, immediate: true },
 )

@@ -8,6 +8,7 @@ import { useSettingsStore } from '../stores/settingsStore'
 import { useModelStore } from '../stores/modelStore'
 import { jobsApi, exportApi, tokenApi, resultApi } from '../utils/api'
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
+import { buildSamePromptPayload } from '../utils/jobActions'
 import socket, {
   onProgress, onLog, onAiToken, onAiDone, onPreview, onAiThinking,
   continueSummary, cancelPreview, cancelJob,
@@ -16,6 +17,8 @@ import { useBackendLogs } from '../composables/useBackendLogs'
 import { useBatchProgress } from '../composables/useBatchProgress'
 import { useJobRestore } from '../composables/useJobRestore'
 import { useRafMarkdown } from '../composables/useMarkdownRender'
+import { copyText } from '../utils/clipboard'
+import { createFailureNotifier } from '../utils/errorNotice'
 import ResummarizeControl from '../components/ResummarizeControl.vue'
 import SplitPromptPanel from '../components/SplitPromptPanel.vue'
 import ChatPanel from '../components/ChatPanel.vue'
@@ -28,6 +31,11 @@ const router = useRouter()
 const route = useRoute()
 const settings = useSettingsStore()
 const modelStore = useModelStore()
+
+// 后台静默拉取失败提示（连续 3 次才提示一次，成功即重置，避免刷屏）
+const statusCheckNotifier = createFailureNotifier('任务状态检查失败，请确认后端服务正常')
+const jobFilesNotifier = createFailureNotifier('任务文件列表加载失败')
+const tokenNotifier = createFailureNotifier('Token 统计拉取失败')
 
 // ============ 输入区域状态 ============
 // ★ 输入内容持久化到 sessionStorage（F5刷新不丢，关标签页清空）
@@ -223,6 +231,7 @@ onActivated(async () => {
   // 检查任务是否已完成（切页期间可能跑完了）
   if (jobStore.currentJobId && jobStore.isProcessing) {
     jobsApi.get(jobStore.currentJobId).then(job => {
+      statusCheckNotifier.ok()
       if (job.status === 'completed' && jobStore.jobStatus !== 'completed') {
         jobStore.jobStatus = 'completed'
         jobStore.isProcessing = false
@@ -231,7 +240,7 @@ onActivated(async () => {
         loadTokenUsage()
         loadTokenHistory()
       }
-    }).catch(() => {})
+    }).catch(() => statusCheckNotifier.fail())
   }
 })
 
@@ -556,7 +565,11 @@ async function loadJobFiles(jobId) {
       result.push({ key, path, label: labelMap[key] || key, ext })
     }
     _jobFiles.value = result
-  } catch { _jobFiles.value = [] }
+    jobFilesNotifier.ok()
+  } catch {
+    jobFilesNotifier.fail()
+    _jobFiles.value = []
+  }
 }
 
 function downloadJobFile(path) {
@@ -708,14 +721,7 @@ async function handleResummarize(model) {
   const payload = { model }
   try {
     const job = await jobsApi.get(targetJobId)
-    const srcDims = job.dimensions || null
-    if (srcDims) {
-      payload.dimensions = srcDims
-      payload.options = { ...(job.options || {}), dimensions: srcDims }
-    } else {
-      payload.options = { ...(job.options || {}) }
-      payload.summary_type = job.summary_type || 'summary'
-    }
+    Object.assign(payload, buildSamePromptPayload(job, model))
   } catch { /* 忽略详情拉取失败，仅传 model */ }
 
   jobsApi.summarize(targetJobId, payload).then(() => {
@@ -730,22 +736,7 @@ async function handleResummarize(model) {
 
 // 复制结果
 async function copyResult() {
-  const text = jobStore.resultText
-  if (!text) { ElMessage.warning('没有可复制的内容'); return }
-  try {
-    await navigator.clipboard.writeText(text)
-    ElMessage.success(`已复制 ${text.length} 字符到剪贴板`)
-  } catch {
-    // fallback 兼容旧浏览器/非 HTTPS
-    const ta = document.createElement('textarea')
-    ta.value = text
-    ta.style.position = 'fixed'; ta.style.left = '-9999px'
-    document.body.appendChild(ta)
-    ta.select()
-    try { document.execCommand('copy'); ElMessage.success(`已复制 ${text.length} 字符到剪贴板`) }
-    catch { ElMessage.error('复制失败，请手动选择文本') }
-    finally { document.body.removeChild(ta) }
-  }
+  return copyText(jobStore.resultText)
 }
 
 // ============ Token 统计 ============
@@ -757,8 +748,9 @@ async function loadTokenUsage() {
   try {
     const res = await tokenApi.usage()
     tokenUsage.value = res
+    tokenNotifier.ok()
   } catch {
-    // 静默失败
+    tokenNotifier.fail()
   }
 }
 
@@ -766,8 +758,9 @@ async function loadTokenHistory() {
   try {
     const res = await tokenApi.history(30)
     tokenHistory.value = res.records || []
+    tokenNotifier.ok()
   } catch {
-    // 静默失败
+    tokenNotifier.fail()
   }
 }
 

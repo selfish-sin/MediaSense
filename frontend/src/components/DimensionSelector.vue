@@ -9,10 +9,11 @@
  * 3. 顶部的「完全自定义提示词」总开关（开启后覆盖一切维度拼装）
  * 4. 已被 TemplatesView 编辑器覆盖的模块显示「已自定义」标记
  */
-import { computed, watch, ref, nextTick } from 'vue'
+import { computed, watch, ref, nextTick, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '../stores/settingsStore'
 import { summaryApi } from '../utils/api'
+import { DIMENSION_KEYS, matchRecipeKey } from '../utils/recipes'
 import { Pencil, Check } from 'lucide-vue-next'
 
 const props = defineProps({
@@ -34,7 +35,7 @@ const selected = computed({
 })
 
 // 维度列表（带顺序，mode 放在 rules 之前）
-const dimensionKeys = ['role', 'mode', 'content_type', 'rules', 'depth', 'output', 'tone', 'word_count']
+const dimensionKeys = DIMENSION_KEYS
 
 const dimensionList = computed(() => {
   const dims = settings.promptDimensions || {}
@@ -82,10 +83,7 @@ const appliedRecipeKey = ref('')
 
 // 监听维度选择变化：若与某配方完全一致则高亮该配方，否则清空（用户手动改了维度）
 watch(() => selected.value, (cur) => {
-  const match = settings.recipes.find(r =>
-    r.dimensions && dimensionKeys.every(k => (r.dimensions[k] || '') === (cur[k] || ''))
-  )
-  appliedRecipeKey.value = match ? match.key : ''
+  appliedRecipeKey.value = matchRecipeKey(settings.recipes, cur)
 }, { deep: true })
 
 function onRecipePick(recipeOrKey) {
@@ -120,6 +118,14 @@ watch(() => selected.value, () => {
   if (previewTimer) clearTimeout(previewTimer)
   previewTimer = setTimeout(loadPreview, 300)
 }, { deep: true })
+
+// 组件卸载时取消待执行的预览加载，避免对已卸载组件写状态
+onUnmounted(() => {
+  if (previewTimer) {
+    clearTimeout(previewTimer)
+    previewTimer = null
+  }
+})
 
 async function loadPreview() {
   if (!Object.keys(selected.value).length) return

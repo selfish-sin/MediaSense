@@ -31,3 +31,20 @@ export function buildRestoreRoute(jobId) {
 export function buildRerunRoute(jobId) {
   return { path: '/', query: { rerun: jobId } }
 }
+
+/**
+ * 相同提示词重总结负载：沿用任务原始 dimensions/options，仅更换 AI 模型
+ * （HomeView 与 ResultView 的重新总结共用同一拼装语义）
+ */
+export function buildSamePromptPayload(job, model) {
+  const payload = { model }
+  const srcDims = job?.dimensions || null
+  if (srcDims) {
+    payload.dimensions = srcDims
+    payload.options = { ...(job.options || {}), dimensions: srcDims }
+  } else {
+    payload.options = { ...(job.options || {}) }
+    payload.summary_type = job.summary_type || 'summary'
+  }
+  return payload
+}
