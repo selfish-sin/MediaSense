@@ -11,6 +11,17 @@ from pathlib import Path
 PROJECT = Path(__file__).parent
 DIST = PROJECT / 'dist'
 BUILD_DIR = DIST / 'MediaSense'
+VERSION_FILE = PROJECT / 'version.txt'
+DEFAULT_VERSION = '1.0.0'
+
+
+def get_version():
+    """版本号唯一来源：根目录 version.txt（缺失时回退 DEFAULT_VERSION）"""
+    try:
+        v = VERSION_FILE.read_text(encoding='utf-8').strip()
+        return v or DEFAULT_VERSION
+    except OSError:
+        return DEFAULT_VERSION
 
 def run(cmd, **kw):
     print(f'> {cmd}')
@@ -30,29 +41,10 @@ def build_frontend():
     run('npm run build', cwd=str(PROJECT / 'frontend'))
 
 def build_exe():
-    print('[3/5] PyInstaller...')
-    cmd = (
-        f'"{sys.executable}" -m PyInstaller --noconfirm --clean --name MediaSense '
-        '--onedir --console '
-        '--icon bilibili_video_icon_v2_cropped.ico '
-        '--paths backend '
-        '--collect-submodules uvicorn '
-        '--collect-submodules engineio '
-        '--collect-submodules yt_dlp '
-        '--collect-submodules faster_whisper '
-        '--collect-submodules bilibili_api '
-        '--collect-submodules httpx '
-        '--collect-all ctranslate2 '
-        '--hidden-import engineio.async_drivers.asgi '
-        '--hidden-import uvicorn.logging '
-        '--hidden-import uvicorn.loops.auto '
-        '--hidden-import uvicorn.protocols.http.auto '
-        '--hidden-import uvicorn.protocols.websockets.auto '
-        '--hidden-import uvicorn.lifespan.on '
-        '--hidden-import multipart '
-        'launcher.py'
-    )
-    run(cmd)
+    print('[3/5] PyInstaller (MediaSense.spec)...')
+    # 统一走 MediaSense.spec：collect-submodules/hidden-imports/icon/CUDA 裁剪
+    # 全部沉淀在 spec，避免 CLI 参数与 spec 双份维护漂移
+    run(f'"{sys.executable}" -m PyInstaller --noconfirm --clean MediaSense.spec')
 
 def assemble():
     print('[4/5] Assembling distribution...')
@@ -92,7 +84,7 @@ def assemble():
 
     print(f'  Distribution ready: {target}')
 
-def build_installer():
+def build_installer(version):
     print('[5/5] Inno Setup...')
     iss = PROJECT / 'installer.iss'
     if not iss.exists():
@@ -111,13 +103,15 @@ def build_installer():
         print('  Inno Setup not found. Install from https://jrsoftware.org/isdl.php')
         print(f'  You can distribute the folder: {BUILD_DIR}')
         return
-    run(f'"{iscc}" installer.iss')
-    print('  Installer created: dist/MediaSense-Setup.exe')
+    run(f'"{iscc}" /DMyAppVersion={version} installer.iss')
+    print(f'  Installer created: dist/MediaSense-Setup-{version}.exe')
 
 if __name__ == '__main__':
+    version = get_version()
+    print(f'Building MediaSense v{version}')
     clean()
     build_frontend()
     build_exe()
     assemble()
-    build_installer()
+    build_installer(version)
     print('\nDONE!')

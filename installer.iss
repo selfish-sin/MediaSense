@@ -1,6 +1,9 @@
 ; MediaSense Inno Setup Script
 #define MyAppName "MediaSense"
+#ifndef MyAppVersion
+; 命令行可用 /DMyAppVersion=x.y.z 覆盖（build_installer.py 会从 version.txt 传入）
 #define MyAppVersion "1.0.0"
+#endif
 #define MyAppPublisher "MediaSense Contributors"
 #define MyAppURL "https://github.com/selfish-sin/MediaSense"
 #define MyAppExeName "MediaSense.exe"
@@ -42,4 +45,6 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
+; 只删应用运行数据（DB/下载/转换临时目录）；{app}\models 里用户下载的 Whisper
+; 模型刻意保留——体积大且可跨版本复用，避免重装后再走一遍下载
 Type: filesandordirs; Name: "{app}\backend\data"
