@@ -2,10 +2,7 @@
 ai_processor 核心AI处理服务测试（可快速覆盖部分）
 """
 import pytest
-import json
-import os
 from unittest.mock import patch, MagicMock, AsyncMock
-from pathlib import Path
 
 import httpx
 from services.ai_processor import (
@@ -13,8 +10,6 @@ from services.ai_processor import (
     _check_cancelled,
     _build_headers,
     _record_token_usage,
-    _save_checkpoint,
-    _load_checkpoint,
     _call_ai,
     generate_tags,
     generate_mindmap,
@@ -83,23 +78,6 @@ class TestRecordTokenUsage:
         with patch("services.ai_processor.get_connection", return_value=mock_conn):
             _record_token_usage("glm", 100, 200, "job-1")  # 不抛异常
             mock_conn.close.assert_called_once()
-
-
-class TestCheckpoint:
-    def test_save_and_load(self, tmp_path):
-        cp_dir = tmp_path / "checkpoints"
-        cp_dir.mkdir()
-        _save_checkpoint(cp_dir, "round1", "output text", 50, 100)
-        loaded = _load_checkpoint(cp_dir, "round1")
-        assert loaded is not None
-        assert loaded["round"] == "round1"
-        assert loaded["output"] == "output text"
-        assert loaded["input_tokens"] == 50
-        assert loaded["output_tokens"] == 100
-
-    def test_load_nonexistent(self, tmp_path):
-        result = _load_checkpoint(tmp_path / "nosuch", "x")
-        assert result is None
 
 
 @pytest.mark.asyncio

@@ -132,15 +132,6 @@ async def emit_ai_thinking(sio, job_id: str, token: str, done: bool = False):
     })
 
 
-async def emit_ai_tokens_batch(sio, job_id: str, tokens: list, done: bool = False):
-    """批量发送AI流式Token（减少WebSocket消息数，降低前端渲染压力）"""
-    await _emit(sio, 'ai_token', {
-        'job_id': job_id,
-        'tokens': tokens,
-        'done': done,
-    })
-
-
 async def emit_preview(sio, job_id: str, text: str, title: str = '',
                        platform: str = '', **kwargs):
     """发送转录预览"""

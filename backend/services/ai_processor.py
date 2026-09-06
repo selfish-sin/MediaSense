@@ -8,7 +8,6 @@ import json
 import logging
 import re
 import time
-from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
 
 import httpx
@@ -23,9 +22,6 @@ from services.prompts import (
 
 logger = logging.getLogger(__name__)
 
-# 检查点目录
-CHECKPOINT_DIR = DATA_DIR / "checkpoints"
-
 
 class TaskCancelledError(Exception):
     """任务被用户取消时抛出的异常"""
@@ -38,26 +34,6 @@ def _check_cancelled(job_id: str):
         from socket_handlers import check_cancelled
         if check_cancelled(job_id):
             raise TaskCancelledError(f"任务 {job_id} 已被用户取消")
-
-
-# ============ HTTP 重试包装 ============
-async def _http_post(url: str, **kwargs) -> httpx.Response:
-    """带重试的异步HTTP POST"""
-    max_retries = 2
-    last_exc = None
-    for attempt in range(max_retries + 1):
-        try:
-            async with httpx.AsyncClient(timeout=kwargs.pop('timeout', 120.0)) as client:
-                resp = await client.post(url, **kwargs)
-                if resp.status_code < 500 or attempt == max_retries:
-                    return resp
-        except (httpx.TimeoutException, httpx.ConnectError) as e:
-            last_exc = e
-            if attempt == max_retries:
-                raise
-        if attempt < max_retries:
-            await asyncio.sleep(1.5 * (attempt + 1))
-    raise last_exc
 
 
 def _build_headers(model_cfg: Dict[str, Any]) -> Dict[str, str]:
@@ -797,26 +773,3 @@ def _record_token_usage(model_key: str, input_tokens: int, output_tokens: int, j
         logger.warning(f'Token统计写入失败: {e}')
     finally:
         conn.close()
-
-
-# ============ 断点续传 ============
-def _save_checkpoint(cp_dir: Path, round_name: str, output: str, in_tok: int, out_tok: int):
-    """保存深度模式轮次检查点"""
-    cp = {
-        "round": round_name,
-        "output": output,
-        "input_tokens": in_tok,
-        "output_tokens": out_tok,
-        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    with open(cp_dir / f"{round_name}.json", "w", encoding="utf-8") as f:
-        json.dump(cp, f, ensure_ascii=False, indent=2)
-
-
-def _load_checkpoint(cp_dir: Path, round_name: str) -> Optional[Dict]:
-    """加载检查点"""
-    cp_file = cp_dir / f"{round_name}.json"
-    if cp_file.exists():
-        with open(cp_file, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return None

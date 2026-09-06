@@ -14,7 +14,6 @@ from db.job_repo import (
     update_job, delete_job, finish_job,
     _row_to_dict, find_job_by_url, clear_jobs, clear_jobs_by_status,
     save_summary_version, get_summary_history, get_summary_version,
-    get_latest_summary_version,
     _now_utc_iso, delete_jobs_batch, get_jobs_disk_info,
     claim_staged_upload, update_job_input_file_if_matches,
 )
@@ -480,16 +479,6 @@ class TestSummaryHistory:
 
     def test_get_nonexistent_version(self):
         assert get_summary_version("no", 1) is None
-
-    def test_latest_version_no_history(self):
-        jid = create_job(input_type="url", input_url="x")
-        assert get_latest_summary_version(jid) == 1
-
-    def test_latest_version_with_history(self):
-        jid = create_job(input_type="url", input_url="x")
-        save_summary_version(jid, 1, "s", "m", "v1")
-        save_summary_version(jid, 2, "s", "m", "v2")
-        assert get_latest_summary_version(jid) == 2
 
 
 # ── delete_jobs_batch ──

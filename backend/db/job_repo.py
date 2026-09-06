@@ -623,19 +623,3 @@ def get_summary_version(job_id: str, version: int) -> Optional[Dict[str, Any]]:
         if 'T' not in d['created_at']:
             d['created_at'] = d['created_at'].replace(' ', 'T') + 'Z'
     return d
-
-
-def get_latest_summary_version(job_id: str) -> int:
-    """获取某任务当前最新版本号（默认1）"""
-    conn = get_connection()
-    row = conn.execute(
-        "SELECT MAX(version) FROM summary_history WHERE job_id = ?",
-        (job_id,)
-    ).fetchone()
-    row2 = conn.execute(
-        "SELECT summary_version FROM jobs WHERE id = ?", (job_id,)
-    ).fetchone()
-    conn.close()
-    history_max = row[0] if row and row[0] else 0
-    job_ver = row2[0] if row2 and row2[0] else 1
-    return max(history_max, job_ver)

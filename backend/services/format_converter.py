@@ -20,7 +20,10 @@ import logging
 import shutil
 import subprocess
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
+
+from config import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -275,3 +278,40 @@ def _pillow_convert(input_path: str, target: str, quality: str) -> tuple[str, st
 
     img.save(output_path, **save_kwargs)
     return output_path, "pillow"
+
+
+# ============ 转换临时目录与过期清理 ============
+# 原 converter router 已下线，仅启动时清理任务保留在服务层。
+CONVERTER_DIR = DATA_DIR / "converter"
+UPLOADS_DIR = CONVERTER_DIR / "uploads"
+OUTPUTS_DIR = CONVERTER_DIR / "outputs"
+for _d in (CONVERTER_DIR, UPLOADS_DIR, OUTPUTS_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
+
+_FILE_TTL = timedelta(hours=24)
+
+
+def cleanup_expired_files() -> int:
+    """清理超过 TTL 的上传/输出文件，返回清理数量"""
+    now = datetime.now()
+    removed = 0
+    for folder in (UPLOADS_DIR, OUTPUTS_DIR):
+        for item in folder.iterdir():
+            if item.is_dir():
+                # 清理整个任务目录
+                try:
+                    mtime = datetime.fromtimestamp(item.stat().st_mtime)
+                    if now - mtime > _FILE_TTL:
+                        shutil.rmtree(item, ignore_errors=True)
+                        removed += 1
+                except OSError:
+                    pass
+            elif item.is_file():
+                try:
+                    mtime = datetime.fromtimestamp(item.stat().st_mtime)
+                    if now - mtime > _FILE_TTL:
+                        item.unlink(missing_ok=True)
+                        removed += 1
+                except OSError:
+                    pass
+    return removed

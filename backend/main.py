@@ -151,8 +151,7 @@ from routers.templates import router as templates_router
 from routers.chat import router as chat_router
 from routers.search import router as search_router
 from routers.storage_cleanup import router as storage_cleanup_router
-# ★ 格式转换已外包到独立工具，路由已注释
-# from routers.converter import router as converter_router
+# ★ 格式转换已外包到独立工具，converter router 已删除（清理函数迁至 services.format_converter）
 
 app.include_router(jobs_router,   prefix="/api/jobs",      tags=["jobs"])
 # ★ jobs_ai 先于 jobs_batch 注册：保持原单路由内 /{job_id}/summary-history
@@ -1161,7 +1160,7 @@ async def startup():
         logger.warning(f"检测到 {interrupted} 个被服务重启中断的任务，已标记为 failed（可重试）")
 
     # 清理格式转换器过期文件（24小时）
-    from routers.converter import cleanup_expired_files
+    from services.format_converter import cleanup_expired_files
     removed = cleanup_expired_files()
     if removed:
         logger.info(f"格式转换器文件清理完成，移除了 {removed} 个过期项")
