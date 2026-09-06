@@ -104,7 +104,7 @@
           <div
             v-if="msg.content"
             class="bubble-body markdown-body"
-            v-html="renderMarkdown(msg.content)"
+            v-html="htmlOf(msg)"
           />
           <div v-else-if="msg === activeMsg" class="bubble-body streaming-placeholder">
             <span class="dot-flashing">{{ msg.thinking && !msg.content ? '思考中' : '生成中' }}</span>
@@ -180,7 +180,7 @@ import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { MessageCircle, Plus, Pencil, Trash2, ArrowDown, Sparkles, Link } from 'lucide-vue-next'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatApi } from '../utils/api'
-import { renderMarkdown } from '../utils/markdown'
+import { useMarkdownListCache } from '../composables/useMarkdownRender'
 import { useModelStore } from '../stores/modelStore'
 
 const props = defineProps({
@@ -190,6 +190,11 @@ const props = defineProps({
 const modelStore = useModelStore()
 
 const messages = ref([])
+// 消息列表 Markdown 渲染缓存：内容未变的条目直接命中，流式追加只按帧重渲染变化条目
+const { htmlOf } = useMarkdownListCache(
+  () => messages.value,
+  (msg) => msg.content,
+)
 const input = ref('')
 const streaming = ref(false)
 const enableSearch = ref(false)

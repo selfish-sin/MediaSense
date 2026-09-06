@@ -15,15 +15,12 @@ import socket, {
 import { useBackendLogs } from '../composables/useBackendLogs'
 import { useBatchProgress } from '../composables/useBatchProgress'
 import { useJobRestore } from '../composables/useJobRestore'
-import { renderMarkdown } from '../utils/markdown'
+import { useRafMarkdown } from '../composables/useMarkdownRender'
 import ResummarizeControl from '../components/ResummarizeControl.vue'
 import SplitPromptPanel from '../components/SplitPromptPanel.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 
-// 思维导图渲染
-import { Transformer } from 'markmap-lib'
-import { Markmap } from 'markmap-view'
-
+// 思维导图渲染：markmap 体积较大，切到思维导图 Tab 时再动态加载
 let transformer = null
 
 const jobStore = useJobStore()
@@ -243,11 +240,6 @@ onUnmounted(() => {
   // ★ 只移除本组件注册的 socket 监听（不用全局 removeAllListeners，避免误清 keep-alive 其他组件）
   socketUnsubs.forEach(off => off())
   socketUnsubs = []
-  // ★ 清理 rAF 渲染回调，避免组件销毁后更新已卸载的 ref
-  if (_rafId !== null) {
-    cancelAnimationFrame(_rafId)
-    _rafId = null
-  }
 })
 
 // ============ 桌面通知 ============
@@ -529,22 +521,9 @@ async function handleExport(format) {
 }
 
 // ============ 计算属性 ============
-// ★ rAF 节流渲染：每帧最多渲染一次 Markdown，避免高频 token 推送导致 O(n) 重渲染堆积
-const _renderedHtml = ref('')
-let _rafId = null
-function _scheduleRender() {
-  if (_rafId !== null) return  // 已有等待中的渲染
-  _rafId = requestAnimationFrame(() => {
-    _rafId = null
-    _renderedHtml.value = renderMarkdown(jobStore.resultText)
-  })
-}
-// 监听 resultText 变化，触发 rAF 节流渲染
-watch(() => jobStore.resultText, () => {
-  _scheduleRender()
-}, { immediate: true })
-// renderedResult 改为读取 rAF 渲染的 HTML
-const renderedResult = computed(() => _renderedHtml.value)
+// ★ rAF 节流渲染 Markdown：每帧最多渲染一次，避免高频 token 推送导致 O(n) 重渲染堆积
+// （逻辑抽离到 composables/useMarkdownRender，组件卸载时自清 rAF 回调）
+const { html: renderedResult } = useRafMarkdown(() => jobStore.resultText)
 const progressPct = computed(() => jobStore.progress.pct)
 const isPreviewState = computed(() => jobStore.jobStatus === 'preview')
 const isProcessing = computed(() => jobStore.isProcessing)
@@ -608,7 +587,14 @@ const hasMindmap = computed(() => {
 const mindmapRef = ref(null)
 let markmapInstance = null
 
-function renderMindmap() {
+async function renderMindmap() {
+  if (!mindmapRef.value || !jobStore.resultText) return
+  // markmap 动态加载：仅首次进入思维导图 Tab 时拉取，缩小首包体积
+  const [{ Transformer }, { Markmap }] = await Promise.all([
+    import('markmap-lib'),
+    import('markmap-view'),
+  ])
+  // 动态加载期间组件可能已卸载/切换 Tab
   if (!mindmapRef.value || !jobStore.resultText) return
   if (!transformer) {
     try {

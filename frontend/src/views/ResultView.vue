@@ -4,8 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, Search, Loader2, Plus, FileText, Cpu, RefreshCcw } from 'lucide-vue-next'
 import { jobsApi, exportApi, chatApi } from '../utils/api'
-import { renderMarkdown } from '../utils/markdown'
 import { useModelStore } from '../stores/modelStore'
+import { useRafMarkdown } from '../composables/useMarkdownRender'
 import { buildRerunRoute, buildRestoreRoute, getJobActionModel } from '../utils/jobActions'
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
 import ResummarizeControl from '../components/ResummarizeControl.vue'
@@ -13,7 +13,6 @@ import ChatPanel from '../components/ChatPanel.vue'
 import {
   onProgress, onLog, onAiToken, onAiDone, onAiThinking,
 } from '../utils/socket'
-import { Transformer } from 'markmap-lib'
 
 const route = useRoute()
 const router = useRouter()
@@ -95,7 +94,8 @@ const activeModel = computed(() => {
   return job.value?.model || '-'
 })
 
-const renderedResult = computed(() => renderMarkdown(displayResult.value))
+// rAF 节流渲染 Markdown（重新总结流式输出逐 token 追加，避免每次追加全量重渲染）
+const { html: renderedResult } = useRafMarkdown(() => displayResult.value)
 
 async function loadJob() {
   const jobId = route.params.jobId
@@ -513,6 +513,7 @@ async function generateMindmap() {
       return
     }
     // 直接用 markmap-lib 的 Transformer 解析节点树，手写 HTML 渲染
+    const { Transformer } = await import('markmap-lib')
     const transformed = new Transformer().transform(res.data.mindmap_md)
     const root = transformed?.root
     if (!root || !root.content) {
