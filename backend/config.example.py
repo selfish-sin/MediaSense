@@ -47,7 +47,7 @@ ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "")
 PROXY = ""  # 需要时设置，如 "http://127.0.0.1:7890"
 
 # ============ AI 模型（在 /models 页面管理，API Key 存数据库） ============
-DEFAULT_MODEL = "glm-4.5-air"
+DEFAULT_MODEL = "deepseek-v4-flash"
 
 # ============ 翻译语言列表 ============
 TRANSLATE_LANGS = {
@@ -122,7 +122,8 @@ SCENARIOS = {
     "reading":       {"name": "📄 全文精读翻译",    "word_count": "不限",    "tone": "学术严谨", "format": "纯文本",   "purpose": "内容归纳", "summary_type": "translate"},
     "study":         {"name": "📝 学习做笔记",      "word_count": "3000",    "tone": "学术严谨", "format": "Markdown", "purpose": "学习笔记", "summary_type": "notes"},
     "skim":          {"name": "👀 快速扫一眼",      "word_count": "1000",    "tone": "通俗科普", "format": "要点列表", "purpose": "快速浏览", "summary_type": "summary"},
-    "deep_research": {"name": "🔬 深度研究分析",    "word_count": "10000",   "tone": "学术严谨", "format": "结构化大纲","purpose": "深度分析", "summary_type": "chapter"},
+    "deep_research": {"name": "🔬 深度研究分析",    "word_count": "不限",    "tone": "学术严谨", "format": "结构化大纲","purpose": "深度分析", "summary_type": "deep_research"},
+    "textbook":      {"name": "📖 教科书模式",      "word_count": "20000",   "tone": "学术严谨", "format": "结构化大纲","purpose": "教材编写", "summary_type": "textbook"},
     "podcast":       {"name": "🎤 播客/采访整理",    "word_count": "5000",    "tone": "口语化",  "format": "要点列表", "purpose": "素材收集", "summary_type": "qa"},
 }
 
