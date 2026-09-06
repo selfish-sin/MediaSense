@@ -29,7 +29,11 @@ api.interceptors.response.use(
   },
   (error) => {
     console.error('API Error:', error)
-    const msg = error.response?.data?.detail || error.message || '请求失败'
+    const detail = error.response?.data?.detail
+    // FastAPI 422 校验错误 detail 是数组，逐条提取 msg
+    const msg = Array.isArray(detail)
+      ? detail.map((d) => d.msg || JSON.stringify(d)).join('; ')
+      : (detail || error.message || '请求失败')
     return Promise.reject(new Error(msg))
   }
 )
