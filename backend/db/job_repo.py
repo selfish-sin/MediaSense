@@ -108,8 +108,16 @@ def get_jobs(status: Optional[str] = None, limit: int = 50, offset: int = 0,
         clauses.append("(title LIKE ? ESCAPE '\\' OR input_url LIKE ? ESCAPE '\\')")
         params.extend([like, like])
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    # ★ 列表瘦身：不 SELECT 大文本列（result_text/preview_text/input_text/
+    #   edited_preview_text/files），列表 UI 只用 id/title/platform/status/
+    #   model/created_at 等，full-job 详情走 GET /api/jobs/{id}。
+    #   此前每个 job 都带几十 KB 结果文本，200 条列表就是数 MB JSON。
+    list_columns = (
+        "id, title, platform, input_url, input_file, status, model, summary_type, "
+        "options, tags, token_usage, progress_msg, error, created_at, updated_at"
+    )
     rows = conn.execute(
-        f"SELECT * FROM jobs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        f"SELECT {list_columns} FROM jobs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
         (*params, limit, offset)
     ).fetchall()
     total = conn.execute(f"SELECT COUNT(*) FROM jobs{where}", params).fetchone()[0]
