@@ -1,6 +1,6 @@
 # youtube_tool_v2 CONTEXT
 
-> 最近核对：2026-08-27 | FastAPI + Socket.IO | 默认端口：7001
+> 最近核对：2026-09-06 | FastAPI + Socket.IO | 默认端口：7001
 
 ## 一分钟速览
 
@@ -36,6 +36,8 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `backend/routers/` | 其余 API 路由（models/summary/export/translate/bilibili/download/templates/chat/search/storage cleanup） | 加/改其他 HTTP API |
 | `backend/socket_handlers.py` | 实时日志和进度事件 | 改前端实时反馈 |
 | `backend/scripts/cleanup_storage.py` | staged/orphan/export/media 清理 | 改清理策略；删除必须显式确认 |
+| `backend/verify.py` | 一键验证：backend pytest + frontend vitest + vite build | 改完代码做全量验证，或想快速回归 |
+| `frontend/src/utils/` | api 封装（axios 拦截器/错误归一化）、jobActions、clipboard/recipes/errorNotice 等工具 | 改 HTTP 调用或共享工具行为 |
 | `frontend/src/views/HomeView.vue` | 核心工作台视图（业务逻辑已拆到 composables） | 改表单/提交/结果展示 |
 | `frontend/src/composables/` | `useBackendLogs`（日志增量拉取+全量回退）、`useBatchProgress`（Socket 推送+断线降级轮询）、`useJobRestore`（路由参数回填） | 改日志面板、批量进度或任务恢复逻辑 |
 | `frontend/`、`static/` | 页面和同源静态资源 | 改 UI |
@@ -72,3 +74,4 @@ python main.py
 - B站 API 风控加固（2026-08-26，未建 task）：批量任务齐射触发 412（request was banned）后旧代码全部白等 yt-dlp auto-sub。六项修复，全在 `backend/services/downloader.py`/`transcriber.py`：①限流串行化：进程级锁 + 最小间隔 ≥1s（`BILI_API_MIN_INTERVAL` 环境变量可调，`_throttle_bili_api`）；②接口顺序反转：`_fetch_subtitles_via_player_v2` 先走实测更稳的旧版 `x/player/v2`（带 dm_img_str 等浏览器常参数），wbi/v2 降级备用，412 时强制刷新 wbi 签名密钥重试一次；③浏览器指纹：完整 Chrome UA（此前截断 UA 是风控高权重特征）+ 进程级缓存 buvid3/buvid4 + 真实视频页 Referer（`_bili_headers`），yt-dlp 兜底同样注入 buvid cookie 与完整 UA；④兜底提速：接口明确"无字幕"（api_ok=True 且空列表）时跳过 yt-dlp auto-sub 直转 Whisper，只有接口被风控/异常（api_ok=False）才走 yt-dlp；⑤412 文案可见化：拦截时提示"B站风控(412)，已自动回退"，不再只甩裸错误码；⑥Whisper 事前探测：`_cuda_runtime_usable()` 在模型加载点探测 cublas/cudnn DLL，缺失直接走 CPU。后端 pytest 398 全绿；真网实测 nav/view/player 接口在完整指纹下正常响应（含真实视频 ai-zh 字幕）。
 - 质量与实时性重构（2026-08-27，task 08-27-quality-realtime-refactor 已归档）：①批量进度改 Socket.IO 推送——`process_job` finally 单一出口调 `_emit_batch_progress`（负载与 `GET /api/jobs/batch/{id}` 同构，单一事实源 `get_batch_summary`），前端 `useBatchProgress` 订阅更新，断线降级 10s 轮询；②前端日志增量修复——`delta > 200` 超界不再静默丢弃，回退 `loadAllHistory()` 全量重载，连续失败 ≥3 次才告警一次（成功重置）；③`_process_job_impl` Step 1 拆为 `_handle_text_input`/`_handle_subtitle_file`/`_handle_media_file`/`_handle_url_input`/`_extract_bvid` 策略函数，统一返回 `(srt_path, txt_path, seg_count, title, platform, files)`；④`routers/jobs.py` 按域拆为 core/`jobs_ai`/`jobs_batch` 三路由（对外路径零变化）；⑤HomeView 拆出 `useBackendLogs`/`useBatchProgress`/`useJobRestore` 三个 composable 并清理死代码。后端 pytest 402 全绿（须用 `backend/venv` 跑，含 pytest-asyncio）、前端 vitest 24 全绿。
 - 测试环境坑：沙箱默认 Python 缺 pytest-asyncio，异步用例会以 "async def functions are not natively supported" 批量失败；跑后端测试必须用 `backend/venv/Scripts/python.exe -m pytest`。
+- 质量与清理冲刺（2026-09-06，无 task，逐单元提交）：后端——Socket.IO CORS 改 callable 白名单（此前 allowed_origins 漏跨域来源）；chat 追问 SSE 与 socket 双发修复；翻译结果 AI 哨兵串校验；任务列表 LIKE 转义；`_extract_bvid` 失败不再静默吞错；取消传播 + `cancelled` 状态守护（防 canceled 被后续状态覆盖）；任务列表查询/响应瘦身；Whisper 进程级模型缓存单例（double-check lock）；搜索/logs/大文件读改 `to_thread` 防阻塞事件循环；存储清理 status 轮询瘦身、DB 连接 try/finally、bilibili cookie 落盘位置；死代码清理（converter 路由迁为 `cleanup_expired_files` 启动清理、ai_processor checkpoints、`emit_ai_tokens_batch`、`get_latest_summary_version`）。打包——PyInstaller spec 按 `_KEEP_CUDA` 环境变量裁剪 CUDA DLL、installer.iss 用 `MyAppVersion` define、`version.txt` 单一版本源。前端——HomeView -877 行死代码（搜索块/双语块/提示词预览/截图画廊）、删除 ConverterView/HelloWorld、移除 icons 依赖；`useMarkdownRender`（rAF 节流 + 列表缓存）统一流式渲染、markmap 动态导入；ChatPanel SSE AbortController 生命周期治理；jobStore 日志 1.5s trailing debounce 落盘 + `flushLogsNow`/`clearLogs`；Element Plus 按需加载（树摇）+ zhCn locale；api 拦截器统一 422 数组 detail 逐条拼接；工具去重（clipboard/recipes/errorNotice）。测试——共享 `db_path` fixture（真实 init_db 取代 4 份手抄 DDL）、socketio mock 自动恢复、MOCK_CFG 常量；前端补 api/jobStore 26 用例。质量门禁：`verify.py` 一键验证全绿（后端 pytest 397、前端 vitest 50、vite build），ruff 最小配置（line-length 120）。
