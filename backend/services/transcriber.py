@@ -16,6 +16,14 @@ from config import LOCAL_MODEL_DIRS, DEFAULT_WHISPER_MODEL
 
 logger = logging.getLogger(__name__)
 
+
+class TranscriptionCancelledError(Exception):
+    """转录进行中检测到用户取消（由调用方注入的 cancel_check 触发）。
+
+    转录在 worker 线程里跑，主流程的 check_cancelled 只能在阶段边界生效；
+    不传入循环内部的话，取消后仍要白烧几分钟 GPU/CPU 直到当前音频跑完。
+    """
+
 # 本地 ffmpeg/ffprobe 路径（项目自带，无需系统 PATH）
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _FFMPEG_BIN = str(_PROJECT_ROOT / "bin" / "ffmpeg.exe")
@@ -141,10 +149,12 @@ def _cuda_runtime_usable() -> bool:
     return bool(cublas and cudnn)
 
 
-def _transcribe_with_model(model, audio_path, language, progress_callback, speaker_diarization):
+def _transcribe_with_model(model, audio_path, language, progress_callback, speaker_diarization,
+                           cancel_check=None):
     """用已加载的模型完成转录并写入 SRT/TXT，返回 (srt_path, txt_path, seg_count)。
 
     从 _transcribe_sync 抽出，便于 GPU→CPU 降级时整段重跑。
+    cancel_check: 可选可调用对象，返回 True 即抛 TranscriptionCancelledError 中止。
     """
     # ★ 阶段3：开始转录
     if progress_callback:
@@ -181,6 +191,8 @@ def _transcribe_with_model(model, audio_path, language, progress_callback, speak
          open(txt_path, 'w', encoding='utf-8') as f_txt:
 
         for i, seg in enumerate(segments_gen):
+            if cancel_check and cancel_check():
+                raise TranscriptionCancelledError('用户取消，转录中止')
             segments.append(seg)
 
             # 说话人分离
@@ -316,6 +328,7 @@ def _transcribe_chunked(
     speaker_diarization: bool,
     language: Optional[str],
     progress_callback,
+    cancel_check=None,
 ) -> Tuple[str, str, int]:
     """长音频分片转录：切分 → 逐段转录（模型只加载一次）→ 时间戳合并
 
@@ -327,7 +340,8 @@ def _transcribe_chunked(
     if total_chunks <= 1:
         # 切分失败或音频本身 ≤5 分钟 → 走正常单次流程
         return _transcribe_sync_single(
-            audio_path, model_size, platform, speaker_diarization, language, progress_callback
+            audio_path, model_size, platform, speaker_diarization, language, progress_callback,
+            cancel_check=cancel_check,
         )
 
     logger.info(f'长音频分片转录启动: {total_chunks} 段, 音频: {Path(audio_path).name}')
@@ -395,6 +409,8 @@ def _transcribe_chunked(
         pass
 
     for ci, (chunk_path, offset) in enumerate(chunks):
+        if cancel_check and cancel_check():
+            raise TranscriptionCancelledError('用户取消，转录中止')
         chunk_base_pct = int(10 + ci / total_chunks * 85)
         if progress_callback:
             elapsed0 = time.time() - transcribe_start
@@ -429,6 +445,8 @@ def _transcribe_chunked(
         last_seg_end = 0
         last_emit_time = 0.0
         for seg in chunk_segments:
+            if cancel_check and cancel_check():
+                raise TranscriptionCancelledError('用户取消，转录中止')
             seg_start = seg.start + offset
             seg_end_val = seg.end + offset
             segment_idx += 1
@@ -512,6 +530,7 @@ def _transcribe_sync(
     speaker_diarization: bool = False,
     language: Optional[str] = None,
     progress_callback=None,
+    cancel_check=None,
 ) -> Tuple[str, str, int]:
     """同步转录入口（自动检测长音频并分片）
 
@@ -524,10 +543,12 @@ def _transcribe_sync(
         if progress_callback:
             progress_callback(1, f'检测到长音频（{_format_duration(duration)}），启用分片转录（每段5分钟）...')
         return _transcribe_chunked(
-            audio_path, model_size, platform, speaker_diarization, language, progress_callback
+            audio_path, model_size, platform, speaker_diarization, language, progress_callback,
+            cancel_check=cancel_check,
         )
     return _transcribe_sync_single(
-        audio_path, model_size, platform, speaker_diarization, language, progress_callback
+        audio_path, model_size, platform, speaker_diarization, language, progress_callback,
+        cancel_check=cancel_check,
     )
 
 
@@ -538,6 +559,7 @@ def _transcribe_sync_single(
     speaker_diarization: bool = False,
     language: Optional[str] = None,
     progress_callback=None,
+    cancel_check=None,
 ) -> Tuple[str, str, int]:
     """单段音频转录（原有逻辑，供分片流程复用）
     返回：(srt_path, txt_path, segment_count)
@@ -616,7 +638,8 @@ def _transcribe_sync_single(
     # ★ 阶段3：开始转录（GPU推理若缺CUDA运行时DLL，自动降级CPU重跑）
     try:
         srt_path, txt_path, total = _transcribe_with_model(
-            model, audio_path, language, progress_callback, speaker_diarization
+            model, audio_path, language, progress_callback, speaker_diarization,
+            cancel_check=cancel_check,
         )
     except RuntimeError as e:
         # 加载期不暴露、推理期才崩的 CUDA 运行时缺失（如 cublas64_12.dll 找不到）
@@ -631,7 +654,8 @@ def _transcribe_sync_single(
                 local_files_only=local_only, cpu_threads=4, num_workers=1,
             )
             srt_path, txt_path, total = _transcribe_with_model(
-                model, audio_path, language, progress_callback, speaker_diarization
+                model, audio_path, language, progress_callback, speaker_diarization,
+                cancel_check=cancel_check,
             )
         else:
             raise
@@ -685,6 +709,7 @@ async def transcribe_audio(
     language: Optional[str] = None,
     sio=None,
     job_id: str = '',
+    cancel_check=None,
 ) -> Tuple[str, str, int]:
     """
     异步转录音频（在线程池中运行同步的faster-whisper）
@@ -767,6 +792,7 @@ async def transcribe_audio(
             speaker_diarization=speaker_diarization,
             language=language,
             progress_callback=progress_callback,
+            cancel_check=cancel_check,
         )
     finally:
         # 通知 reader 排空后退出；超时则 cancel 兜底

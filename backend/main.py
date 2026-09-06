@@ -370,13 +370,15 @@ async def _handle_media_file(input_file, job_dir, sio, job_id, model_size, speak
     """音视频文件上传：提取音频后 Whisper 转录。"""
     from services.downloader import handle_file_upload
     from services.transcriber import transcribe_audio
+    from socket_handlers import check_cancelled
     audio_path, title, platform = await handle_file_upload(input_file, job_dir, sio, job_id)
     files = {'audio': str(audio_path)}
     update_job(job_id, status='transcribing', progress_msg='开始转录上传文件')
     srt_path, txt_path, seg_count = await transcribe_audio(
         audio_path, model_size=model_size, platform=platform,
         speaker_diarization=speaker_diarization, language=language,
-        sio=sio, job_id=job_id
+        sio=sio, job_id=job_id,
+        cancel_check=lambda: check_cancelled(job_id),
     )
     return srt_path, txt_path, seg_count, title, platform, files
 
@@ -553,7 +555,8 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
             srt_path, txt_path, seg_count = await transcribe_audio(
                 file_path, model_size=model_size, platform=platform,
                 speaker_diarization=speaker_diarization, language=language,
-                sio=sio, job_id=job_id
+                sio=sio, job_id=job_id,
+                cancel_check=lambda: check_cancelled(job_id),
             )
 
     return srt_path, txt_path, seg_count, title, platform, files
@@ -1054,7 +1057,8 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
     except Exception as e:
         # ★ 区分用户取消 vs 真正异常
         from services.ai_processor import TaskCancelledError
-        if isinstance(e, TaskCancelledError):
+        from services.transcriber import TranscriptionCancelledError
+        if isinstance(e, (TaskCancelledError, TranscriptionCancelledError)):
             await emit_log(sio, job_id, '⏹ 用户取消任务')
             update_job(job_id, status='cancelled', error='用户取消')
             await _safe_emit('done', {

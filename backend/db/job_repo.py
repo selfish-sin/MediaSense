@@ -279,12 +279,13 @@ def update_job(job_id: str, **kwargs) -> bool:
     values.append(job_id)
 
     sql = f"UPDATE jobs SET {', '.join(fields)} WHERE id = ?"
-    # ★ 终态保护：用户取消后 cancel_job 已立即写入 cancelled，但后台任务收尾
-    #   仍可能调 finish_job/update_job 写 completed/failed 把它覆盖回去。
-    #   这里在 SQL 层原子拦截：目标是 completed/failed 时，不更新已 cancelled 的行。
-    #   （pending/cancelled 等转换不受限——retry 正是把 cancelled 改回 pending）
+    # ★ cancelled 保护：用户取消后 cancel_job 已立即写入 cancelled，但后台任务
+    #   收尾/进行中仍可能调 update_job 把它覆盖成 completed/failed/transcribing 等，
+    #   导致 UI 显示死任务在跑、删除被 409 拦截。
+    #   这里在 SQL 层原子拦截：除 pending（retry 正是把 cancelled 改回 pending）
+    #   之外的任何状态写入，都不许落在已 cancelled 的行上。
     new_status = kwargs.get('status')
-    if new_status in (JobStatus.completed, JobStatus.failed):
+    if new_status is not None and new_status != JobStatus.pending:
         sql += " AND status != 'cancelled'"
     cursor = conn.execute(sql, values)
     affected = cursor.rowcount
