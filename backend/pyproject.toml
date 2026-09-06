@@ -1,0 +1,10 @@
+# 后端 Python 工程配置（ruff 最小约束；测试配置见 pytest.ini）
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = ["venv", "build", "dist", "tests/__pycache__"]
+
+[tool.ruff.lint]
+# 最小集：E/F/W 常规错误；E501 行长交给格式化器处理，不在此卡
+select = ["E", "F", "W"]
+ignore = ["E501"]
