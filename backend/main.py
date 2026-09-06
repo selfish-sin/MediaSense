@@ -3,6 +3,7 @@ YouTube Tool V2 - FastAPI 入口 + 任务处理主流程
 启动 uvicorn + Socket.IO + SPA 路由 + process_job 编排
 """
 import asyncio
+import os
 import re
 import sys
 import inspect
@@ -176,15 +177,29 @@ app.include_router(
 
 
 # ── 日志 API（独立路由，避免被 /api/jobs/{job_id} 通配抓走）──
+def _read_log_tail(lines: int) -> list:
+    """从文件尾部读取最近 N 行（避免每次请求读整个 5MB 日志文件）。"""
+    try:
+        with open(LOG_FILE, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            # 最多回读 256KB，足够覆盖数千行日志
+            f.seek(max(0, size - 256 * 1024))
+            tail_bytes = f.read()
+    except FileNotFoundError:
+        return []
+    text = tail_bytes.decode("utf-8", errors="replace")
+    all_lines = text.splitlines()
+    # 回读起点可能切在行中间，丢弃第一段不完整行
+    if tail_bytes and len(all_lines) > 1:
+        all_lines = all_lines[1:]
+    return all_lines[-lines:]
+
+
 @app.get("/api/logs", tags=["system"])
 async def get_logs(lines: int = 300):
     """返回后端日志文件最近N行"""
-    try:
-        with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
-            all_lines = f.read().splitlines()
-        return {"lines": all_lines[-lines:], "total": len(all_lines)}
-    except FileNotFoundError:
-        return {"lines": [], "total": 0}
+    return {"lines": _read_log_tail(lines), "total": 0}
 app.include_router(search_router,  prefix="",             tags=["search"])
 # ★ 格式转换已外包，路由已禁用
 # app.include_router(converter_router, prefix="/api/converter", tags=["converter"])
@@ -319,6 +334,15 @@ register_socket_events(sio)
 
 class JobCancelledError(Exception):
     """策略函数内部检测到用户取消；由 _process_job_impl 统一收尾（信号量交由外层释放）。"""
+
+
+async def _read_text(path: str) -> str:
+    """线程池读文本文件：转录全文可达数百 KB~MB，异步上下文里直接
+    open().read() 会阻塞事件循环，卡住其他任务的进度推送。"""
+    try:
+        return await asyncio.to_thread(Path(path).read_text, encoding='utf-8')
+    except OSError:
+        return ''
 
 
 async def _extract_bvid(input_url: str):
@@ -754,8 +778,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             # 校正模型：优先用 ai_correct_model，否则用主模型
             correct_model = options.get('ai_correct_model') or model
             try:
-                with open(txt_path, 'r', encoding='utf-8') as f:
-                    raw_text = f.read()
+                raw_text = await _read_text(txt_path)
                 if raw_text.strip():
                     # 备份原文
                     raw_backup = txt_path.replace('.txt', '.raw.txt')
@@ -784,8 +807,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                 await emit_log(sio, job_id, f'⚠ AI 校正失败: {e}（继续用原转录文本）')
         # ===== Step 2: 转录后预览 =====
         if do_summary and preview_before_summary and srt_path:
-            with open(txt_path, 'r', encoding='utf-8') as f:
-                preview_text = f.read()
+            preview_text = await _read_text(txt_path)
 
             await emit_log(sio, job_id, f'✅ 转录完成，等待确认后继续AI总结')
             await emit_preview(sio, job_id, preview_text, title=title, platform=platform,
@@ -813,9 +835,24 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             # ★ 用户确认后，重新获取信号量才能继续 AI 总结（消耗资源）
             if sem is not None:
                 await emit_log(sio, job_id, '⏳ 等待处理队列（重新获取槽位）...')
-                await sem.acquire()
-                sem_state['held'] = True  # 标记：重新持有信号量
-                await emit_log(sio, job_id, '▶ 获得槽位，继续处理')
+                # ★ 与入口一致的取消感知获取：预览等待期间用户可能点了取消，
+                #   若直接 acquire() 会无限阻塞且不响应取消，死任务占着 RUNNING_JOBS
+                while True:
+                    if check_cancelled(job_id):
+                        await emit_log(sio, job_id, '⏹ 预览等待期间用户取消')
+                        update_job(job_id, status='cancelled', error='用户取消')
+                        await _safe_emit('done', {
+                            'job_id': job_id, 'success': False,
+                            'error': '用户取消', 'cancelled': True,
+                        })
+                        return sem_state['held']
+                    try:
+                        await asyncio.wait_for(sem.acquire(), timeout=0.25)
+                        sem_state['held'] = True  # 标记：重新持有信号量
+                        await emit_log(sio, job_id, '▶ 获得槽位，继续处理')
+                        break
+                    except asyncio.TimeoutError:
+                        continue
 
             # 检查是否取消了
             if check_cancelled(job_id):
@@ -836,8 +873,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                 #   告知用户其编辑已覆盖校正结果（编辑优先，不阻断）
                 if ai_correct:
                     try:
-                        with open(txt_path, 'r', encoding='utf-8') as f:
-                            pre_edit_text = f.read()
+                        pre_edit_text = await _read_text(txt_path)
                     except Exception:
                         pre_edit_text = ''
                     if edited_text != pre_edit_text:
@@ -860,8 +896,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                     sem_state['held'] = False
                 return False
 
-            with open(txt_path, 'r', encoding='utf-8') as f:
-                text_content = f.read()
+            text_content = await _read_text(txt_path)
 
             update_job(job_id, status='summarizing', progress_msg='AI处理中')
 
@@ -949,8 +984,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             await emit_log(sio, job_id, f'开始翻译 → {target_lang}')
 
             # 全文翻译（使用translate总结类型）
-            with open(txt_path, 'r', encoding='utf-8') as f:
-                text_content = f.read()
+            text_content = await _read_text(txt_path)
             # ★ 整体总超时兜底
             translation, in_tok, out_tok = await asyncio.wait_for(
                 ai_process(
@@ -995,8 +1029,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
         # 如果 do_summary=False，把文本存到 result_text 供前端显示
         if not do_summary and not result.get('result_text') and txt_path:
             try:
-                with open(txt_path, 'r', encoding='utf-8') as f:
-                    result['result_text'] = f.read()
+                result['result_text'] = await _read_text(txt_path)
             except Exception:
                 pass
         finished = finish_job(job_id, success=True, files=result.get('files', {}),

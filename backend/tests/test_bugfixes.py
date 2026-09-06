@@ -170,7 +170,12 @@ class TestTranslateFilesMerge:
         assert job["tags"] == payload  # 三层也能解出来
 
     def test_job_list_response_validates_after_repair(self, db_path):
-        """④ 脏数据修复后能通过 JobResponse 校验（旧 bug 下 GET /api/jobs 整体 500）"""
+        """④ 脏数据修复后能通过 JobResponse 校验（旧 bug 下 GET /api/jobs 整体 500）
+
+        列表查询已瘦身（不再 SELECT files/result_text 等大字段），脏 files 只
+        会走详情接口的修复路径（上面用例已覆盖）；列表行不含 files，
+        JobResponse 以默认 {} 校验通过。
+        """
         from models.schemas import JobListResponse
 
         jid = create_job(input_type="url", input_url="https://x.com/v4")
@@ -181,13 +186,15 @@ class TestTranslateFilesMerge:
         conn.commit()
         conn.close()
 
-        from db.job_repo import get_jobs
+        from db.job_repo import get_jobs, get_job
         jobs, total = get_jobs()
-        # files 读回必须是 dict，否则下面 pydantic 校验会抛 ValidationError
-        assert isinstance(jobs[0]["files"], dict)
+        # 瘦身列表不含大字段
+        assert "files" not in jobs[0]
+        assert "result_text" not in jobs[0]
         resp = JobListResponse(jobs=jobs, total=total)  # 不抛异常即通过
-        assert isinstance(resp.jobs[0].files, dict)
-        assert resp.jobs[0].files["txt"] == "/d/b.txt"
+        assert resp.jobs[0].files == {}
+        # 脏数据修复路径仍由详情接口兜底
+        assert get_job(jid)["files"]["txt"] == "/d/b.txt"
 
 
 # ============ 修复4：终态保护 ============

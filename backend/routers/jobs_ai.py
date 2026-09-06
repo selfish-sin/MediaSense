@@ -3,6 +3,7 @@ YouTube Tool V2 - 任务 AI 域路由（重新总结 / 总结历史 / 标签 / �
 
 从 routers/jobs.py 按域拆出，全部挂 /api/jobs 前缀，对外路径零变化。
 """
+import asyncio
 import logging
 from pathlib import Path
 
@@ -35,9 +36,8 @@ async def resummarize_job(job_id: str, body: dict):
     if not txt_path or not Path(txt_path).exists():
         raise HTTPException(status_code=400, detail="任务没有可用的转录文本")
 
-    # 读取转录文本
-    with open(txt_path, 'r', encoding='utf-8') as f:
-        text_content = f.read()
+    # 读取转录文本（线程池避免阻塞事件循环）
+    text_content = await asyncio.to_thread(Path(txt_path).read_text, encoding='utf-8')
 
     if not text_content.strip():
         raise HTTPException(status_code=400, detail="转录文本为空")
@@ -249,8 +249,7 @@ async def generate_job_tags(job_id: str, body: dict = None):
     if not txt_path or not Path(txt_path).exists():
         raise HTTPException(status_code=400, detail="任务没有可用的转录文本")
 
-    with open(txt_path, 'r', encoding='utf-8') as f:
-        text_content = f.read()
+    text_content = await asyncio.to_thread(Path(txt_path).read_text, encoding='utf-8')
 
     if not text_content.strip():
         raise HTTPException(status_code=400, detail="转录文本为空")

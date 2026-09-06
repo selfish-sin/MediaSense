@@ -179,83 +179,89 @@ async def search_transcripts(
       ]
     }
     """
+    import asyncio
     import re
     from pathlib import Path
     from db.database import get_connection
 
-    conn = get_connection()
-    # 只搜有 txt 文件路径的任务（不限状态，失败的任务也可能有部分转录）
-    rows = conn.execute("""
-        SELECT id, title, platform, status, created_at, files
-        FROM jobs
-        WHERE files LIKE '%"txt"%'
-        ORDER BY created_at DESC
-        LIMIT ?
-    """, (limit * 3,)).fetchall()  # 多取一些，过滤掉无文件的
-    conn.close()
+    def _scan_sync():
+        conn = get_connection()
+        # 只搜有 txt 文件路径的任务（不限状态，失败的任务也可能有部分转录）
+        rows = conn.execute("""
+            SELECT id, title, platform, status, created_at, files
+            FROM jobs
+            WHERE files LIKE '%"txt"%'
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (limit * 3,)).fetchall()  # 多取一些，过滤掉无文件的
+        conn.close()
 
-    results = []
-    searched = 0
-    # 时间戳正则：[MM:SS - MM:SS] 或 [MM:SS]
-    ts_pattern = re.compile(r'\[(\d{1,2}:\d{2}(?::\d{2})?)\s*(?:-\s*\d{1,2}:\d{2}(?::\d{2})?)?\]')
+        results = []
+        searched = 0
+        # 时间戳正则：[MM:SS - MM:SS] 或 [MM:SS]
+        ts_pattern = re.compile(r'\[(\d{1,2}:\d{2}(?::\d{2})?)\s*(?:-\s*\d{1,2}:\d{2}(?::\d{2})?)?\]')
 
-    for row in rows:
-        import json
-        files = row['files']
-        try:
-            files_dict = json.loads(files) if isinstance(files, str) else (files or {})
-        except Exception:
-            continue
-        txt_path = files_dict.get('txt', '')
-        if not txt_path or not Path(txt_path).exists():
-            continue
-        searched += 1
-        try:
-            with open(txt_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except Exception:
-            continue
+        for row in rows:
+            import json
+            files = row['files']
+            try:
+                files_dict = json.loads(files) if isinstance(files, str) else (files or {})
+            except Exception:
+                continue
+            txt_path = files_dict.get('txt', '')
+            if not txt_path or not Path(txt_path).exists():
+                continue
+            searched += 1
+            try:
+                with open(txt_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            except Exception:
+                continue
 
-        # 按行搜索（转录文本通常一行一段，带时间戳）
-        lines = content.split('\n')
-        matches = []
-        q_lower = q.lower()
-        for line_no, line in enumerate(lines, 1):
-            if q_lower in line.lower():
-                # 提取该行时间戳
-                ts_match = ts_pattern.search(line)
-                timestamp = ts_match.group(1) if ts_match else None
+            # 按行搜索（转录文本通常一行一段，带时间戳）
+            lines = content.split('\n')
+            matches = []
+            q_lower = q.lower()
+            for line_no, line in enumerate(lines, 1):
+                if q_lower in line.lower():
+                    # 提取该行时间戳
+                    ts_match = ts_pattern.search(line)
+                    timestamp = ts_match.group(1) if ts_match else None
 
-                # 构建上下文（取匹配位置前后 context_chars 字符）
-                idx = line.lower().find(q_lower)
-                start = max(0, idx - context_chars)
-                end = min(len(line), idx + len(q) + context_chars)
-                context = line[start:end]
-                if start > 0:
-                    context = '...' + context
-                if end < len(line):
-                    context = context + '...'
+                    # 构建上下文（取匹配位置前后 context_chars 字符）
+                    idx = line.lower().find(q_lower)
+                    start = max(0, idx - context_chars)
+                    end = min(len(line), idx + len(q) + context_chars)
+                    context = line[start:end]
+                    if start > 0:
+                        context = '...' + context
+                    if end < len(line):
+                        context = context + '...'
 
-                matches.append({
-                    "text": context,
-                    "timestamp": timestamp,
-                    "line_no": line_no,
+                    matches.append({
+                        "text": context,
+                        "timestamp": timestamp,
+                        "line_no": line_no,
+                    })
+                    if len(matches) >= max_matches_per_job:
+                        break
+
+            if matches:
+                results.append({
+                    "job_id": row['id'],
+                    "title": row['title'] or '(未命名)',
+                    "platform": row['platform'] or '',
+                    "status": row['status'],
+                    "created_at": row['created_at'],
+                    "match_count": len(matches),
+                    "matches": matches,
                 })
-                if len(matches) >= max_matches_per_job:
+                if len(results) >= limit:
                     break
+        return results, searched
 
-        if matches:
-            results.append({
-                "job_id": row['id'],
-                "title": row['title'] or '(未命名)',
-                "platform": row['platform'] or '',
-                "status": row['status'],
-                "created_at": row['created_at'],
-                "match_count": len(matches),
-                "matches": matches,
-            })
-            if len(results) >= limit:
-                break
+    # 同步扫描（DB + 逐文件读）放线程池，避免卡住事件循环里的任务进度推送
+    results, searched = await asyncio.to_thread(_scan_sync)
 
     return {
         "query": q,

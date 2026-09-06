@@ -7,9 +7,11 @@ YouTube Tool V2 - 追问聊天路由（SSE 流式）
   - 联网搜索：智谱 web_search 优先，DDGS 兜底；结构化引用源返回前端
   - 编辑 / 重生成 / 中断残回答 均落库
 """
+import asyncio
 import json
 import logging
 import uuid
+from pathlib import Path
 from typing import Optional, List, Dict
 
 import httpx
@@ -389,8 +391,9 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
     original_text = ""
     if txt_path:
         try:
-            with open(txt_path, "r", encoding="utf-8") as f:
-                original_text = f.read()
+            original_text = await asyncio.to_thread(
+                Path(txt_path).read_text, encoding="utf-8"
+            )
         except Exception:
             original_text = ""
 
