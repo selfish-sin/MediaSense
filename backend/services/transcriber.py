@@ -9,6 +9,7 @@ import re
 import time
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -23,6 +24,33 @@ class TranscriptionCancelledError(Exception):
     转录在 worker 线程里跑，主流程的 check_cancelled 只能在阶段边界生效；
     不传入循环内部的话，取消后仍要白烧几分钟 GPU/CPU 直到当前音频跑完。
     """
+
+
+# ============ Whisper 模型进程级缓存 ============
+# 模型加载耗时数秒到数十秒且占用大块内存/显存；任务并发上限 2、
+# B站字幕抽查也会单独转写，每次重新 WhisperModel(...) 会造成重复加载
+# 与内存抖动。同一 (model_path, device, compute_type) 只实例化一次。
+_model_cache: dict = {}
+_model_cache_lock = threading.Lock()
+
+
+def _get_whisper_model(model_path: str, device: str, compute_type: str,
+                       local_only: bool, cpu_threads: int, num_workers: int):
+    """按 (model_path, device, compute_type) 缓存 WhisperModel 单例（线程安全）。"""
+    key = (model_path, device, compute_type)
+    model = _model_cache.get(key)
+    if model is not None:
+        return model
+    from faster_whisper import WhisperModel
+    with _model_cache_lock:
+        model = _model_cache.get(key)  # 双检：等待锁期间可能已被他线程填充
+        if model is None:
+            model = WhisperModel(
+                model_path, device=device, compute_type=compute_type,
+                local_files_only=local_only, cpu_threads=cpu_threads, num_workers=num_workers,
+            )
+            _model_cache[key] = model
+    return model
 
 # 本地 ffmpeg/ffprobe 路径（项目自带，无需系统 PATH）
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -373,10 +401,9 @@ def _transcribe_chunked(
             f'请等待（大模型首次加载可能数十秒）...'
         )
     try:
-        from faster_whisper import WhisperModel
-        model = WhisperModel(
-            model_path, device=device, compute_type=compute_type,
-            local_files_only=local_only, cpu_threads=4 if not use_cuda else 1, num_workers=1,
+        model = _get_whisper_model(
+            model_path, device, compute_type,
+            local_only=local_only, cpu_threads=4 if not use_cuda else 1, num_workers=1,
         )
     except ImportError:
         raise Exception('faster-whisper 未安装')
@@ -385,9 +412,9 @@ def _transcribe_chunked(
             logger.warning(f'GPU 加载失败 ({e})，降级到 CPU')
             device = 'cpu'
             compute_type = 'int8'
-            model = WhisperModel(
-                model_path, device='cpu', compute_type='int8',
-                local_files_only=local_only, cpu_threads=4, num_workers=1,
+            model = _get_whisper_model(
+                model_path, device, compute_type,
+                local_only=local_only, cpu_threads=4, num_workers=1,
             )
         else:
             raise Exception(f'模型加载失败: {e}')
@@ -432,9 +459,9 @@ def _transcribe_chunked(
                 logger.warning('GPU 推理失败，降级 CPU')
                 device = 'cpu'
                 compute_type = 'int8'
-                model = WhisperModel(
-                    model_path, device='cpu', compute_type='int8',
-                    local_files_only=local_only, cpu_threads=4, num_workers=1,
+                model = _get_whisper_model(
+                    model_path, device, compute_type,
+                    local_only=local_only, cpu_threads=4, num_workers=1,
                 )
                 segs, info = model.transcribe(chunk_path, language=language, beam_size=5, vad_filter=True)
                 chunk_segments = list(segs)
@@ -605,14 +632,9 @@ def _transcribe_sync_single(
 
     logger.info(f'加载模型: {actual_size} | device={device}, compute_type={compute_type}')
     try:
-        from faster_whisper import WhisperModel
-        model = WhisperModel(
-            model_path,
-            device=device,
-            compute_type=compute_type,
-            local_files_only=local_only,
-            cpu_threads=4 if not use_cuda else 1,
-            num_workers=1,
+        model = _get_whisper_model(
+            model_path, device, compute_type,
+            local_only=local_only, cpu_threads=4 if not use_cuda else 1, num_workers=1,
         )
     except ImportError:
         raise Exception('faster-whisper未安装，请运行: pip install faster-whisper')
@@ -624,13 +646,9 @@ def _transcribe_sync_single(
                 progress_callback(5, f'GPU加载失败，降级到CPU: {actual_size}（稍候...）')
             device = 'cpu'
             compute_type = 'int8'
-            model = WhisperModel(
-                model_path,
-                device='cpu',
-                compute_type='int8',
-                local_files_only=local_only,
-                cpu_threads=4,
-                num_workers=1,
+            model = _get_whisper_model(
+                model_path, device, compute_type,
+                local_only=local_only, cpu_threads=4, num_workers=1,
             )
         else:
             raise Exception(f'模型加载失败: {e}')
@@ -649,9 +667,9 @@ def _transcribe_sync_single(
                 progress_callback(8, '⚠ GPU推理失败（缺CUDA运行时），降级到CPU重跑...')
             device = 'cpu'
             compute_type = 'int8'
-            model = WhisperModel(
-                model_path, device='cpu', compute_type='int8',
-                local_files_only=local_only, cpu_threads=4, num_workers=1,
+            model = _get_whisper_model(
+                model_path, device, compute_type,
+                local_only=local_only, cpu_threads=4, num_workers=1,
             )
             srt_path, txt_path, total = _transcribe_with_model(
                 model, audio_path, language, progress_callback, speaker_diarization,
@@ -684,10 +702,9 @@ def transcribe_audio_sample(audio_path: str, max_seconds: float = 90.0, language
         raise Exception(f'ffmpeg 截取音频开头失败（returncode={result.returncode}）')
     try:
         model_path, _actual_size, local_only = _select_model('base')
-        from faster_whisper import WhisperModel
-        model = WhisperModel(
-            model_path, device='cpu', compute_type='int8',
-            local_files_only=local_only, cpu_threads=4, num_workers=1,
+        model = _get_whisper_model(
+            model_path, 'cpu', 'int8',
+            local_only=local_only, cpu_threads=4, num_workers=1,
         )
         segs, _info = model.transcribe(
             str(sample_wav), language=language, beam_size=1, vad_filter=False
