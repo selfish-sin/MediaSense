@@ -17,7 +17,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from config import DATA_DIR, DOWNLOAD_DIR
-from db.job_repo import get_cleanup_jobs
+from db.job_repo import get_cleanup_jobs, count_jobs_with_status
 from services.storage_cleanup import CleanupPlan, CleanupPolicy, StorageCleanup
 
 logger = logging.getLogger(__name__)
@@ -81,11 +81,9 @@ def _append_log(message: str, level: str = 'info') -> None:
         del _state['logs'][:-MAX_LOG_ENTRIES]
 
 
-def _active_jobs() -> list[dict[str, Any]]:
-    return [
-        job for job in get_cleanup_jobs(read_only=True)
-        if job.get('status') in ACTIVE_JOB_STATUSES
-    ]
+def _active_jobs() -> int:
+    """活跃任务数（轻量 COUNT，不拉整行——/status 轮询高频调用）"""
+    return count_jobs_with_status(ACTIVE_JOB_STATUSES)
 
 
 def _read_audit(limit: int = MAX_AUDIT_ENTRIES) -> list[dict[str, Any]]:
@@ -131,7 +129,7 @@ def _public_state(include_audit: bool = True) -> dict[str, Any]:
             'plan': plan.to_dict() if plan is not None else None,
             'policy': dict(_state['policy']) if _state['policy'] else None,
         }
-    payload['active_jobs'] = len(_active_jobs())
+    payload['active_jobs'] = _active_jobs()
     payload['audit'] = _read_audit(20) if include_audit else []
     return payload
 
@@ -250,7 +248,7 @@ async def cleanup_apply(body: ApplyRequest, request: Request, background_tasks: 
     if active:
         raise HTTPException(
             status_code=409,
-            detail=f'cleanup is blocked while {len(active)} job(s) are active',
+            detail=f'cleanup is blocked while {active} job(s) are active',
         )
     with _state_lock:
         if _state['phase'] != 'ready' or _state['plan'] is None:

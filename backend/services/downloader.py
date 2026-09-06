@@ -19,7 +19,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 
 import httpx
 
-from config import DOWNLOAD_DIR, PROXY
+from config import DOWNLOAD_DIR, PROXY, DATA_DIR
 from services.bilibili_cookies import load_cookies, save_cookies, clear_cookies, get_status
 
 logger = logging.getLogger(__name__)
@@ -709,9 +709,12 @@ async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None
 
     # 把 cookie 写成 Netscape 格式文件给 yt-dlp 用（注入 buvid 指纹，yt-dlp 自己的
     # BiliBili 提取器同样会被风控 412，带上指纹能显著降低拦截概率）
+    # ★ 写到 DATA_DIR 而非任务目录：job_dir 下的文件可经 /api/download/file 被
+    #   服务出去，SESSDATA 不能落进可下载范围；异常路径残留也不暴露。
     cookies_dict = load_cookies() or {}
     cookies_dict.update(_ensure_buvid())
-    cookie_file = output_dir / '.bilibili_cookies.txt'
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    cookie_file = DATA_DIR / '.bilibili_cookies.txt'
     cookie_args = []
     if cookies_dict:
         # 写 Netscape cookie 文件

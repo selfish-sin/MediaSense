@@ -60,15 +60,17 @@ async def list_templates():
 async def create_template(data: TemplateCreate):
     """创建新模板"""
     conn = get_connection()
-    cursor = conn.execute(
-        "INSERT INTO templates (name, summary_type, prompt, options, template_type) VALUES (?, ?, ?, ?, ?)",
-        (data.name, data.summary_type, data.prompt,
-         json.dumps(data.options or {}, ensure_ascii=False),
-         data.template_type or "analysis")
-    )
-    conn.commit()
-    tid = cursor.lastrowid
-    conn.close()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO templates (name, summary_type, prompt, options, template_type) VALUES (?, ?, ?, ?, ?)",
+            (data.name, data.summary_type, data.prompt,
+             json.dumps(data.options or {}, ensure_ascii=False),
+             data.template_type or "analysis")
+        )
+        conn.commit()
+        tid = cursor.lastrowid
+    finally:
+        conn.close()
     return {"id": tid, "message": "模板创建成功"}
 
 
@@ -76,35 +78,35 @@ async def create_template(data: TemplateCreate):
 async def update_template(template_id: int, data: TemplateUpdate):
     """更新模板"""
     conn = get_connection()
-    existing = conn.execute("SELECT * FROM templates WHERE id = ?", (template_id,)).fetchone()
-    if not existing:
-        conn.close()
-        raise HTTPException(status_code=404, detail="模板不存在")
-    if existing["is_builtin"]:
-        conn.close()
-        raise HTTPException(status_code=403, detail="内置模板不可修改")
+    try:
+        existing = conn.execute("SELECT * FROM templates WHERE id = ?", (template_id,)).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="模板不存在")
+        if existing["is_builtin"]:
+            raise HTTPException(status_code=403, detail="内置模板不可修改")
 
-    updates = {}
-    if data.name is not None:
-        updates["name"] = data.name
-    if data.summary_type is not None:
-        updates["summary_type"] = data.summary_type
-    if data.prompt is not None:
-        updates["prompt"] = data.prompt
-    if data.options is not None:
-        updates["options"] = json.dumps(data.options, ensure_ascii=False)
-    if data.template_type is not None:
-        updates["template_type"] = data.template_type
+        updates = {}
+        if data.name is not None:
+            updates["name"] = data.name
+        if data.summary_type is not None:
+            updates["summary_type"] = data.summary_type
+        if data.prompt is not None:
+            updates["prompt"] = data.prompt
+        if data.options is not None:
+            updates["options"] = json.dumps(data.options, ensure_ascii=False)
+        if data.template_type is not None:
+            updates["template_type"] = data.template_type
 
-    if updates:
-        set_clause = ", ".join(f"{k} = ?" for k in updates)
-        values = list(updates.values()) + [template_id]
-        conn.execute(
-            f"UPDATE templates SET {set_clause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            values
-        )
-        conn.commit()
-    conn.close()
+        if updates:
+            set_clause = ", ".join(f"{k} = ?" for k in updates)
+            values = list(updates.values()) + [template_id]
+            conn.execute(
+                f"UPDATE templates SET {set_clause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                values
+            )
+            conn.commit()
+    finally:
+        conn.close()
     return {"message": "模板更新成功"}
 
 

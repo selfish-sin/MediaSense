@@ -91,18 +91,20 @@ def add_model(key: str, name: str, endpoint: str, api_key: Optional[str] = None,
 def update_model(key: str, **kwargs) -> bool:
     """更新模型配置"""
     conn = get_connection()
-    fields = []
-    values = []
-    for k, v in kwargs.items():
-        fields.append(f"{k} = ?")
-        values.append(v)
-    values.append(key)
-    sql = f"UPDATE model_configs SET {', '.join(fields)} WHERE key = ?"
-    cursor = conn.execute(sql, values)
-    affected = cursor.rowcount
-    conn.commit()
-    conn.close()
-    return affected > 0
+    try:
+        fields = []
+        values = []
+        for k, v in kwargs.items():
+            fields.append(f"{k} = ?")
+            values.append(v)
+        values.append(key)
+        sql = f"UPDATE model_configs SET {', '.join(fields)} WHERE key = ?"
+        cursor = conn.execute(sql, values)
+        affected = cursor.rowcount
+        conn.commit()
+        return affected > 0
+    finally:
+        conn.close()
 
 
 def delete_model(key: str) -> bool:

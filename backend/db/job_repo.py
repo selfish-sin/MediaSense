@@ -95,34 +95,36 @@ def get_jobs(status: Optional[str] = None, limit: int = 50, offset: int = 0,
     可与 status 叠加（AND）。
     """
     conn = get_connection()
-    # 构造 WHERE 子句：status 和 keyword 可叠加
-    clauses = []
-    params: list = []
-    if status:
-        clauses.append("status = ?")
-        params.append(status)
-    if keyword:
-        # 转义 LIKE 通配符，防 % _ 注入；用 ESCAPE '\' 声明转义字符
-        escaped = keyword.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-        like = f"%{escaped}%"
-        clauses.append("(title LIKE ? ESCAPE '\\' OR input_url LIKE ? ESCAPE '\\')")
-        params.extend([like, like])
-    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-    # ★ 列表瘦身：不 SELECT 大文本列（result_text/preview_text/input_text/
-    #   edited_preview_text/files），列表 UI 只用 id/title/platform/status/
-    #   model/created_at 等，full-job 详情走 GET /api/jobs/{id}。
-    #   此前每个 job 都带几十 KB 结果文本，200 条列表就是数 MB JSON。
-    list_columns = (
-        "id, title, platform, input_url, input_file, status, model, summary_type, "
-        "options, tags, token_usage, progress_msg, error, created_at, updated_at"
-    )
-    rows = conn.execute(
-        f"SELECT {list_columns} FROM jobs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        (*params, limit, offset)
-    ).fetchall()
-    total = conn.execute(f"SELECT COUNT(*) FROM jobs{where}", params).fetchone()[0]
-    conn.close()
-    return [_row_to_dict(r) for r in rows], total
+    try:
+        # 构造 WHERE 子句：status 和 keyword 可叠加
+        clauses = []
+        params: list = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if keyword:
+            # 转义 LIKE 通配符，防 % _ 注入；用 ESCAPE '\' 声明转义字符
+            escaped = keyword.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+            like = f"%{escaped}%"
+            clauses.append("(title LIKE ? ESCAPE '\\' OR input_url LIKE ? ESCAPE '\\')")
+            params.extend([like, like])
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        # ★ 列表瘦身：不 SELECT 大文本列（result_text/preview_text/input_text/
+        #   edited_preview_text/files），列表 UI 只用 id/title/platform/status/
+        #   model/created_at 等，full-job 详情走 GET /api/jobs/{id}。
+        #   此前每个 job 都带几十 KB 结果文本，200 条列表就是数 MB JSON。
+        list_columns = (
+            "id, title, platform, input_url, input_file, status, model, summary_type, "
+            "options, tags, token_usage, progress_msg, error, created_at, updated_at"
+        )
+        rows = conn.execute(
+            f"SELECT {list_columns} FROM jobs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (*params, limit, offset)
+        ).fetchall()
+        total = conn.execute(f"SELECT COUNT(*) FROM jobs{where}", params).fetchone()[0]
+        return [_row_to_dict(r) for r in rows], total
+    finally:
+        conn.close()
 
 
 def get_running_jobs() -> List[Dict[str, Any]]:
@@ -143,6 +145,27 @@ def get_cleanup_jobs(read_only: bool = False) -> List[Dict[str, Any]]:
     try:
         rows = conn.execute('SELECT * FROM jobs ORDER BY id').fetchall()
         return [_row_to_dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def count_jobs_with_status(statuses) -> int:
+    '''轻量活跃任务计数：只 COUNT，不拉整行（含 result_text 等大字段）。
+
+    storage cleanup 的 /status 轮询和 /apply 守护都用它；此前走
+    get_cleanup_jobs 全表 SELECT *，每次轮询都反序列化所有任务全文。
+    '''
+    statuses = tuple(statuses)
+    if not statuses:
+        return 0
+    conn = get_readonly_connection()
+    try:
+        placeholders = ','.join('?' for _ in statuses)
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM jobs WHERE status IN ({placeholders})",
+            statuses,
+        ).fetchone()
+        return int(row[0]) if row else 0
     finally:
         conn.close()
 
@@ -274,32 +297,34 @@ def get_batch_summary(batch_id: str) -> Optional[Dict[str, Any]]:
 def update_job(job_id: str, **kwargs) -> bool:
     """更新任务字段"""
     conn = get_connection()
-    # 构建 UPDATE 语句
-    fields = []
-    values = []
-    for key, value in kwargs.items():
-        if key in ('options', 'files', 'tags', 'token_usage', 'correction_stats'):
-            # JSON 字段需要序列化
-            value = json.dumps(value, ensure_ascii=False)
-        fields.append(f"{key} = ?")
-        values.append(value)
-    fields.append("updated_at = CURRENT_TIMESTAMP")
-    values.append(job_id)
+    try:
+        # 构建 UPDATE 语句
+        fields = []
+        values = []
+        for key, value in kwargs.items():
+            if key in ('options', 'files', 'tags', 'token_usage', 'correction_stats'):
+                # JSON 字段需要序列化
+                value = json.dumps(value, ensure_ascii=False)
+            fields.append(f"{key} = ?")
+            values.append(value)
+        fields.append("updated_at = CURRENT_TIMESTAMP")
+        values.append(job_id)
 
-    sql = f"UPDATE jobs SET {', '.join(fields)} WHERE id = ?"
-    # ★ cancelled 保护：用户取消后 cancel_job 已立即写入 cancelled，但后台任务
-    #   收尾/进行中仍可能调 update_job 把它覆盖成 completed/failed/transcribing 等，
-    #   导致 UI 显示死任务在跑、删除被 409 拦截。
-    #   这里在 SQL 层原子拦截：除 pending（retry 正是把 cancelled 改回 pending）
-    #   之外的任何状态写入，都不许落在已 cancelled 的行上。
-    new_status = kwargs.get('status')
-    if new_status is not None and new_status != JobStatus.pending:
-        sql += " AND status != 'cancelled'"
-    cursor = conn.execute(sql, values)
-    affected = cursor.rowcount
-    conn.commit()
-    conn.close()
-    return affected > 0
+        sql = f"UPDATE jobs SET {', '.join(fields)} WHERE id = ?"
+        # ★ cancelled 保护：用户取消后 cancel_job 已立即写入 cancelled，但后台任务
+        #   收尾/进行中仍可能调 update_job 把它覆盖成 completed/failed/transcribing 等，
+        #   导致 UI 显示死任务在跑、删除被 409 拦截。
+        #   这里在 SQL 层原子拦截：除 pending（retry 正是把 cancelled 改回 pending）
+        #   之外的任何状态写入，都不许落在已 cancelled 的行上。
+        new_status = kwargs.get('status')
+        if new_status is not None and new_status != JobStatus.pending:
+            sql += " AND status != 'cancelled'"
+        cursor = conn.execute(sql, values)
+        affected = cursor.rowcount
+        conn.commit()
+        return affected > 0
+    finally:
+        conn.close()
 
 
 def delete_job(job_id: str, delete_files: bool = True) -> bool:
