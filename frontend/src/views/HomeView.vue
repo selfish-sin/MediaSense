@@ -1100,7 +1100,7 @@ function formatTokenTime(t) {
           </div>
           <div class="progress-header-right">
             <el-switch v-model="jobLogAutoScroll" active-text="自动滚动" size="small" />
-            <el-button size="small" text @click="jobStore.logs.splice(0, jobStore.logs.length)">清空</el-button>
+            <el-button size="small" text @click="jobStore.clearLogs">清空</el-button>
             <el-button size="small" text @click="showJobProgress = !showJobProgress">
               {{ showJobProgress ? '收起' : '展开' }}
             </el-button>

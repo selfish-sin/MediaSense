@@ -78,19 +78,42 @@ export const useJobStore = defineStore('job', () => {
   // 任务标题（恢复时显示）
   const jobTitle = ref('')
 
+  // 日志持久化节流：进度日志高频到达，合并为一次写（trailing debounce）
+  let logsSaveTimer = null
+  let logsSaveJobId = null
+
+  function flushLogsNow() {
+    if (logsSaveTimer !== null) {
+      clearTimeout(logsSaveTimer)
+      logsSaveTimer = null
+    }
+    if (currentJobId.value && logsSaveJobId === currentJobId.value) {
+      saveLogsToStorage(currentJobId.value, logs.value)
+    }
+    logsSaveJobId = null
+  }
+
   // ============ 持久化 currentJobId + jobStatus ============
   // 任务进入 active 状态时持久化，完成/失败/取消时清除
   watch([currentJobId, jobStatus], ([id, status]) => {
     if (id && ACTIVE_JOB_STATUSES.includes(status)) {
       saveToStorage({ currentJobId: id, jobStatus: status, jobTitle: jobTitle.value })
     } else if (['completed', 'failed', 'cancelled', 'idle'].includes(status)) {
+      flushLogsNow()  // 终态落盘：把最后一批日志也持久化，避免刷新丢尾部
       clearStorage()
     }
   })
 
   // ============ 动作 ============
-  function reset() {
+  function clearLogs() {
+    flushLogsNow()
+    // flushLogsNow 已取消待写定时器；清空内存与存储（先清存储避免定时器复活）
+    logs.value = []
     if (currentJobId.value) clearLogsForJob(currentJobId.value)
+  }
+
+  function reset() {
+    clearLogs()
     currentJobId.value = null
     jobStatus.value = 'idle'
     progress.step = ''
@@ -113,9 +136,17 @@ export const useJobStore = defineStore('job', () => {
     if (logs.value.length > 500) {
       logs.value = logs.value.slice(-500)
     }
-    // 持久化日志（用于刷新恢复）
+    // 持久化日志（用于刷新恢复）——按帧合并写，避免每条日志一次 JSON.stringify
     if (currentJobId.value) {
-      saveLogsToStorage(currentJobId.value, logs.value)
+      logsSaveJobId = currentJobId.value
+      if (logsSaveTimer === null) {
+        logsSaveTimer = setTimeout(() => {
+          logsSaveTimer = null
+          if (logsSaveJobId === currentJobId.value) {
+            saveLogsToStorage(currentJobId.value, logs.value)
+          }
+        }, 1500)
+      }
     }
   }
 
@@ -263,6 +294,8 @@ export const useJobStore = defineStore('job', () => {
     // 动作
     reset,
     addLog,
+    clearLogs,
+    flushLogsNow,
     updateProgress,
     appendAiToken,
     appendAiThinking,

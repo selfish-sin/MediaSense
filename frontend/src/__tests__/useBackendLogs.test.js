@@ -35,7 +35,8 @@ describe('useBackendLogs', () => {
   it('正常增量：拼接新行，不触发全量重载', async () => {
     apiMocks.getLogs.mockResolvedValueOnce({ total: 5, lines: ['l1', 'l2', 'l3', 'l4', 'l5'] })
     const { result, wrapper } = withSetup(useBackendLogs)
-    // watch immediate → startPolling → 首次 fetchLogs
+    // 默认收起：不轮询；展开后 watch 触发首次 fetchLogs
+    result.showBackendLogs.value = true
     await vi.waitFor(() => expect(result.backendLogs.value).toEqual(['l1', 'l2', 'l3', 'l4', 'l5']))
 
     apiMocks.getLogs.mockResolvedValueOnce({ total: 7, lines: ['l3', 'l4', 'l5', 'l6', 'l7'] })
@@ -48,6 +49,7 @@ describe('useBackendLogs', () => {
   it('增量超界（日志爆发增长）：回退全量重载，不静默丢更新', async () => {
     apiMocks.getLogs.mockResolvedValueOnce({ total: 3, lines: ['l1', 'l2', 'l3'] })
     const { result, wrapper } = withSetup(useBackendLogs)
+    result.showBackendLogs.value = true
     await vi.waitFor(() => expect(result.backendLogs.value).toEqual(['l1', 'l2', 'l3']))
 
     const full = Array.from({ length: 500 }, (_, i) => `h${i}`)
@@ -64,6 +66,7 @@ describe('useBackendLogs', () => {
   it('连续 3 次拉取失败：提示一次（不刷屏），成功后重置计数', async () => {
     apiMocks.getLogs.mockRejectedValue(new Error('network down'))
     const { result, wrapper } = withSetup(useBackendLogs)
+    result.showBackendLogs.value = true
     await vi.waitFor(() => expect(apiMocks.getLogs).toHaveBeenCalled())
 
     await result.fetchLogs()
@@ -80,9 +83,13 @@ describe('useBackendLogs', () => {
     wrapper.unmount()
   })
 
-  it('收起日志面板即停止轮询，重新展开恢复', async () => {
+  it('默认收起不轮询；收起停止轮询，重新展开恢复', async () => {
     apiMocks.getLogs.mockResolvedValue({ total: 1, lines: ['x'] })
     const { result, wrapper } = withSetup(useBackendLogs)
+    // 默认收起：不发起任何拉取
+    expect(apiMocks.getLogs).not.toHaveBeenCalled()
+
+    result.showBackendLogs.value = true
     await vi.waitFor(() => expect(apiMocks.getLogs).toHaveBeenCalled())
 
     const callsBefore = apiMocks.getLogs.mock.calls.length

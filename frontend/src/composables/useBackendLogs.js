@@ -10,7 +10,8 @@ import { jobsApi } from '../utils/api'
  * - 组件销毁清理定时器
  */
 export function useBackendLogs() {
-  const showBackendLogs = ref(true)
+  // 默认收起：系统日志是排障用的次要面板，展开时才轮询后端文件
+  const showBackendLogs = ref(false)
   const backendLogs = ref([])
   const autoScroll = ref(true)
   let logTimer = null

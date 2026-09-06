@@ -176,7 +176,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { MessageCircle, Plus, Pencil, Trash2, ArrowDown, Sparkles, Link } from 'lucide-vue-next'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatApi } from '../utils/api'
@@ -205,6 +205,8 @@ const nearBottom = ref(true)
 const activeMsgId = ref(null)
 const activeMsg = ref(null)
 let abortCtrl = null
+let historyTimer = null
+let disposed = false
 let tmpSeq = 0
 
 // ===== 多会话状态 =====
@@ -442,9 +444,13 @@ async function onSend(overrideContent) {
         abortCtrl = null
         scrollToBottom()
         refreshSessionMeta()
-        if (aborted) {
-          // 后端在断连时已落库，稍后重载以获取真实 id 与最终内容
-          setTimeout(loadHistory, 300)
+        if (aborted && !disposed) {
+          // 后端在断连时已落库，稍后重载以获取真实 id 与最终内容（卸载后不再触发）
+          clearTimeout(historyTimer)
+          historyTimer = setTimeout(() => {
+            historyTimer = null
+            loadHistory()
+          }, 300)
         }
       },
       onError: (err) => {
@@ -515,13 +521,30 @@ onMounted(async () => {
   await loadSessions()
 })
 
+// 组件卸载：终止流式请求 + 清理延时重载，避免对已卸载组件写状态
+onUnmounted(() => {
+  disposed = true
+  if (abortCtrl) {
+    abortCtrl.abort()
+    abortCtrl = null
+  }
+  clearTimeout(historyTimer)
+  historyTimer = null
+})
+
 watch(
   () => props.jobId,
   async (newId) => {
     if (newId) {
+      // 先终止旧任务的流式请求，避免跨任务串流
+      if (abortCtrl) {
+        abortCtrl.abort()
+        abortCtrl = null
+      }
+      clearTimeout(historyTimer)
+      historyTimer = null
       streaming.value = false
       activeMsg.value = null
-      abortCtrl = null
       await loadSessions()
     }
   },
