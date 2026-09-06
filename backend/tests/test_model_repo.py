@@ -11,36 +11,6 @@ from db.model_repo import (
     get_default_model_key, set_default_model,
 )
 
-CREATE_TABLES_SQL = """
-CREATE TABLE IF NOT EXISTS model_configs (
-    key TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    api_key TEXT,
-    endpoint TEXT NOT NULL,
-    model_id TEXT,
-    auth_type TEXT DEFAULT 'bearer',
-    temperature REAL DEFAULT 0.3,
-    max_tokens INTEGER DEFAULT 4096,
-    is_builtin INTEGER DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS app_settings (
-    key TEXT PRIMARY KEY,
-    value TEXT,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-"""
-
-
-@pytest.fixture
-def db_path(tmp_path):
-    path = tmp_path / "test.db"
-    conn = sqlite3.connect(str(path))
-    conn.row_factory = sqlite3.Row
-    conn.executescript(CREATE_TABLES_SQL)
-    conn.close()
-    return path
-
 
 @pytest.fixture(autouse=True)
 def _patch_conn(db_path):
@@ -120,18 +90,6 @@ class TestDeleteModel:
         add_model("m", "M", "https://x.com")
         assert delete_model("m")
         assert get_model_by_key("m") is None
-
-    def test_delete_builtin_refused(self):
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        conn.executescript(CREATE_TABLES_SQL)
-        conn.execute("INSERT INTO model_configs (key,name,endpoint,is_builtin) VALUES (?,?,?,1)",
-                     ("builtin", "Builtin", "https://x.com"))
-        conn.commit()
-        conn.close()
-        with patch("db.model_repo.get_connection", return_value=sqlite3.connect(":memory:")):
-            # 需要重新建表... 改变策略，直接在同一个 test_db 里插入 builtin
-            pass
 
     def test_delete_nonexistent(self):
         assert delete_model("no") is False

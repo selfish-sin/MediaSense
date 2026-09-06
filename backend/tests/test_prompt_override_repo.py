@@ -10,28 +10,6 @@ from db.prompt_override_repo import (
     delete_override, reset_all_overrides,
 )
 
-CREATE_TABLES_SQL = """
-CREATE TABLE IF NOT EXISTS prompt_module_overrides (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    dimension_key TEXT NOT NULL,
-    module_key TEXT NOT NULL,
-    custom_text TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(dimension_key, module_key)
-);
-"""
-
-
-@pytest.fixture
-def db_path(tmp_path):
-    path = tmp_path / "test.db"
-    conn = sqlite3.connect(str(path))
-    conn.row_factory = sqlite3.Row
-    conn.executescript(CREATE_TABLES_SQL)
-    conn.close()
-    return path
-
 
 @pytest.fixture(autouse=True)
 def _patch_conn(db_path):

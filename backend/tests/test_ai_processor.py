@@ -18,6 +18,12 @@ from services.ai_processor import (
     _split_by_boundary,
 )
 
+# 测试用统一模型配置（等价于 models 页面里一个 OpenAI 兼容模型）
+MOCK_CFG = {"name": "test", "key": "glm", "model_id": "glm-4",
+            "endpoint": "https://api.example.com/v1/chat/completions",
+            "auth_type": "bearer", "api_key": "sk",
+            "temperature": 0.3, "max_tokens": 4096}
+
 
 class TestTaskCancelledError:
     def test_raises_and_caught(self):
@@ -84,10 +90,7 @@ class TestRecordTokenUsage:
 class TestGenerateTags:
     @pytest.fixture(autouse=True)
     def _setup(self):
-        self.mock_cfg = {"name": "test", "key": "glm", "model_id": "glm-4",
-                         "endpoint": "https://api.example.com/v1/chat/completions",
-                         "auth_type": "bearer", "api_key": "sk",
-                         "temperature": 0.3, "max_tokens": 4096}
+        self.mock_cfg = MOCK_CFG
 
     async def test_tags_success(self):
         with patch("services.ai_processor.get_model_by_key", return_value=self.mock_cfg):
@@ -131,11 +134,7 @@ class TestGenerateTags:
 @pytest.mark.asyncio
 class TestGenerateMindmap:
     async def test_mindmap_success(self):
-        mock_cfg = {"name": "test", "key": "glm", "model_id": "glm-4",
-                    "endpoint": "https://api.example.com/v1/chat/completions",
-                    "auth_type": "bearer", "api_key": "sk",
-                    "temperature": 0.3, "max_tokens": 4096}
-        with patch("services.ai_processor.get_model_by_key", return_value=mock_cfg):
+        with patch("services.ai_processor.get_model_by_key", return_value=MOCK_CFG):
             with patch("services.ai_processor._record_token_usage"):
                 mock_resp = MagicMock()
                 mock_resp.raise_for_status = MagicMock()
@@ -151,11 +150,7 @@ class TestGenerateMindmap:
                     assert "# 思维导图" in result
 
     async def test_mindmap_failure_returns_empty(self):
-        mock_cfg = {"name": "test", "key": "glm", "model_id": "glm-4",
-                    "endpoint": "https://api.example.com/v1/chat/completions",
-                    "auth_type": "bearer", "api_key": "sk",
-                    "temperature": 0.3, "max_tokens": 4096}
-        with patch("services.ai_processor.get_model_by_key", return_value=mock_cfg):
+        with patch("services.ai_processor.get_model_by_key", return_value=MOCK_CFG):
             mock_client = AsyncMock()
             mock_client.__aenter__.return_value = mock_client
             mock_client.post.side_effect = Exception("fail")
@@ -211,10 +206,7 @@ class TestSplitByBoundary:
 # ── correct_transcript 加固测试 ──
 @pytest.mark.asyncio
 class TestCorrectTranscript:
-    mock_cfg = {"name": "test", "key": "glm", "model_id": "glm-4",
-                "endpoint": "https://api.example.com/v1/chat/completions",
-                "auth_type": "bearer", "api_key": "sk",
-                "temperature": 0.3, "max_tokens": 4096}
+    mock_cfg = MOCK_CFG
 
     async def _run(self, text, fake_outputs):
         """fake_outputs: list of (content, in_tok, out_tok) 依次返回"""
@@ -298,12 +290,7 @@ class TestCallAiEmptyChoicesChunk:
     旧代码 chunk.get('choices', [{}])[0] 会越界，导致已生成的内容全部丢失并返回失败哨兵"""
 
     def _mock_cfg(self):
-        return {
-            "name": "test", "key": "glm", "model_id": "glm-4",
-            "endpoint": "https://api.example.com/v1/chat/completions",
-            "auth_type": "bearer", "api_key": "sk",
-            "temperature": 0.3, "max_tokens": 4096,
-        }
+        return MOCK_CFG
 
     async def test_usage_chunk_with_empty_choices_does_not_crash(self):
         async def fake_aiter_lines():

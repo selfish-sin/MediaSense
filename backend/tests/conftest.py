@@ -27,3 +27,17 @@ def _isolate_data_dir():
     init_db()
     yield TEST_DATA_DIR
     shutil.rmtree(TEST_DATA_DIR, ignore_errors=True)
+
+
+@pytest.fixture
+def db_path(tmp_path, monkeypatch):
+    """每个测试独立的临时 SQLite：用真实 init_db() 建全量 schema
+
+    替代各仓库测试文件里手抄的 CREATE_TABLES_SQL（四份 DDL 此前反复漂移）。
+    连接层面仍由各测试文件的 _patch_conn 把 db.<repo>.get_connection 指向该文件。
+    """
+    path = tmp_path / "test.db"
+    monkeypatch.setattr("db.database.DB_PATH", path)
+    from db.database import init_db
+    init_db()
+    return path

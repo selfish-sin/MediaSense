@@ -8,10 +8,12 @@ from pathlib import Path
 
 
 @pytest.fixture(autouse=True)
-def _mock_socketio():
-    sys.modules['socketio'] = MagicMock()
-    sys.modules['socketio'].AsyncServer = MagicMock()
-    sys.modules['socketio'].ASGIApp = MagicMock()
+def _mock_socketio(monkeypatch):
+    """mock socketio 模块，测试结束后自动恢复（避免污染后续测试的 sys.modules）"""
+    mock_sio = MagicMock()
+    mock_sio.AsyncServer = MagicMock()
+    mock_sio.ASGIApp = MagicMock()
+    monkeypatch.setitem(sys.modules, 'socketio', mock_sio)
     yield
 
 

@@ -18,52 +18,6 @@ from db.job_repo import (
     _row_to_dict, fail_interrupted_jobs,
 )
 
-# 与 test_job_repo.py 相同的最小 schema + 连接 patch
-CREATE_TABLES_SQL = """
-CREATE TABLE IF NOT EXISTS jobs (
-    id TEXT PRIMARY KEY, title TEXT, platform TEXT,
-    input_url TEXT, input_text TEXT, input_file TEXT,
-    status TEXT DEFAULT 'pending', model TEXT, summary_type TEXT,
-    options TEXT DEFAULT '{}', result_text TEXT, files TEXT DEFAULT '{}',
-    tags TEXT DEFAULT '[]', token_usage TEXT DEFAULT '{}',
-    progress_msg TEXT, preview_text TEXT, edited_preview_text TEXT,
-    error TEXT, batch_id TEXT, summary_version INTEGER DEFAULT 1,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS summary_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_id TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1,
-    summary_type TEXT, model TEXT, result_text TEXT,
-    tags TEXT DEFAULT '[]', token_usage TEXT DEFAULT '{}',
-    files TEXT DEFAULT '{}', created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(job_id, version)
-);
-CREATE TABLE IF NOT EXISTS job_chats (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_id TEXT, role TEXT NOT NULL, content TEXT NOT NULL,
-    token_usage TEXT DEFAULT '{}',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS token_usage (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_id TEXT, model_key TEXT,
-    input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
-    cost REAL DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-"""
-
-
-@pytest.fixture
-def db_path(tmp_path):
-    path = tmp_path / "test.db"
-    conn = sqlite3.connect(str(path))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(CREATE_TABLES_SQL)
-    conn.close()
-    return path
-
 
 @pytest.fixture(autouse=True)
 def _patch_conn(db_path):
