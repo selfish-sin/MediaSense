@@ -62,9 +62,11 @@ def assemble():
     backend_dst = target / 'backend'
     if backend_dst.exists():
         shutil.rmtree(backend_dst)
+    # 注意排除 config.py：它是开发者本机配置（gitignore 同理），
+    # 安装包必须只带 config.example.py，由下方复制为默认 config.py
     shutil.copytree(PROJECT / 'backend', backend_dst, ignore=shutil.ignore_patterns(
         '__pycache__', '*.pyc', '.pytest-tmp', '.coverage',
-        'data', 'venv', '.venv', '*.bak*', 'tests'
+        'data', 'venv', '.venv', '*.bak*', 'tests', 'config.py'
     ))
     # Ensure static dir exists (frontend build output)
     static_src = PROJECT / 'backend' / 'static'
