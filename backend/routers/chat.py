@@ -409,11 +409,13 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
         disconnected = False
 
         try:
+            # 先取历史再插入新问题——否则历史里已含本条问题，
+            # _build_messages 末尾再 append 一次会把问题发给模型两遍
+            history = _get_session_history(job_id, session_id)
+
             if not msg.regenerate:
                 user_id = _insert_chat(job_id, session_id, "user", question)
                 _maybe_rename_session(job_id, session_id, question)
-
-            history = _get_session_history(job_id, session_id)
 
             search_text = ""
             if msg.enable_search:

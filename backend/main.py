@@ -3,6 +3,7 @@ YouTube Tool V2 - FastAPI 入口 + 任务处理主流程
 启动 uvicorn + Socket.IO + SPA 路由 + process_job 编排
 """
 import asyncio
+import re
 import sys
 import inspect
 
@@ -68,9 +69,21 @@ def get_job_semaphore():
     return _job_semaphore
 
 # ============ Socket.IO (async mode) ============
+_LOCALHOST_ORIGIN_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
+
+
+def _is_localhost_origin(origin, environ=None):
+    """engineio CORS 校验回调：与下方 HTTP CORSMiddleware 同一白名单。
+
+    不校验会放任任意网页在用户浏览器里连上本机 socket，订阅任务日志
+    （含转录/AI 内容）甚至发送 cancel_job。
+    """
+    return bool(origin) and bool(_LOCALHOST_ORIGIN_RE.match(origin))
+
+
 sio = socketio.AsyncServer(
     async_mode='asgi',
-    cors_allowed_origins='*',
+    cors_allowed_origins=_is_localhost_origin,
     logger=False,
     engineio_logger=False,
 )
@@ -323,8 +336,8 @@ async def _extract_bvid(input_url: str):
             real_url = await asyncio.to_thread(_resolve_redirect)
             if '/BV' in real_url:
                 return real_url.split('/BV')[1].split('?')[0].split('/')[0]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f'短链解析失败 ({input_url}): {e}')
     return None
 
 
@@ -943,6 +956,9 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                 ),
                 timeout=1800.0,
             )
+            # 与 Step 3 相同的哨兵拦截：失败串不能当正常译文写盘
+            if isinstance(translation, str) and translation.lstrip().startswith('[处理失败'):
+                raise Exception(translation.strip().strip('[]'))
             lang_suffix = target_lang.replace('-', '_')
             translation_path = txt_path.replace('.txt', f'__{lang_suffix}.md')
             with open(translation_path, 'w', encoding='utf-8') as f:

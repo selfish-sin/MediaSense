@@ -495,9 +495,11 @@ def find_job_by_url(normalized_url: str) -> Optional[Dict[str, Any]]:
         norm = normalize_url(normalized_url)
         if ':' in norm:
             _, vid = norm.split(':', 1)
+            # vid 可能含 LIKE 通配符（YouTube ID 合法含 _），不转义会误匹配相似视频
+            vid_escaped = vid.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
             row = conn.execute(
-                "SELECT * FROM jobs WHERE input_url LIKE ? ORDER BY created_at DESC LIMIT 1",
-                (f'%{vid}%',)
+                "SELECT * FROM jobs WHERE input_url LIKE ? ESCAPE '\\' ORDER BY created_at DESC LIMIT 1",
+                (f'%{vid_escaped}%',)
             ).fetchone()
         else:
             # 3. 兜底：无法提取平台标识的链接，才去掉 query 参数后模糊匹配
