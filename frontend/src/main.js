@@ -1,10 +1,12 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import { createRouter, createWebHistory } from 'vue-router'
-import ElementPlus from 'element-plus'
-import 'element-plus/dist/index.css'
+// Element Plus 组件/样式按需自动导入（vite.config.js 的 ElementPlusResolver）；
+// 暗色变量仍全局引入，供主题切换
 import 'element-plus/theme-chalk/dark/css-vars.css'
-import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
+// JS API（ElMessage/ElMessageBox 以函数调用，不经模板解析器）的样式需显式引入
+import 'element-plus/es/components/message/style/css'
+import 'element-plus/es/components/message-box/style/css'
 
 import App from './App.vue'
 
@@ -33,6 +35,7 @@ const app = createApp(App)
 
 app.use(router)
 app.use(pinia)
-app.use(ElementPlus, { locale: zhCn })  // 中文化 Element Plus
+// 组件级按需注册由 unplugin-vue-components 处理；语言包经 App.vue 的
+// el-config-provider 全局注入，无需 app.use(ElementPlus)
 
 app.mount('#app')

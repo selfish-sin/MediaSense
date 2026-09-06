@@ -3,6 +3,7 @@ import { ref, computed, onBeforeUnmount, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useJobStore } from './stores/jobStore'
 import { useThemeStore } from './stores/themeStore'
+import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 import BilibiliCard from './components/BilibiliCard.vue'
 import BackgroundPanel from './components/BackgroundPanel.vue'
 import {
@@ -78,6 +79,7 @@ function scrollToBottom() {
 </script>
 
 <template>
+  <el-config-provider :locale="zhCn">
   <el-container class="app-shell">
     <!-- 侧边栏 -->
     <el-aside :width="sidebarWidth" class="app-sidebar">
@@ -190,6 +192,7 @@ function scrollToBottom() {
       <BackgroundPanel />
     </el-drawer>
   </el-container>
+  </el-config-provider>
 </template>
 
 <style>
