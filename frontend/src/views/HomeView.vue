@@ -1,13 +1,12 @@
 <script setup>
 import { ref, onMounted, onUnmounted, onActivated, computed, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { UploadCloud, Pencil, Check, X, Copy, Loader2, ArrowDown } from 'lucide-vue-next'
 import { useJobStore } from '../stores/jobStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useModelStore } from '../stores/modelStore'
-import { jobsApi, exportApi, translateApi, tokenApi, resultApi, chatApi, summaryApi } from '../utils/api'
-import { ACTIVE_JOB_STATUSES } from '../utils/jobActions'
+import { jobsApi, exportApi, tokenApi, resultApi } from '../utils/api'
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
 import socket, {
   onProgress, onLog, onAiToken, onAiDone, onPreview, onAiThinking,
@@ -397,8 +396,6 @@ async function handleSubmit() {
 
   // 重置结果区状态
   editMode.value = false
-  translationText.value = ''
-  bilingualMode.value = 'parallel'
   resultTab.value = 'markdown'
 
   try {
@@ -516,22 +513,6 @@ function handleCancelJob() {
   }
 }
 
-// ============ 放弃当前任务（不取消后端，只清前端状态） ============
-// 用于刷新恢复后用户不想继续盯这个任务的情况
-async function abandonCurrentJob() {
-  try {
-    await ElMessageBox.confirm(
-      '放弃当前任务的前端跟踪？后端任务会继续运行，你可以在历史记录中查看结果。',
-      '提示',
-      { type: 'warning' }
-    )
-    jobStore.reset()
-    ElMessage.info('已放弃跟踪，任务仍在后端运行')
-  } catch (err) {
-    // 用户取消
-  }
-}
-
 // ============ 导出 ============
 async function handleExport(format) {
   if (!jobStore.currentJobId) { ElMessage.warning('没有可导出的任务'); return }
@@ -570,8 +551,6 @@ const isProcessing = computed(() => jobStore.isProcessing)
 
 // 输出内容选择（默认全选 AI总结+字幕+转录文本）
 const outputOptions = ref(['result_md'])
-// 旧字段保留空实现（新系统用 DimensionSelector）
-const selectedTypeInfo = computed(() => null)
 
 // 任务关联文件列表（字幕/音频/视频等素材）
 const jobFiles = computed(() => {
@@ -625,34 +604,6 @@ const hasMindmap = computed(() => {
   return settings.selectedSummaryType === 'mindmap'
 })
 
-// 是否有翻译内容
-const translationText = ref('')
-const hasTranslation = computed(() => !!translationText.value)
-
-// ============ 截图提取 ============
-const screenshotFrames = ref([])
-const screenshotLoading = ref(false)
-const screenshotVisible = ref(false)
-
-async function extractScreenshots() {
-  if (!jobStore.currentJobId) return
-  screenshotLoading.value = true
-  try {
-    const res = await jobsApi.screenshots(jobStore.currentJobId, 10)
-    screenshotFrames.value = res.frames || []
-    screenshotVisible.value = true
-    if (screenshotFrames.value.length > 0) {
-      ElMessage.success(`提取了 ${screenshotFrames.value.length} 张截图`)
-    } else {
-      ElMessage.warning('未提取到截图，请确认视频文件存在')
-    }
-  } catch (err) {
-    ElMessage.error(err.message)
-  } finally {
-    screenshotLoading.value = false
-  }
-}
-
 // ============ 思维导图渲染 ============
 const mindmapRef = ref(null)
 let markmapInstance = null
@@ -687,15 +638,6 @@ watch([resultTab, () => jobStore.resultText], () => {
 watch(hasMindmap, (val) => {
   if (!val && resultTab.value === 'mindmap') resultTab.value = 'markdown'
 })
-watch(hasTranslation, (val) => {
-  if (!val && resultTab.value === 'bilingual') resultTab.value = 'markdown'
-})
-
-// ============ 双语对照翻译 ============
-const bilingualMode = ref('parallel')   // parallel / interleaved / translation-only
-const translating = ref(false)
-const targetLang = ref('zh')
-const translateLangs = ref([])
 
 // ============ 自定义选项输入（保留兼容，新系统由 DimensionSelector 管理） ============
 const customPrompt = ref('')
@@ -705,10 +647,7 @@ function syncCustomToOptions() {
   settings.advancedOptions.custom_prompt = customPrompt.value
 }
 
-// ============ 提示词预览（新系统由 DimensionSelector 内部加载，此处保留兼容） ============
-const showPromptPreview = ref(false)
-const promptPreviewText = ref('')
-const promptPreviewLoading = ref(false)
+// 提示词覆盖（handleSubmit 组装与 useJobRestore 回填用；预览展示已由 DimensionSelector 承载）
 const promptOverride = ref('')
 const usePromptOverride = ref(false)
 
@@ -722,76 +661,6 @@ const { handleRouteQuery } = useJobRestore({
   settings, jobStore, route, router,
   scrollToJobProgress,
 })
-
-async function fetchPromptPreview() {
-  promptPreviewLoading.value = true
-  try {
-    // ★ 完全自定义提示词库启用时，直接展示该 prompt（不参与维度拼装）
-    if (settings.useFullOverride && settings.fullOverride) {
-      promptPreviewText.value = settings.fullOverride
-      if (!usePromptOverride.value) {
-        promptOverride.value = settings.fullOverride
-      }
-      promptPreviewLoading.value = false
-      return
-    }
-    const res = await summaryApi.promptPreview({
-      dimensions: { ...settings.selectedDimensions },
-    })
-    promptPreviewText.value = res.prompt || ''
-    if (!usePromptOverride.value) {
-      promptOverride.value = promptPreviewText.value
-    }
-  } catch {
-    promptPreviewText.value = ''
-  } finally {
-    promptPreviewLoading.value = false
-  }
-}
-
-watch(() => settings.selectedDimensions, () => {
-  if (showPromptPreview.value) fetchPromptPreview()
-})
-
-// ★ 完全自定义切换时也刷新预览
-watch(() => [settings.useFullOverride, settings.fullOverride], () => {
-  if (showPromptPreview.value) fetchPromptPreview()
-})
-
-// 交错显示：原文段落+译文段落交替
-const interleavedContent = computed(() => {
-  if (!jobStore.resultText || !translationText.value) return []
-  const origParagraphs = jobStore.resultText.split(/\n\n+/).filter(p => p.trim())
-  const transParagraphs = translationText.value.split(/\n\n+/).filter(p => p.trim())
-  const result = []
-  for (let i = 0; i < Math.max(origParagraphs.length, transParagraphs.length); i++) {
-    result.push({
-      orig: origParagraphs[i] || '',
-      trans: transParagraphs[i] || '',
-    })
-  }
-  return result
-})
-
-async function handleTranslate() {
-  if (!jobStore.resultText) { ElMessage.warning('没有可翻译的内容'); return }
-  translating.value = true
-  try {
-    const res = await translateApi.bilingual(
-      jobStore.resultText,
-      targetLang.value,
-      settings.selectedModel,
-      jobStore.currentJobId || undefined
-    )
-    translationText.value = res.translation
-    resultTab.value = 'bilingual'
-    ElMessage.success('翻译完成')
-  } catch (err) {
-    ElMessage.error(`翻译失败: ${err.message}`)
-  } finally {
-    translating.value = false
-  }
-}
 
 // ============ 结果在线编辑 ============
 const editMode = ref(false)
@@ -871,78 +740,6 @@ async function handleResummarize(model) {
     jobStore.jobStatus = 'failed'
     jobStore.isProcessing = false
   })
-}
-
-// ============ 结果内搜索 ============
-const searchQuery = ref('')
-const searchCount = ref(0)
-const searchCurrent = ref(0)
-const resultBodyRef = ref(null)
-
-function doSearch() {
-  if (!resultBodyRef.value || !searchQuery.value.trim()) {
-    searchCount.value = 0
-    return
-  }
-  const container = resultBodyRef.value
-  // 移除旧高亮
-  container.querySelectorAll('mark.search-hl').forEach(m => {
-    m.replaceWith(document.createTextNode(m.textContent))
-  })
-  container.normalize()
-
-  const q = searchQuery.value.trim()
-  if (!q) { searchCount.value = 0; return }
-
-  // 遍历文本节点并高亮
-  let count = 0
-  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
-  const nodes = []
-  while (walker.nextNode()) nodes.push(walker.currentNode)
-
-  nodes.forEach(node => {
-    const text = node.textContent
-    const idx = text.toLowerCase().indexOf(q.toLowerCase())
-    if (idx === -1) return
-    count++
-    const before = document.createTextNode(text.slice(0, idx))
-    const mark = document.createElement('mark')
-    mark.className = 'search-hl'
-    mark.textContent = text.slice(idx, idx + q.length)
-    const after = document.createTextNode(text.slice(idx + q.length))
-    node.parentNode.replaceChild(after, node)
-    node.parentNode.insertBefore(mark, after)
-    node.parentNode.insertBefore(before, mark)
-  })
-  searchCount.value = count
-  searchCurrent.value = count > 0 ? 1 : 0
-  if (count > 0) {
-    const first = container.querySelector('mark.search-hl')
-    if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }
-}
-
-function searchNav(dir) {
-  if (!resultBodyRef.value || searchCount.value === 0) return
-  const marks = resultBodyRef.value.querySelectorAll('mark.search-hl')
-  marks.forEach(m => m.classList.remove('search-hl--active'))
-  searchCurrent.value = ((searchCurrent.value - 1 + dir + searchCount.value) % searchCount.value) + 1
-  const target = marks[searchCurrent.value - 1]
-  if (target) {
-    target.classList.add('search-hl--active')
-    target.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }
-}
-
-function clearSearch() {
-  searchQuery.value = ''
-  searchCount.value = 0
-  if (resultBodyRef.value) {
-    resultBodyRef.value.querySelectorAll('mark.search-hl').forEach(m => {
-      m.replaceWith(document.createTextNode(m.textContent))
-    })
-    resultBodyRef.value.normalize()
-  }
 }
 
 // 复制结果
@@ -1443,7 +1240,6 @@ function formatTokenTime(t) {
         <!-- Markdown / 流式输出视图 -->
         <div
           v-else-if="resultTab === 'markdown'"
-          ref="resultBodyRef"
           class="markdown-body"
           v-html="renderedResult"
           style="line-height: 1.8; font-size: 14px;"
@@ -1516,40 +1312,6 @@ function formatTokenTime(t) {
 
     <!-- 追问聊天（ChatPanel：SSE 流式 + 思考过程 + 引用源 + 编辑/重发） -->
     <ChatPanel v-if="jobStore.currentJobId" :job-id="jobStore.currentJobId" />
-
-    <!-- 截图画廊 -->
-    <el-card v-if="screenshotVisible && screenshotFrames.length > 0" shadow="never" style="margin-bottom: 16px;">
-      <template #header>
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-          <span style="font-weight: 600;">视频截图</span>
-          <el-button size="small" text @click="screenshotVisible = false">收起</el-button>
-        </div>
-      </template>
-      <div style="display: flex; flex-wrap: wrap; gap: 12px;">
-        <div
-          v-for="(frame, i) in screenshotFrames"
-          :key="i"
-          style="width: 200px; border: 1px solid #e4e7ed; border-radius: 6px; overflow: hidden; cursor: pointer; transition: transform 0.15s;"
-          @click="window.open(frame.path, '_blank')"
-          @mouseenter="($el) => $el.style.transform = 'scale(1.03)'"
-          @mouseleave="($el) => $el.style.transform = 'scale(1)'"
-        >
-          <img
-            :src="frame.path"
-            :alt="`Frame ${i + 1}`"
-            style="width: 100%; height: 120px; object-fit: cover; display: block;"
-            loading="lazy"
-            @error="($el) => { $el.style.display = 'none'; $el.nextSibling.style.display = 'flex'; }"
-          />
-          <div style="display: none; width: 100%; height: 120px; align-items: center; justify-content: center; color: #666; font-size: 12px; background: #1a1a1a;">
-            无法加载
-          </div>
-          <div style="padding: 6px 8px; font-size: 12px; color: #999; background: #1a1a1a;">
-            第 {{ i + 1 }} 帧 · {{ frame.timestamp }}
-          </div>
-        </div>
-      </div>
-    </el-card>
 
     <!-- Token 统计面板 -->
     <el-card v-if="tokenUsage" class="wb-card" shadow="never">
@@ -1932,22 +1694,6 @@ function formatTokenTime(t) {
   padding-left: 6px;
 }
 
-.prompt-preview-card {
-  border-color: rgba(var(--app-accent-1-rgb), 0.35) !important;
-}
-.prompt-preview-input :deep(textarea) {
-  font-family: 'Cascadia Code', Consolas, ui-monospace, monospace;
-  font-size: 13px;
-  line-height: 1.6;
-}
-.prompt-toggle-row {
-  text-align: center;
-  margin-bottom: 16px;
-}
-.ghost-action-btn {
-  border-radius: 10px !important;
-}
-
 .backend-log-panel {
   max-height: 300px;
   white-space: pre-wrap;
@@ -2103,27 +1849,6 @@ function formatTokenTime(t) {
   opacity: 0.75;
 }
 
-/* 总结类型卡片 */
-.type-card {
-  border: 2px solid var(--app-border);
-  border-radius: 10px;
-  padding: 10px 12px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  background: var(--app-card-bg);
-  min-height: 70px;
-}
-.type-card:hover {
-  border-color: var(--app-accent-1);
-  background: var(--app-hover-bg);
-  transform: translateY(-1px);
-}
-.type-card--selected {
-  border-color: var(--app-accent-1);
-  background: var(--app-chip-active-soft);
-  box-shadow: 0 0 0 1px var(--app-accent-1) inset;
-}
-
 /* 日志面板 — 跟随主题 */
 .log-panel {
   margin-top: 12px;
@@ -2212,18 +1937,6 @@ function formatTokenTime(t) {
   font-weight: 600;
 }
 
-/* 搜索高亮 */
-.markdown-body :deep(mark.search-hl) {
-  background: var(--app-search-hl-bg);
-  color: var(--app-search-hl-text);
-  border-radius: 2px;
-  padding: 0 2px;
-}
-.markdown-body :deep(mark.search-hl--active) {
-  background: var(--app-search-hl-active-bg);
-  color: var(--app-search-hl-active-text);
-}
-
 /* 思考过程 */
 .thinking-panel {
   margin-bottom: 12px;
@@ -2253,56 +1966,6 @@ function formatTokenTime(t) {
   color: var(--app-thinking-text);
   max-height: 300px;
   overflow-y: auto;
-}
-
-/* 双语并排 */
-.bilingual-parallel {
-  display: flex;
-  gap: 0;
-  align-items: flex-start;
-}
-.bilingual-col {
-  flex: 1;
-  min-width: 0;
-  padding: 0 16px;
-}
-.bilingual-col:first-child { padding-left: 0; }
-.bilingual-col:last-child { padding-right: 0; }
-.bilingual-col-header {
-  font-weight: 600;
-  font-size: 13px;
-  color: var(--app-accent-1);
-  margin-bottom: 8px;
-  padding-bottom: 4px;
-  border-bottom: 1px solid #333;
-}
-.bilingual-divider {
-  width: 1px;
-  background: #333;
-  align-self: stretch;
-  margin: 0 4px;
-}
-
-/* 交错模式 */
-.interleaved-pair {
-  margin-bottom: 16px;
-  border-radius: 6px;
-  overflow: hidden;
-}
-.interleaved-orig {
-  background: #1e1e1e;
-  padding: 10px 14px;
-  font-size: 13px;
-  line-height: 1.7;
-  color: #ccc;
-}
-.interleaved-trans {
-  background: #1a1a28;
-  padding: 10px 14px;
-  font-size: 13px;
-  line-height: 1.7;
-  color: #ddd;
-  border-top: 1px dashed #333;
 }
 
 /* Token 统计 */
