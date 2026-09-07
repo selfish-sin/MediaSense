@@ -203,8 +203,6 @@ async def get_logs(lines: int = 300):
     前端以旧窗口末行为锚点做尾部同步，见 useBackendLogs.fetchLogs）"""
     return {"lines": _read_log_tail(lines)}
 app.include_router(search_router,  prefix="",             tags=["search"])
-# ★ 格式转换已外包，路由已禁用
-# app.include_router(converter_router, prefix="/api/converter", tags=["converter"])
 
 
 # ============ Token 统计接口（直接挂在 main，不单独建 router） ============
