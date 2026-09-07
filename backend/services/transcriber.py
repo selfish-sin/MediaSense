@@ -10,6 +10,7 @@ import time
 import shutil
 import subprocess
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -30,26 +31,33 @@ class TranscriptionCancelledError(Exception):
 # 模型加载耗时数秒到数十秒且占用大块内存/显存；任务并发上限 2、
 # B站字幕抽查也会单独转写，每次重新 WhisperModel(...) 会造成重复加载
 # 与内存抖动。同一 (model_path, device, compute_type) 只实例化一次。
-_model_cache: dict = {}
+# LRU 上限 2：用户可切换 tiny/base/small/medium 四档，GPU→CPU 降级路径
+# 还会各留一份，无淘汰会常驻多个大模型（medium GPU 版约 3GB 显存）。
+_model_cache: "OrderedDict[tuple, object]" = OrderedDict()
 _model_cache_lock = threading.Lock()
+_MODEL_CACHE_MAX = 2
 
 
 def _get_whisper_model(model_path: str, device: str, compute_type: str,
                        local_only: bool, cpu_threads: int, num_workers: int):
-    """按 (model_path, device, compute_type) 缓存 WhisperModel 单例（线程安全）。"""
+    """按 (model_path, device, compute_type) 缓存 WhisperModel（线程安全，LRU 淘汰）。
+
+    淘汰只从缓存移除引用；正在转录的任务仍持有实例引用，用完自然释放。
+    """
     key = (model_path, device, compute_type)
-    model = _model_cache.get(key)
-    if model is not None:
-        return model
-    from faster_whisper import WhisperModel
     with _model_cache_lock:
-        model = _model_cache.get(key)  # 双检：等待锁期间可能已被他线程填充
-        if model is None:
-            model = WhisperModel(
-                model_path, device=device, compute_type=compute_type,
-                local_files_only=local_only, cpu_threads=cpu_threads, num_workers=num_workers,
-            )
-            _model_cache[key] = model
+        model = _model_cache.get(key)
+        if model is not None:
+            _model_cache.move_to_end(key)  # LRU touch
+            return model
+        from faster_whisper import WhisperModel
+        model = WhisperModel(
+            model_path, device=device, compute_type=compute_type,
+            local_files_only=local_only, cpu_threads=cpu_threads, num_workers=num_workers,
+        )
+        _model_cache[key] = model
+        while len(_model_cache) > _MODEL_CACHE_MAX:
+            _model_cache.popitem(last=False)  # 淘汰最久未用
     return model
 
 # 本地 ffmpeg/ffprobe 路径（项目自带，无需系统 PATH）
