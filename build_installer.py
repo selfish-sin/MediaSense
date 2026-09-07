@@ -25,7 +25,9 @@ def get_version():
 
 def run(cmd, **kw):
     print(f'> {cmd}')
-    r = subprocess.run(cmd, shell=True, cwd=str(PROJECT), **kw)
+    # 调用方可通过 kw 覆盖 cwd（如 build_frontend 传 frontend/），未传时默认项目根
+    kw.setdefault('cwd', str(PROJECT))
+    r = subprocess.run(cmd, shell=True, **kw)
     if r.returncode != 0:
         print(f'FAILED: {cmd}')
         sys.exit(1)
