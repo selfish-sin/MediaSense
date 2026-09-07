@@ -964,7 +964,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             #   若不拦截会被当作正常结果写盘并标记 success=True，用户看到的“总结”其实是错误。
             #   这里显式失败，路由到下方 except → finish_job(False) + done{success:false, error}
             if isinstance(result_text, str) and result_text.lstrip().startswith('[处理失败'):
-                raise Exception(result_text.strip().strip('[]'))
+                raise Exception(result_text.strip())
 
             # 保存结果到文件
             result_md_path = txt_path.replace('.txt', f'__{summary_type}.md')
@@ -997,7 +997,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             )
             # 与 Step 3 相同的哨兵拦截：失败串不能当正常译文写盘
             if isinstance(translation, str) and translation.lstrip().startswith('[处理失败'):
-                raise Exception(translation.strip().strip('[]'))
+                raise Exception(translation.strip())
             lang_suffix = target_lang.replace('-', '_')
             translation_path = txt_path.replace('.txt', f'__{lang_suffix}.md')
             with open(translation_path, 'w', encoding='utf-8') as f:
