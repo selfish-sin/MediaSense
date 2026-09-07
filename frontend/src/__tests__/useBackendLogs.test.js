@@ -32,30 +32,42 @@ describe('useBackendLogs', () => {
     vi.clearAllMocks()
   })
 
-  it('正常增量：拼接新行，不触发全量重载', async () => {
-    apiMocks.getLogs.mockResolvedValueOnce({ total: 5, lines: ['l1', 'l2', 'l3', 'l4', 'l5'] })
+  it('正常增量：以旧末行为锚点拼接新行，不触发全量重载', async () => {
+    apiMocks.getLogs.mockResolvedValueOnce({ lines: ['l1', 'l2', 'l3', 'l4', 'l5'] })
     const { result, wrapper } = withSetup(useBackendLogs)
     // 默认收起：不轮询；展开后 watch 触发首次 fetchLogs
     result.showBackendLogs.value = true
     await vi.waitFor(() => expect(result.backendLogs.value).toEqual(['l1', 'l2', 'l3', 'l4', 'l5']))
 
-    apiMocks.getLogs.mockResolvedValueOnce({ total: 7, lines: ['l3', 'l4', 'l5', 'l6', 'l7'] })
+    apiMocks.getLogs.mockResolvedValueOnce({ lines: ['l3', 'l4', 'l5', 'l6', 'l7'] })
     await result.fetchLogs()
     expect(result.backendLogs.value).toEqual(['l1', 'l2', 'l3', 'l4', 'l5', 'l6', 'l7'])
     expect(apiMocks.getLogs).not.toHaveBeenCalledWith(2000)
     wrapper.unmount()
   })
 
-  it('增量超界（日志爆发增长）：回退全量重载，不静默丢更新', async () => {
-    apiMocks.getLogs.mockResolvedValueOnce({ total: 3, lines: ['l1', 'l2', 'l3'] })
+  it('无新增：旧末行仍是窗口末行，保持不动', async () => {
+    apiMocks.getLogs.mockResolvedValueOnce({ lines: ['a', 'b', 'c'] })
+    const { result, wrapper } = withSetup(useBackendLogs)
+    result.showBackendLogs.value = true
+    await vi.waitFor(() => expect(result.backendLogs.value).toEqual(['a', 'b', 'c']))
+
+    apiMocks.getLogs.mockResolvedValueOnce({ lines: ['a', 'b', 'c'] })
+    await result.fetchLogs()
+    expect(result.backendLogs.value).toEqual(['a', 'b', 'c'])
+    wrapper.unmount()
+  })
+
+  it('日志爆发（旧末行滚出窗口）或文件被清：回退全量重载，不静默丢更新', async () => {
+    apiMocks.getLogs.mockResolvedValueOnce({ lines: ['l1', 'l2', 'l3'] })
     const { result, wrapper } = withSetup(useBackendLogs)
     result.showBackendLogs.value = true
     await vi.waitFor(() => expect(result.backendLogs.value).toEqual(['l1', 'l2', 'l3']))
 
     const full = Array.from({ length: 500 }, (_, i) => `h${i}`)
-    // 第一次：delta = 497 > 200 → 触发 loadAllHistory（getLogs(2000)）
-    apiMocks.getLogs.mockResolvedValueOnce({ total: 500, lines: full.slice(0, 200) })
-    apiMocks.getLogs.mockResolvedValueOnce({ total: 500, lines: full })
+    // 爆发后 200 行窗口里已没有旧末行 l3 → 触发 loadAllHistory（getLogs(2000)）
+    apiMocks.getLogs.mockResolvedValueOnce({ lines: full.slice(300) })
+    apiMocks.getLogs.mockResolvedValueOnce({ lines: full })
     await result.fetchLogs()
 
     expect(apiMocks.getLogs).toHaveBeenLastCalledWith(2000)
@@ -74,7 +86,7 @@ describe('useBackendLogs', () => {
     expect(messageMocks.warning).toHaveBeenCalledTimes(1)
 
     // 恢复成功 → 计数重置，再失败 2 次不提示
-    apiMocks.getLogs.mockResolvedValueOnce({ total: 1, lines: ['ok'] })
+    apiMocks.getLogs.mockResolvedValueOnce({ lines: ['ok'] })
     await result.fetchLogs()
     apiMocks.getLogs.mockRejectedValue(new Error('down again'))
     await result.fetchLogs()
@@ -84,7 +96,7 @@ describe('useBackendLogs', () => {
   })
 
   it('默认收起不轮询；收起停止轮询，重新展开恢复', async () => {
-    apiMocks.getLogs.mockResolvedValue({ total: 1, lines: ['x'] })
+    apiMocks.getLogs.mockResolvedValue({ lines: ['x'] })
     const { result, wrapper } = withSetup(useBackendLogs)
     // 默认收起：不发起任何拉取
     expect(apiMocks.getLogs).not.toHaveBeenCalled()

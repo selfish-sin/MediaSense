@@ -15,7 +15,6 @@ export function useBackendLogs() {
   const backendLogs = ref([])
   const autoScroll = ref(true)
   let logTimer = null
-  let lastTotal = 0
   // 连续拉取失败计数：≥3 次只提示一次，避免定时器刷屏；成功即重置
   let logFetchFailures = 0
 
@@ -30,20 +29,27 @@ export function useBackendLogs() {
     try {
       const res = await jobsApi.getLogs(200)
       logFetchFailures = 0
-      if (res.total < lastTotal) {
-        backendLogs.value = []
-        lastTotal = 0
-      }
-      const delta = res.total - lastTotal
-      if (delta > 200) {
-        // 增量超出单次拉取上限（日志爆发增长）：回退全量重载，禁止静默丢更新
-        await loadAllHistory()
-        return
-      }
-      if (delta > 0) {
-        backendLogs.value = backendLogs.value.concat(res.lines.slice(-delta))
-        lastTotal = res.total
-        if (backendLogs.value.length > 1000) backendLogs.value = backendLogs.value.slice(-1000)
+      const lines = res.lines || []
+      const prev = backendLogs.value
+      if (!prev.length) {
+        // 首次拉取：直接展示当前窗口
+        backendLogs.value = lines
+      } else {
+        // 尾部同步：以旧窗口末行为锚点，定位新窗口中其后缀新增。
+        // （后端 /api/logs 是尾部回读，无法提供全文件行数，
+        //  此前的 total 差量增量在 total 缺失后彻底失效）
+        const lastPrev = prev[prev.length - 1]
+        const idx = lines.lastIndexOf(lastPrev)
+        if (idx === -1) {
+          // 旧末行已滚出 200 行窗口（日志爆发）或日志文件被清：
+          // 回退全量重载，禁止静默丢更新
+          await loadAllHistory()
+          return
+        }
+        if (idx < lines.length - 1) {
+          backendLogs.value = prev.concat(lines.slice(idx + 1))
+          if (backendLogs.value.length > 1000) backendLogs.value = backendLogs.value.slice(-1000)
+        }
       }
       if (autoScroll.value) scrollToBottom()
     } catch {
@@ -58,8 +64,7 @@ export function useBackendLogs() {
     try {
       const res = await jobsApi.getLogs(2000)
       logFetchFailures = 0
-      backendLogs.value = res.lines
-      lastTotal = res.total
+      backendLogs.value = res.lines || []
       scrollToBottom()
     } catch {
       logFetchFailures++
@@ -69,7 +74,7 @@ export function useBackendLogs() {
     }
   }
 
-  function clearLogs() { backendLogs.value = []; lastTotal = 0 }
+  function clearLogs() { backendLogs.value = [] }
   function scrollLogTop() {
     document.getElementById('log-panel')?.scrollTo({ top: 0, behavior: 'smooth' })
   }

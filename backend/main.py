@@ -183,22 +183,25 @@ def _read_log_tail(lines: int) -> list:
             f.seek(0, os.SEEK_END)
             size = f.tell()
             # 最多回读 256KB，足够覆盖数千行日志
-            f.seek(max(0, size - 256 * 1024))
+            start = max(0, size - 256 * 1024)
+            f.seek(start)
             tail_bytes = f.read()
     except FileNotFoundError:
         return []
     text = tail_bytes.decode("utf-8", errors="replace")
     all_lines = text.splitlines()
-    # 回读起点可能切在行中间，丢弃第一段不完整行
-    if tail_bytes and len(all_lines) > 1:
+    # 只有起点落在文件中间（可能切在行中央）时首段才是不完整行；
+    # start == 0 时首行是完整行，不能丢
+    if start > 0 and len(all_lines) > 1:
         all_lines = all_lines[1:]
     return all_lines[-lines:]
 
 
 @app.get("/api/logs", tags=["system"])
 async def get_logs(lines: int = 300):
-    """返回后端日志文件最近N行"""
-    return {"lines": _read_log_tail(lines), "total": 0}
+    """返回后端日志文件最近 N 行（尾部窗口；不返回全文件行数——
+    前端以旧窗口末行为锚点做尾部同步，见 useBackendLogs.fetchLogs）"""
+    return {"lines": _read_log_tail(lines)}
 app.include_router(search_router,  prefix="",             tags=["search"])
 # ★ 格式转换已外包，路由已禁用
 # app.include_router(converter_router, prefix="/api/converter", tags=["converter"])
