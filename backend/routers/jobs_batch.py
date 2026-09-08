@@ -3,6 +3,7 @@ YouTube Tool V2 - 任务批量域路由（批量提交 / 批量状态 / 转录�
 
 从 routers/jobs.py 按域拆出，全部挂 /api/jobs 前缀，对外路径零变化。
 """
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException, Request, Query
@@ -15,6 +16,27 @@ from routers.jobs import normalize_url
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# ★ 批量任务严格串行编排：批量提交只 spawn 一个编排任务，按顺序逐个 await
+#   前一个任务跑完再启动下一个（任务序列，一次只跑一个）。目的：批量不会同时
+#   向平台发起多个字幕/元数据请求——2026-09-08 复盘发现并发 2 时 B站 偶发降级
+#   （player/v2 返回 subtitle_url="/" 占位），用户明确要求"批量=任务序列"。
+#   批量内串行，不影响单个任务；全局 MAX_CONCURRENT_JOBS 上限仍然生效。
+_batch_seq_tasks: set = set()
+
+
+async def _run_batch_sequential(job_ids):
+    """按提交顺序逐个执行批量子任务：启动 → await 完成/失败 → 下一个。"""
+    from main import start_job
+    for job_id in job_ids:
+        try:
+            task = start_job(job_id)
+            if task is not None:
+                await task
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f'批量任务 {job_id} 执行异常，继续下一个: {e}')
+
 
 @router.post("/batch")
 async def batch_submit(request: Request):
@@ -22,7 +44,9 @@ async def batch_submit(request: Request):
     body: {"urls": ["url1","url2",...], "options": {...}}  或直接 ["url1","url2",...]（兼容旧前端缓存）
 
     ★ 完善：①URL 去重过滤 ②生成 batch_id 聚合 ③传递完整参数（model/summary_type/开关）
-    并发控制由 main.py 的全局信号量保证（MAX_CONCURRENT_JOBS），这里只负责创建启动
+    批量任务严格串行：创建全部子任务后只启动一个编排任务（_run_batch_sequential），
+    按提交顺序逐个执行，一次只跑一个（用户要求"批量=任务序列"，防平台风控降级）；
+    全局信号量（MAX_CONCURRENT_JOBS）仍对跨批量/单个任务生效。
     """
     import uuid
     from typing import List
@@ -126,9 +150,13 @@ async def batch_submit(request: Request):
             dimensions=dimensions,
             batch_id=batch_id,
         )
-        from main import start_job
-        start_job(job_id)
         job_ids.append(job_id)
+
+    # ★ 批量严格串行：只启动一个编排任务，按顺序逐个执行（任务序列，一次只跑一个），
+    #   不再一次性把全部子任务并发丢进全局队列（避免同时向平台发起多个请求触发风控降级）
+    _orchestrator = asyncio.create_task(_run_batch_sequential(job_ids))
+    _batch_seq_tasks.add(_orchestrator)
+    _orchestrator.add_done_callback(_batch_seq_tasks.discard)
 
     return {
         "batch_id": batch_id,
@@ -136,7 +164,7 @@ async def batch_submit(request: Request):
         "count": len(job_ids),
         "skipped": skipped,
         "duplicates": duplicates,
-        "message": f"已提交 {len(job_ids)} 个批量任务（跳过 {skipped} 个无效/重复URL），并发数受全局限制",
+        "message": f"已提交 {len(job_ids)} 个批量任务（跳过 {skipped} 个无效/重复URL），按顺序逐个执行",
     }
 
 
