@@ -263,6 +263,15 @@ function handleFetchResult(res) {
   }
 }
 
+function handlePickFetched(row) {
+  // ★ 选取即回填表单：模型ID 直接填入，名称空缺时自动带上；
+  //   用户确认端点/密钥后点「添加/保存」落库（编辑已存模型 = 把模型ID换到当前模型上）
+  form.model_id = row.id
+  if (!form.name.trim()) form.name = row.id
+  fetchDialogVisible.value = false
+  ElMessage.success(`已选用模型 ${row.id}，确认后点「${dialogMode.value === 'edit' ? '保存' : '添加'}」`)
+}
+
 async function handleQuickAdd(modelId) {
   // ★ 一步保存：复用弹窗里已填的 endpoint/api_key，直接添加，不再弹回表单二次提交
   if (!form.endpoint) {
@@ -441,20 +450,29 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <!-- 获取模型列表结果 -->
-    <el-dialog v-model="fetchDialogVisible" title="获取模型列表" width="500px" :show-close="true">
-      <div v-if="fetchError" style="color: #f56c6c; margin-bottom: 12px;">{{ fetchError }}</div>
-      <el-table v-if="fetchedModels.length > 0" :data="fetchedModels" max-height="400" size="small" stripe>
-        <el-table-column prop="id" label="模型ID" min-width="200" show-overflow-tooltip />
-        <el-table-column label="操作" width="80" align="center">
-          <template #default="{ row }">
-            <el-button size="small" type="primary" link @click="handleQuickAdd(row.id)">添加</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-      <div v-if="fetchedModels.length > 0" style="font-size: 11px; color: #909399; margin-top: 8px;">
-        点击「添加」直接用已填写的端点/API Key 保存该模型
-      </div>
+<!-- 获取模型列表结果 -->
+        <el-dialog v-model="fetchDialogVisible" title="获取模型列表" width="500px" :show-close="true">
+          <div v-if="fetchError" style="color: #f56c6c; margin-bottom: 12px;">{{ fetchError }}</div>
+          <el-table
+            v-if="fetchedModels.length > 0"
+            :data="fetchedModels"
+            max-height="400"
+            size="small"
+            stripe
+            highlight-current-row
+            @row-click="handlePickFetched"
+          >
+            <el-table-column prop="id" label="模型ID" min-width="200" show-overflow-tooltip />
+            <el-table-column label="操作" width="110" align="center">
+              <template #default="{ row }">
+                <el-button size="small" type="primary" link @click.stop="handlePickFetched(row)">选用</el-button>
+                <el-button size="small" link @click.stop="handleQuickAdd(row.id)">添加</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div v-if="fetchedModels.length > 0" style="font-size: 11px; color: #909399; margin-top: 8px;">
+            点击「选用」或行本身：把该模型填入表单，确认后点「添加/保存」；「添加」直接用已填端点/密钥存为新模型
+          </div>
       <div v-else-if="!fetchError" style="text-align: center; padding: 40px; color: #909399;">
         未获取到模型或接口不支持
       </div>
