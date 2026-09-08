@@ -701,6 +701,28 @@ class TestModelsRouter:
         assert mock_cls.call_args_list[0].kwargs["verify"] is True
         assert mock_cls.call_args_list[1].kwargs["verify"] is False
 
+    # ── 裸域名端点：先补全 /v1/chat/completions 再推导 /models，避免请求到网站首页 ──
+    @patch("routers.models.httpx.AsyncClient")
+    def test_fetch_bare_host_derives_v1_models(self, mock_cls, client):
+        fake = self._fake_fetch_client(200, '{"data":[{"id":"m1"}]}')
+        mock_cls.return_value = fake
+        resp = client.post("/api/models/fetch", params={
+            "endpoint": "https://redumbrellacloudlink.himscp.top"})
+        assert resp.status_code == 200
+        got_url = fake.get.call_args.args[0]
+        assert got_url == "https://redumbrellacloudlink.himscp.top/v1/models", got_url
+
+    @patch("routers.models.httpx.AsyncClient")
+    def test_fetch_html_response_gives_actionable_error(self, mock_cls, client):
+        fake = self._fake_fetch_client(200, "<!doctype html><html><head><link rel='icon' href='/logo.png'></head></html>")
+        fake.get.return_value.headers = {"content-type": "text/html"}
+        mock_cls.return_value = fake
+        resp = client.post("/api/models/fetch", params={
+            "endpoint": "https://redumbrellacloudlink.himscp.top"})
+        assert resp.status_code == 200
+        assert "网页而不是 API" in resp.json()["error"]
+        assert "/v1/chat/completions" in resp.json()["error"]
+
 
 # ── Summary ──
 class TestSummaryRouter:

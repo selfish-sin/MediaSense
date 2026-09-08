@@ -254,6 +254,10 @@ async def fetch_available_models(key: str = None, endpoint: str = None, api_key:
         headers["Authorization"] = f"Bearer {auth_key}"
 
     try:
+        # ★ 端点先统一补全再推导 /models：用户手填一般是裸域名或 /v1，
+        #   必须先变成 /v1/chat/completions 才能得到正确的 /v1/models——
+        #   否则直接请求域名根路径会拿到网站首页 HTML（200 但非 JSON）
+        endpoint_url = _normalize_endpoint(endpoint_url)
         models_url = endpoint_url.replace('/chat/completions', '/models')
 
         # ★ 自签名证书自动放行：证书是服务器侧信任问题，不是用户操作错误。
@@ -268,6 +272,9 @@ async def fetch_available_models(key: str = None, endpoint: str = None, api_key:
                 data = json.loads(text)
             except (ValueError, TypeError):
                 logger.error(f"模型列表响应不是JSON: url={models_url} status=200 body={text[:200]}")
+                if 'text/html' in (resp.headers.get('content-type', '')) or text.lstrip().lower().startswith('<!doctype html'):
+                    return {"models": [], "error":
+                            f"端点返回的是网页而不是 API（{models_url}）：请填写完整的 API 端点，如 https://主机/v1/chat/completions"}
                 return {"models": [], "error": f"接口返回 200 但内容不是 JSON（{models_url}）：{text[:120] or '空响应'}"}
             models_list = data.get('data', []) if isinstance(data, dict) else []
             result = []
