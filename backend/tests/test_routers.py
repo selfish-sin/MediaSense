@@ -397,6 +397,19 @@ class TestModelsRouter:
         assert resp.status_code == 200
 
     @patch("routers.models.get_model_by_key")
+    @patch("routers.models.add_model", return_value=False)
+    def test_add_model_duplicate_key_message(self, mock_add, mock_get, client):
+        """重复 key 失败时直接指出冲突项与出路（已存在 → 提示编辑而非新增）"""
+        mock_get.return_value = {"key": "longcat-2-0", "name": "LongCat-2.0", "endpoint": "https://x.com"}
+        resp = client.post("/api/models", json={
+            "key": "longcat-2-0", "name": "LongCat-2.0", "endpoint": "https://api.example.com/v1"
+        })
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "longcat-2-0" in detail
+        assert "编辑" in detail
+
+    @patch("routers.models.get_model_by_key")
     @patch("routers.models.update_model", return_value=True)
     def test_update_model(self, mock_upd, mock_get, client):
         mock_get.return_value = {"key":"m1","name":"Test","endpoint":"https://x.com",

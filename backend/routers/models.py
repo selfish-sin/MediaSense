@@ -104,7 +104,13 @@ async def add_model_api(model: ModelConfigCreate):
         skip_ssl_verify=model.skip_ssl_verify,
     )
     if not success:
-        raise HTTPException(status_code=400, detail="添加模型失败（可能key已存在）")
+        # ★ 区分失败原因：重复 key 是高频场景，直接指出冲突项与出路（该编辑而非新增）
+        existing = get_model_by_key(model.key)
+        if existing:
+            raise HTTPException(status_code=400, detail=(
+                f"添加失败：key「{model.key}」已存在（模型「{existing['name']}」）。"
+                f"如需修改端点/密钥/引擎，请直接「编辑」该模型，或换个新 key 添加"))
+        raise HTTPException(status_code=400, detail="添加模型失败，请查看后端日志（backend.log）确认具体原因")
     return {"success": True, "message": f"模型 {model.key} 已添加"}
 
 
