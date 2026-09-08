@@ -3,6 +3,7 @@ YouTube Tool V2 - AI模型管理路由
 """
 import json
 import logging
+import os
 import ssl
 import time
 import httpx
@@ -298,4 +299,12 @@ async def fetch_available_models(key: str = None, endpoint: str = None, api_key:
         return {"models": [], "error": f"请求超时（{models_url}），请检查网络或代理"}
     except Exception as e:
         logger.error(f"获取模型列表失败: {e} url={models_url}", exc_info=True)
+        if isinstance(e, httpx.ConnectError):
+            # ★ 空消息 ConnectError 多为「代理隧道连不上目标」（httpcore 会吞掉底层 SSL/连接细节），
+            #   给出可行动提示而不是裸错误——最常见是 Clash 类代理未放行该域名或中转服务离线
+            proxy = (os.environ.get('HTTP_PROXY') or os.environ.get('HTTPS_PROXY')
+                     or os.environ.get('http_proxy') or os.environ.get('https_proxy') or '')
+            hint = (f"当前走代理 {proxy}，请确认代理已启动并放行该域名（或临时关闭代理直连重试）" if proxy
+                    else "未走代理，请检查网络连通性或中转服务是否在线")
+            return {"models": [], "error": f"网络/连接失败: 无法连接服务器——{hint}（{models_url}）"}
         return {"models": [], "error": f"网络/连接失败: {type(e).__name__} {e}（{models_url}）"}
