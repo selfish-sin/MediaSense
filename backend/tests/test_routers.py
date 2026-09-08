@@ -543,6 +543,42 @@ class TestModelsRouter:
         resp = client.post("/api/models/fetch", params={"endpoint": "https://x.com/v1/chat/completions"})
         assert resp.json()["models"] == [{"id": "m1", "name": "m1"}, {"id": "m2", "name": "m2"}]
 
+    @patch("routers.models.httpx.AsyncClient")
+    def test_fetch_edit_form_falls_back_to_saved_key(self, mock_cls, client):
+        # ★ 编辑表单按 key 获取：密钥留空必须回退 DB 原密钥（编辑态不回填密钥），
+        #   端点用表单值（可能刚改过）——空密钥直发会被服务端 401 Invalid token
+        cfg = {"key": "m1", "name": "M1", "api_key": "sk-saved", "auth_type": "bearer",
+               "endpoint": "https://saved.example.com/v1/chat/completions", "skip_ssl_verify": 0}
+        mock_cls.return_value = self._fake_fetch_client(200, '{"data":[{"id":"m1"}]}')
+        with patch("routers.models.get_model_by_key", return_value=cfg):
+            resp = client.post("/api/models/fetch", params={
+                "key": "m1", "endpoint": "https://changed.example.com/v1/chat/completions",
+                "api_key": ""})
+        assert resp.status_code == 200
+        assert resp.json()["models"] == [{"id": "m1", "name": "m1"}]
+        get_args = mock_cls.return_value.get.call_args
+        assert get_args.args[0] == "https://changed.example.com/v1/models"
+        assert get_args.kwargs["headers"]["Authorization"] == "Bearer sk-saved"
+
+    @patch("routers.models.httpx.AsyncClient")
+    def test_fetch_edit_form_prefers_typed_key(self, mock_cls, client):
+        # 表单里刚粘贴了新密钥 → 用表单密钥，不用 DB 旧密钥
+        cfg = {"key": "m1", "name": "M1", "api_key": "sk-old", "auth_type": "bearer",
+               "endpoint": "https://saved.example.com/v1/chat/completions", "skip_ssl_verify": 0}
+        mock_cls.return_value = self._fake_fetch_client(200, '{"data":[]}')
+        with patch("routers.models.get_model_by_key", return_value=cfg):
+            client.post("/api/models/fetch", params={
+                "key": "m1", "endpoint": "https://changed.example.com/v1/chat/completions",
+                "api_key": "sk-new"})
+        get_args = mock_cls.return_value.get.call_args
+        assert get_args.kwargs["headers"]["Authorization"] == "Bearer sk-new"
+
+    def test_fetch_unknown_key_404(self, client):
+        with patch("routers.models.get_model_by_key", return_value=None):
+            resp = client.post("/api/models/fetch", params={
+                "key": "nope", "endpoint": "https://x.com/v1/chat/completions"})
+        assert resp.status_code == 404
+
     @patch("routers.models.get_model_by_key")
     @patch("routers.models.update_model", return_value=True)
     def test_update_model_passes_engine(self, mock_upd, mock_get, client):

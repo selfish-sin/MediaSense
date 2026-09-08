@@ -236,25 +236,30 @@ async def _get_with_ssl_bypass(url: str, headers: dict, verify: bool, key: str =
 async def fetch_available_models(key: str = None, endpoint: str = None, api_key: str = None,
                                  skip_ssl_verify: bool = False):
     """从API获取可用模型列表（OpenAI兼容接口）
-    支持两种方式：
-    1. 传入已保存模型的 key
+    支持三种方式：
+    1. 传入已保存模型的 key（用 DB 完整配置拉取）
     2. 直接传入 endpoint + api_key（添加新模型时使用）
+    3. key + endpoint 同时传入（编辑表单获取）：端点用表单值（可能刚改过），
+       api_key 留空则回退 DB 原密钥
     """
-    if key:
-        model_cfg = get_model_by_key(key)
-        if not model_cfg:
-            raise HTTPException(status_code=404, detail=f"模型 {key} 不存在")
+    model_cfg = get_model_by_key(key) if key else None
+    if key and not model_cfg:
+        raise HTTPException(status_code=404, detail=f"模型 {key} 不存在")
+
+    if endpoint:
+        # ★ 编辑态密钥框刻意留空（防脱敏串回写污染），空密钥直发会被服务端
+        #   401 Invalid token——按 key 获取时必须回退 DB 原密钥
+        endpoint_url = endpoint
+        auth_key = (api_key or '').strip() or (model_cfg or {}).get('api_key', '')
+        auth_type = model_cfg.get('auth_type', 'bearer') if model_cfg else 'bearer'
+        verify = not skip_ssl_verify
+    elif model_cfg:
         endpoint_url = model_cfg['endpoint']
         auth_key = model_cfg.get('api_key', '')
         auth_type = model_cfg.get('auth_type', 'bearer')
         verify = _client_verify(model_cfg)
     else:
-        if not endpoint:
-            raise HTTPException(status_code=400, detail="缺少 endpoint 参数")
-        endpoint_url = endpoint
-        auth_key = api_key or ''
-        auth_type = 'bearer'
-        verify = not skip_ssl_verify
+        raise HTTPException(status_code=400, detail="缺少 endpoint 参数")
 
     headers = {}
     if auth_type == 'bearer' and auth_key:

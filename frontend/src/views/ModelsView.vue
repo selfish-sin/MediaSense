@@ -233,6 +233,9 @@ async function fetchModelsFromForm() {
       endpoint: form.endpoint,
       api_key: form.api_key,
       skip_ssl_verify: form.skip_ssl_verify,
+      // ★ 编辑态带上 key：编辑表单不回填密钥（防污染），后端在表单密钥留空时回退 DB 原密钥，
+      //   否则空密钥直发会被服务端 401 Invalid token
+      ...(dialogMode.value === 'edit' && editingKey.value ? { key: editingKey.value } : {}),
     })
     handleFetchResult(res)
   } catch (err) {
