@@ -1,18 +1,21 @@
 """
-YouTube Tool V2 - 导出路由 (Word/PDF/HTML/TXT)
+YouTube Tool V2 - 导出路由 (Word/PDF/HTML/TXT/批量ZIP)
 将AI结果导出为4种格式，文件保存在data/exports/目录
 """
 import asyncio
 import html
 import logging
 import re
+import uuid
+import zipfile
 from datetime import datetime
 from pathlib import Path
+from typing import List
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
-from models.schemas import ExportRequest
+from models.schemas import ExportRequest, BatchExportRequest
 from db.job_repo import get_job
 from config import DATA_DIR
 
@@ -293,4 +296,53 @@ async def export_txt(req: ExportRequest):
         path=str(output_path),
         filename=f"{safe_title}.txt",
         media_type="text/plain",
+    )
+
+
+@router.post("/batch")
+async def export_batch(req: BatchExportRequest):
+    """批量导出：把多个任务的结果文本打包成 ZIP（每个任务一个 .md 文件）
+
+    未完成 / 无结果文本的任务自动跳过（不报错，不是每个任务都有结果可导）；
+    全部无结果时返回 400。非倒序、按请求的 job_ids 顺序打包。
+    """
+    job_ids: List[str] = req.job_ids or []
+    if not job_ids:
+        raise HTTPException(status_code=400, detail="job_ids 不能为空")
+
+    contents: List[str] = []  # (唯一文件名, 文件内容)
+    for jid in job_ids:
+        job = get_job(jid)
+        if not job or not job.get('result_text'):
+            continue
+        title = job.get('title') or f"AI总结_{jid}"
+        content = f"# {title}\n\n{job['result_text'].strip()}\n"
+        contents.append((title, content))
+
+    if not contents:
+        raise HTTPException(status_code=400, detail="选中的任务都没有可导出的结果")
+
+    # 重名标题的文件名追加序号，保证 zip 内文件名唯一
+    seen: dict = {}
+    def _md_name(title: str) -> str:
+        safe = _sanitize_title(title)
+        if safe not in seen:
+            seen[safe] = 1
+            return f"{safe}.md"
+        seen[safe] += 1
+        return f"{safe}_{seen[safe]}.md"
+
+    zip_path = EXPORT_DIR / f"AI总结批量导出_{datetime.now():%Y%m%d-%H%M%S}_{uuid.uuid4().hex[:6]}.zip"
+
+    def _build_zip():
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for title, content in contents:
+                zf.writestr(_md_name(title), content)
+
+    await asyncio.to_thread(_build_zip)
+
+    return FileResponse(
+        path=str(zip_path),
+        filename=zip_path.name,
+        media_type="application/zip",
     )
