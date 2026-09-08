@@ -185,6 +185,46 @@ def _cuda_runtime_usable() -> bool:
     return bool(cublas and cudnn)
 
 
+def _resolve_device(requested: str = 'auto', progress_callback=None) -> Tuple[str, str, Optional[str]]:
+    """按用户选择解析 Whisper 运行设备（单点决策，单段/分片共用）。
+
+    返回 (device, compute_type, fallback_reason)
+    requested: 'auto' | 'cuda' | 'cpu'（前端「转录设备」选项，非法值按 auto）
+    - 'cpu'：跳过 CUDA 探测直接 CPU（打包 CPU-only 版本时无探测开销）
+    - 'cuda'：探测 CUDA 可用性；不可用则回退 CPU 并给可见原因，流程不中断
+    - 'auto'：原自动探测行为（有 GPU 且运行时 DLL 齐全才用 GPU）
+    WHISPER_FORCE_CPU 环境变量仍是最高优先级（历史逃生门）。
+    """
+    if os.environ.get('WHISPER_FORCE_CPU', '').lower() in ('1', 'true', 'yes'):
+        return 'cpu', 'int8', '环境变量 WHISPER_FORCE_CPU 强制 CPU'
+
+    requested = requested or 'auto'
+    if requested not in ('auto', 'cuda', 'cpu'):
+        logger.warning(f'未知转录设备选择 {requested!r}，按自动处理')
+        requested = 'auto'
+
+    if requested == 'cpu':
+        return 'cpu', 'int8', None
+
+    try:
+        import ctranslate2
+        cuda_usable = ctranslate2.get_cuda_device_count() > 0 and _cuda_runtime_usable()
+    except Exception:
+        cuda_usable = False
+
+    if requested == 'cuda':
+        if cuda_usable:
+            return 'cuda', 'int8_float16', None
+        reason = 'CUDA 不可用（无 GPU 或缺 cublas/cudnn 运行时 DLL），已自动回退 CPU'
+        logger.warning(reason)
+        if progress_callback:
+            progress_callback(5, f'⚠ {reason}')
+        return 'cpu', 'int8', reason
+
+    # auto：与原自动探测行为一致
+    return ('cuda', 'int8_float16', None) if cuda_usable else ('cpu', 'int8', None)
+
+
 def _transcribe_with_model(model, audio_path, language, progress_callback, speaker_diarization,
                            cancel_check=None):
     """用已加载的模型完成转录并写入 SRT/TXT，返回 (srt_path, txt_path, seg_count)。
@@ -365,6 +405,7 @@ def _transcribe_chunked(
     language: Optional[str],
     progress_callback,
     cancel_check=None,
+    device: str = 'auto',
 ) -> Tuple[str, str, int]:
     """长音频分片转录：切分 → 逐段转录（模型只加载一次）→ 时间戳合并
 
@@ -377,7 +418,7 @@ def _transcribe_chunked(
         # 切分失败或音频本身 ≤5 分钟 → 走正常单次流程
         return _transcribe_sync_single(
             audio_path, model_size, platform, speaker_diarization, language, progress_callback,
-            cancel_check=cancel_check,
+            cancel_check=cancel_check, device=device,
         )
 
     logger.info(f'长音频分片转录启动: {total_chunks} 段, 音频: {Path(audio_path).name}')
@@ -392,13 +433,8 @@ def _transcribe_chunked(
             local_only = True
 
     # ── 模型加载（一次） ──
-    try:
-        import ctranslate2
-        use_cuda = ctranslate2.get_cuda_device_count() > 0 and _cuda_runtime_usable()
-    except Exception:
-        use_cuda = False
-    if os.environ.get('WHISPER_FORCE_CPU', '').lower() in ('1', 'true', 'yes'):
-        use_cuda = False
+    resolved_device, compute_type, _fallback_reason = _resolve_device(device, progress_callback)
+    use_cuda = (resolved_device == 'cuda')
 
     device = 'cuda' if use_cuda else 'cpu'
     compute_type = 'int8_float16' if use_cuda else 'int8'
@@ -566,6 +602,7 @@ def _transcribe_sync(
     language: Optional[str] = None,
     progress_callback=None,
     cancel_check=None,
+    device: str = 'auto',
 ) -> Tuple[str, str, int]:
     """同步转录入口（自动检测长音频并分片）
 
@@ -579,11 +616,11 @@ def _transcribe_sync(
             progress_callback(1, f'检测到长音频（{_format_duration(duration)}），启用分片转录（每段5分钟）...')
         return _transcribe_chunked(
             audio_path, model_size, platform, speaker_diarization, language, progress_callback,
-            cancel_check=cancel_check,
+            cancel_check=cancel_check, device=device,
         )
     return _transcribe_sync_single(
         audio_path, model_size, platform, speaker_diarization, language, progress_callback,
-        cancel_check=cancel_check,
+        cancel_check=cancel_check, device=device,
     )
 
 
@@ -595,6 +632,7 @@ def _transcribe_sync_single(
     language: Optional[str] = None,
     progress_callback=None,
     cancel_check=None,
+    device: str = 'auto',
 ) -> Tuple[str, str, int]:
     """单段音频转录（原有逻辑，供分片流程复用）
     返回：(srt_path, txt_path, segment_count)
@@ -615,17 +653,11 @@ def _transcribe_sync_single(
             actual_size = 'base'
             local_only = True
 
-    # ★ 阶段2：加载模型（CUDA加速 / CPU降级）
-    # 自动检测 CUDA，有GPU就用GPU（快3-5倍），没有就CPU
-    try:
-        import ctranslate2
-        use_cuda = ctranslate2.get_cuda_device_count() > 0 and _cuda_runtime_usable()
-    except Exception:
-        use_cuda = False
-
-    # 允许通过环境变量强制走 CPU（跳过 GPU 探测，避免无CUDA环境先崩后降级）
-    if os.environ.get('WHISPER_FORCE_CPU', '').lower() in ('1', 'true', 'yes'):
-        use_cuda = False
+    # ★ 阶段2：加载模型（按用户选择解析设备，默认自动探测 CUDA）
+    # 自动检测 CUDA，有GPU就用GPU（快3-5倍），没有就CPU；
+    # 用户显式选 CPU 时跳过探测，选 CUDA 不可用则回退 CPU（见 _resolve_device）
+    resolved_device, compute_type, _fallback_reason = _resolve_device(device, progress_callback)
+    use_cuda = (resolved_device == 'cuda')
 
     device = 'cuda' if use_cuda else 'cpu'
     compute_type = 'int8_float16' if use_cuda else 'int8'
@@ -744,6 +776,7 @@ async def transcribe_audio(
     sio=None,
     job_id: str = '',
     cancel_check=None,
+    device: str = 'auto',
 ) -> Tuple[str, str, int]:
     """
     异步转录音频（在线程池中运行同步的faster-whisper）
@@ -827,6 +860,7 @@ async def transcribe_audio(
             language=language,
             progress_callback=progress_callback,
             cancel_check=cancel_check,
+            device=device,
         )
     finally:
         # 通知 reader 排空后退出；超时则 cancel 兜底

@@ -442,7 +442,8 @@ async def _handle_subtitle_file(input_file, job_dir, sio, job_id):
     return str(srt_path_obj), str(txt_path_obj), 0, title, '文本文件', {}
 
 
-async def _handle_media_file(input_file, job_dir, sio, job_id, model_size, speaker_diarization, language):
+async def _handle_media_file(input_file, job_dir, sio, job_id, model_size, speaker_diarization, language,
+                             whisper_device: str = 'auto'):
     """音视频文件上传：提取音频后 Whisper 转录。"""
     from services.downloader import handle_file_upload
     from services.transcriber import transcribe_audio
@@ -455,19 +456,20 @@ async def _handle_media_file(input_file, job_dir, sio, job_id, model_size, speak
         speaker_diarization=speaker_diarization, language=language,
         sio=sio, job_id=job_id,
         cancel_check=lambda: check_cancelled(job_id),
+        device=whisper_device,
     )
     return srt_path, txt_path, seg_count, title, platform, files
 
 
 async def _handle_url_input(input_url, job_dir, sio, job_id, options,
-                            model_size, speaker_diarization, language):
+                            model_size, speaker_diarization, language, whisper_device: str = 'auto'):
     """URL 输入：B站字幕（含内容抽查）→ 平台原文字幕 → 下载+Whisper 转录（含断点续传）。"""
     from socket_handlers import check_cancelled
+    from services.transcriber import transcribe_audio
     from services.downloader import (
         download_video, extract_bilibili_subtitles, verify_subtitle_against_audio,
         detect_platform, extract_youtube_subtitles,
     )
-    from services.transcriber import transcribe_audio
 
     platform, _ = detect_platform(input_url)
     title = ''
@@ -636,6 +638,7 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                 speaker_diarization=speaker_diarization, language=language,
                 sio=sio, job_id=job_id,
                 cancel_check=lambda: check_cancelled(job_id),
+                device=whisper_device,
             )
 
     return srt_path, txt_path, seg_count, title, platform, files
@@ -755,6 +758,11 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
         preview_before_summary = options.get('preview_before_summary', False)
         model_size = options.get('model_size', 'base')
         speaker_diarization = options.get('speaker_diarization', False)
+        # ★ 转录设备（auto/cuda/cpu）：用户可自选，默认自动探测
+        #   非法值按 auto 处理（单点校验，transcriber._resolve_device 再兜底）
+        whisper_device = options.get('whisper_device', 'auto')
+        if whisper_device not in ('auto', 'cuda', 'cpu'):
+            whisper_device = 'auto'
         # ★ 转录语言默认中文（Whisper自动识别会把中文误判为英文）
         #   前端 settingsStore 默认 'zh'，这里做兜底：None → 'zh'
         #   用户在前端选"自动检测"才会传 null，否则一律尊重用户选择
@@ -804,14 +812,14 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                 srt_path, txt_path, seg_count, title, platform, step_files = await _handle_media_file(
                     input_file, job_dir, sio, job_id,
                     model_size=model_size, speaker_diarization=speaker_diarization,
-                    language=language,
+                    language=language, whisper_device=whisper_device,
                 )
         else:
             # URL输入
             srt_path, txt_path, seg_count, title, platform, step_files = await _handle_url_input(
                 input_url, job_dir, sio, job_id, options,
                 model_size=model_size, speaker_diarization=speaker_diarization,
-                language=language,
+                language=language, whisper_device=whisper_device,
             )
         result['files'].update(step_files)
 
