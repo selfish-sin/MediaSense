@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { RefreshCcw, Eye, EyeOff } from 'lucide-vue-next'
 import { useModelStore } from '../stores/modelStore'
@@ -63,10 +63,20 @@ function deriveKey(id) {
 }
 
 function normalizeEndpoint(url) {
-  const u = (url || '').trim().replace(/\/+$/, '')
-  if (u && !u.includes('/chat/completions')) return `${u}/chat/completions`
-  return u
+  let u = (url || '').trim().replace(/\/+$/, '')
+  if (!u) return u
+  if (u.includes('/chat/completions')) return u
+  // ★ 一般不带 /v1：base 以 /v1 结尾先去掉，再补 /chat/completions
+  if (u.endsWith('/v1')) u = u.slice(0, -3)
+  return `${u}/chat/completions`
 }
+
+// ★ 端点自动补全预览：输入框下方实时显示保存后的完整格式
+const endpointPreview = computed(() => {
+  const raw = (form.endpoint || '').trim().replace(/\/+$/, '')
+  if (!raw) return ''
+  return normalizeEndpoint(raw)
+})
 
 function isDefaultModel(row) {
   return modelStore.defaultModel && row.key === modelStore.defaultModel
@@ -348,7 +358,12 @@ onMounted(() => {
           </el-input>
         </el-form-item>
         <el-form-item label="端点" required>
-          <el-input v-model="form.endpoint" placeholder="https://api.openai.com/v1/chat/completions" />
+          <el-input v-model="form.endpoint" placeholder="https://api.openai.com/chat/completions" />
+          <div v-if="endpointPreview" style="font-size: 11px; color: #909399; line-height: 1.5; margin-top: 4px;">
+            保存为：{{ endpointPreview }}<template v-if="endpointPreview !== (form.endpoint || '').trim()">
+              （已自动补全，一般不保留 /v1）
+            </template>
+          </div>
         </el-form-item>
         <el-form-item label="模型ID">
           <div style="display: flex; gap: 6px; align-items: center;">

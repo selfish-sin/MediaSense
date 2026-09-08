@@ -440,7 +440,8 @@ class TestModelsRouter:
         })
         assert resp.status_code == 200
         kwargs = mock_add.call_args.kwargs
-        assert kwargs["endpoint"] == "https://api.example.com/v1/chat/completions"
+        # ★ 补全契约：末尾 /v1 不保留（一般服务商兼容模式不带 v1）
+        assert kwargs["endpoint"] == "https://api.example.com/chat/completions"
 
     @patch("routers.models.add_model", return_value=True)
     def test_add_model_keeps_full_endpoint(self, mock_add, client):
