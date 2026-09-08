@@ -81,6 +81,12 @@ def init_db():
         )
     """)
 
+    # ★ 引擎名列（迁移：旧 model_configs 表没有 engine；空串=不参与「引擎-模型」显示）
+    try:
+        cursor.execute("ALTER TABLE model_configs ADD COLUMN engine TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # 字段已存在
+
     # Token统计表
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS token_usage (

@@ -53,7 +53,7 @@ def set_default_model(key: str) -> bool:
 def get_all_models() -> List[Dict[str, Any]]:
     """获取所有模型配置（本地工具，返回完整信息含 api_key）"""
     conn = get_connection()
-    rows = conn.execute("SELECT key, name, api_key, endpoint, model_id, auth_type, temperature, max_tokens, is_builtin FROM model_configs ORDER BY created_at ASC").fetchall()
+    rows = conn.execute("SELECT key, name, engine, api_key, endpoint, model_id, auth_type, temperature, max_tokens, is_builtin FROM model_configs ORDER BY created_at ASC").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -70,14 +70,15 @@ def get_model_by_key(key: str) -> Optional[Dict[str, Any]]:
 
 def add_model(key: str, name: str, endpoint: str, api_key: Optional[str] = None,
               model_id: Optional[str] = None, auth_type: str = "bearer",
-              temperature: float = 0.3, max_tokens: Optional[int] = None) -> bool:
+              temperature: float = 0.3, max_tokens: Optional[int] = None,
+              engine: str = "") -> bool:
     """添加新模型"""
     conn = get_connection()
     try:
         conn.execute("""
-            INSERT INTO model_configs (key, name, api_key, endpoint, model_id, auth_type, temperature, max_tokens)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (key, name, api_key, endpoint, model_id, auth_type, temperature, max_tokens))
+            INSERT INTO model_configs (key, name, engine, api_key, endpoint, model_id, auth_type, temperature, max_tokens)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (key, name, engine, api_key, endpoint, model_id, auth_type, temperature, max_tokens))
         conn.commit()
         logger.info(f"添加模型: {key} ({name})")
         return True

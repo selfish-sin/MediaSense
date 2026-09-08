@@ -88,6 +88,7 @@ class ModelConfigCreate(BaseModel):
     """添加/编辑模型请求体"""
     key: str = Field(..., description="模型唯一标识")
     name: str = Field(..., description="显示名称")
+    engine: Optional[str] = Field("", description="引擎名（如 阿里云）；空=无引擎，直接显示名称")
     api_key: Optional[str] = Field(None, description="API密钥")
     endpoint: str = Field(..., description="API端点URL")
     model_id: Optional[str] = Field(None, description="API调用时的模型名")
@@ -100,6 +101,7 @@ class ModelConfigResponse(BaseModel):
     """模型配置响应"""
     key: str
     name: str
+    engine: str = ""
     endpoint: str
     model_id: Optional[str] = None
     auth_type: str = "bearer"
@@ -154,6 +156,11 @@ class ExportRequest(BaseModel):
     job_id: str = Field(..., description="任务ID")
     format: str = Field(..., description="导出格式: docx/pdf/html/txt")
     include_title: bool = Field(True, description="是否包含标题")
+
+
+class BatchExportRequest(BaseModel):
+    """批量导出请求：打包多个任务的结果文本为 ZIP"""
+    job_ids: List[str] = Field(..., description="任务ID列表，无结果的任务将被跳过")
 
 
 class ExportResponse(BaseModel):

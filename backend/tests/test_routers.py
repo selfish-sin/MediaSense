@@ -451,6 +451,34 @@ class TestModelsRouter:
         kwargs = mock_add.call_args.kwargs
         assert kwargs["endpoint"] == "https://api.example.com/v1/chat/completions"
 
+    @patch("routers.models.add_model", return_value=True)
+    def test_add_model_with_engine(self, mock_add, client):
+        resp = client.post("/api/models", json={
+            "key": "ali-qw", "name": "qwen-plus", "engine": "阿里云",
+            "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        })
+        assert resp.status_code == 200
+        assert mock_add.call_args.kwargs["engine"] == "阿里云"
+
+    @patch("routers.models.add_model", return_value=True)
+    def test_add_model_engine_defaults_empty(self, mock_add, client):
+        resp = client.post("/api/models", json={
+            "key": "m1", "name": "Test", "endpoint": "https://api.example.com/v1"
+        })
+        assert resp.status_code == 200
+        assert mock_add.call_args.kwargs["engine"] == ""
+
+    @patch("routers.models.get_model_by_key")
+    @patch("routers.models.update_model", return_value=True)
+    def test_update_model_passes_engine(self, mock_upd, mock_get, client):
+        mock_get.return_value = {"key": "m1", "name": "Test", "endpoint": "https://x.com",
+            "auth_type": "bearer", "temperature": 0.3, "max_tokens": 4096, "model_id": "gpt-4"}
+        resp = client.put("/api/models/m1", json={
+            "name": "Updated", "endpoint": "https://x.com", "key": "m1", "engine": "OpenAI"
+        })
+        assert resp.status_code == 200
+        assert mock_upd.call_args.kwargs["engine"] == "OpenAI"
+
 
 # ── Summary ──
 class TestSummaryRouter:

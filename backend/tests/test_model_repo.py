@@ -40,6 +40,21 @@ class TestAddModel:
         assert m["temperature"] == 0.7
         assert m["max_tokens"] == 8192
 
+    def test_add_with_engine(self):
+        assert add_model("m3", "M3", "https://x.com", engine="阿里云")
+        m = get_model_by_key("m3")
+        assert m["engine"] == "阿里云"
+
+    def test_engine_default_empty(self):
+        assert add_model("m4", "M4", "https://x.com")
+        m = get_model_by_key("m4")
+        assert m["engine"] == ""
+
+    def test_engine_in_list(self):
+        add_model("m5", "M5", "https://x.com", engine="DeepSeek")
+        models = get_all_models()
+        assert any(m["engine"] == "DeepSeek" for m in models)
+
     def test_add_duplicate(self):
         add_model("m1", "M1", "https://a.com")
         assert add_model("m1", "M1", "https://a.com") is False
@@ -80,6 +95,11 @@ class TestUpdateModel:
         assert m["name"] == "Y"
         assert m["temperature"] == 0.9
         assert m["max_tokens"] == 2048
+
+    def test_update_engine(self):
+        add_model("m", "X", "https://x.com")
+        assert update_model("m", engine="硅基流动")
+        assert get_model_by_key("m")["engine"] == "硅基流动"
 
     def test_update_nonexistent(self):
         assert update_model("no", name="x") is False

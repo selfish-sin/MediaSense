@@ -13,6 +13,7 @@ models = [
     {
         "key": "glm-4.5-air",
         "name": "GLM 4.5 Air",
+        "engine": "智谱",
         "endpoint": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
         "model_id": "glm-4.5-air",
         "auth_type": "bearer",
@@ -23,6 +24,7 @@ models = [
     {
         "key": "deepseek-v4-flash",
         "name": "DeepSeek V4 Flash",
+        "engine": "DeepSeek",
         "endpoint": "https://api.deepseek.com/v1/chat/completions",
         "model_id": "deepseek-chat",
         "auth_type": "bearer",

@@ -54,6 +54,7 @@ async def add_model_api(model: ModelConfigCreate):
         auth_type=model.auth_type,
         temperature=model.temperature,
         max_tokens=model.max_tokens,
+        engine=(model.engine or ""),
     )
     if not success:
         raise HTTPException(status_code=400, detail="添加模型失败（可能key已存在）")
@@ -85,6 +86,7 @@ async def update_model_api(key: str, model: ModelConfigCreate):
         auth_type=model.auth_type,
         temperature=model.temperature,
         max_tokens=model.max_tokens,
+        engine=(model.engine or ""),
     )
     if not success:
         raise HTTPException(status_code=400, detail="更新失败，模型不存在")
