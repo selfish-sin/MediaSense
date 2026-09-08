@@ -31,22 +31,42 @@ from db.model_repo import get_default_model_key
 from socket_handlers import emit_log, emit_progress
 
 # ============ 日志配置 ============
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
+from datetime import date, datetime as _dt
 LOG_DIR = DATA_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 LOG_FILE = LOG_DIR / "backend.log"
 
-file_handler = RotatingFileHandler(
-    str(LOG_FILE), maxBytes=5*1024*1024, backupCount=3, encoding="utf-8"
+# ★ 按天轮转：backend.log 始终只含"当天"的日志，跨天自动归档为 backend.log.YYYY-MM-DD。
+#   /api/logs 只读 backend.log → 面板只会看到当天的日志，不再把多天前的旧条目
+#   混进当前滚动（“日志时间不对 / 412还在发生”类误判的根源就是旧条目无日期混入）。
+#   backupCount=0：归档文件不自动删除（用户要求关闭自动清除日志）；
+#   日志量级约几 MB/年，磁盘占用可忽略。
+if LOG_FILE.exists():
+    try:
+        _mtime = _dt.fromtimestamp(LOG_FILE.stat().st_mtime)
+    except OSError:
+        _mtime = None
+    if _mtime is not None and _mtime.date() != date.today():
+        try:
+            # 启动时把昨天（或更早）未轮转的主文件挪成归档名
+            LOG_FILE.rename(LOG_DIR / f'backend.log.{_mtime:%Y-%m-%d}')
+        except OSError as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f'日志归档重命名失败（旧进程可能仍占用）: {e}')
+
+file_handler = TimedRotatingFileHandler(
+    str(LOG_FILE), when='midnight', backupCount=0, encoding='utf-8'
 )
+file_handler.suffix = '%Y-%m-%d'
 file_handler.setFormatter(logging.Formatter(
-    '%(asctime)s [%(levelname)s] %(name)s: %(message)s', datefmt='%H:%M:%S'
+    '%(asctime)s [%(levelname)s] %(name)s: %(message)s', datefmt='%m-%d %H:%M:%S'
 ))
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    datefmt='%H:%M:%S',
+    datefmt='%m-%d %H:%M:%S',
     handlers=[logging.StreamHandler(), file_handler],
 )
 logger = logging.getLogger(__name__)
@@ -456,7 +476,7 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                 txt_path = sub_result['txt_path']
                 # 用B站API返回的视频标题（不是字幕内容第一行）
                 title = sub_result.get('title') or bvid
-                await emit_log(sio, job_id, f'✅ 字幕提取成功：{sub_result.get("message", "已获取字幕")}')
+                await emit_log(sio, job_id, f'📄 B站字幕已下载，待内容抽查确认（{sub_result.get("message", "")}）')
                 update_job(job_id, title=title, platform=platform, status='transcribing',
                            progress_msg='B站字幕已获取（跳过下载和转录）')
 
@@ -470,8 +490,11 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                         audio_path, _, _ = await download_video(
                             input_url, job_dir, only_audio=True, sio=sio, job_id=job_id
                         )
+                        # 采样转写语言必须跟随任务转录语言（默认中文）：
+                        # base 模型自动检测会把中文幻觉成英文导致相似度恒≈0，好字幕全被误杀
                         ok, _detail = await verify_subtitle_against_audio(
-                            txt_path, str(audio_path), sio=sio, job_id=job_id
+                            txt_path, str(audio_path), sio=sio, job_id=job_id,
+                            language=language,
                         )
                         if ok:
                             await emit_log(sio, job_id, f'✅ B站字幕内容抽查通过（{_detail}），使用该字幕')

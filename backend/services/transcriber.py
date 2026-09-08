@@ -688,11 +688,15 @@ def _transcribe_sync_single(
     return srt_path, txt_path, total
 
 
-def transcribe_audio_sample(audio_path: str, max_seconds: float = 90.0, language: Optional[str] = None) -> str:
+def transcribe_audio_sample(audio_path: str, max_seconds: float = 90.0, language: Optional[str] = None,
+                            initial_prompt: Optional[str] = None) -> str:
     """转写音频开头片段（用于字幕内容抽查校验），返回拼接后的纯文本。
 
     固定走 CPU int8 + 最轻的可用模型：抽查只关心“开头说了什么”，
     不依赖本机 CUDA 环境（避免 cublas 缺失把校验本身搞挂）。
+    language 必须与字幕语言一致（中文必须传 'zh'）：base 模型语言自动检测
+    会把清晰中文幻觉成英文（“什么是经方”→"What is the old?"），
+    导致相似度恒≈0 误杀所有中文字幕（见 2026-09-08 复盘）。
     失败抛异常，由调用方决定是否保留原字幕。
     """
     src = Path(audio_path)
@@ -714,8 +718,13 @@ def transcribe_audio_sample(audio_path: str, max_seconds: float = 90.0, language
             model_path, 'cpu', 'int8',
             local_only=local_only, cpu_threads=4, num_workers=1,
         )
+        kwargs = {}
+        if initial_prompt:
+            # 弹简体中文输出：Whisper 中文默认出繁体，与B站简体字幕比对时
+            # 会多损失一段相似度；给一句简中提示词同时锁定语言与字形
+            kwargs['initial_prompt'] = initial_prompt
         segs, _info = model.transcribe(
-            str(sample_wav), language=language, beam_size=1, vad_filter=False
+            str(sample_wav), language=language, beam_size=1, vad_filter=False, **kwargs
         )
         parts = [seg.text.strip() for seg in segs]
         return ' '.join(p for p in parts if p)

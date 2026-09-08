@@ -671,19 +671,23 @@ def _text_similarity(text_a: str, text_b: str) -> float:
 
 
 async def verify_subtitle_against_audio(txt_path, audio_path, sio=None, job_id: str = '',
-                                        max_seconds: float = 90.0, threshold: float = 0.3) -> Tuple[bool, str]:
+                                        max_seconds: float = 90.0, threshold: float = 0.3,
+                                        language: Optional[str] = None) -> Tuple[bool, str]:
     """校验字幕内容与音频开头是否一致（防 B站 返回旧/错误字幕）。
 
     用本地 Whisper 转写音频开头 max_seconds 秒，与字幕开头文本做相似度比对；
     字幕与音频是两个独立来源，内容对不上即说明字幕不是当前视频的。
+    language 必须跟随字幕语言（中文传 'zh'）：base 模型自动检测会把
+    中文语音幻觉成英文，相似度恒≈0，好字幕也会被误杀（2026-09-08 复盘）。
     返回 (是否保留字幕, 说明)。任何抽查异常都按“保留字幕”处理，
     不让校验本身拖垮任务（异常时宁可慢也不能出错误内容的前提另行兜底）。
     """
     try:
         from services.transcriber import transcribe_audio_sample
         sub_head = _subtitle_head_text(txt_path, max_seconds)
+        zh_prompt = '以下是简体中文。' if language == 'zh' else None
         wh_text = await asyncio.to_thread(
-            transcribe_audio_sample, str(audio_path), max_seconds, None
+            transcribe_audio_sample, str(audio_path), max_seconds, language, zh_prompt
         )
         ratio = _text_similarity(sub_head, wh_text)
         detail = f'相似度 {ratio:.2f}（字幕头 {len(sub_head)} 字 vs 音频转写 {len(wh_text)} 字）'
