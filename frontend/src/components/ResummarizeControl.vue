@@ -6,6 +6,7 @@
  */
 import { ref, watch } from 'vue'
 import { useModelStore } from '../stores/modelStore'
+import { modelDisplayName } from '../utils/modelDisplay'
 
 const props = defineProps({
   // 初始模型（通常是任务原模型 key，传空则落到默认模型）
@@ -49,7 +50,7 @@ function submit() {
       :disabled="disabled"
       placeholder="选择 AI 模型"
     >
-      <el-option v-for="m in modelStore.models" :key="m.key" :label="m.name" :value="m.key" />
+      <el-option v-for="m in modelStore.models" :key="m.key" :label="modelDisplayName(m)" :value="m.key" />
     </el-select>
     <el-button
       :type="buttonType"

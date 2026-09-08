@@ -26,7 +26,7 @@
           v-for="m in modelStore.models"
           :key="m.key"
           :value="m.key"
-          :label="m.name || m.key"
+          :label="modelDisplayName(m) || m.key"
         />
       </el-select>
       <span v-if="modelStore.loading" class="model-hint">模型加载中…</span>
@@ -182,6 +182,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatApi } from '../utils/api'
 import { useMarkdownListCache } from '../composables/useMarkdownRender'
 import { useModelStore } from '../stores/modelStore'
+import { modelDisplayName } from '../utils/modelDisplay'
 
 const props = defineProps({
   jobId: { type: String, required: true },

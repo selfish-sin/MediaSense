@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { RefreshCcw, Eye, EyeOff } from 'lucide-vue-next'
 import { useModelStore } from '../stores/modelStore'
 import { modelsApi } from '../utils/api'
+import { modelDisplayName } from '../utils/modelDisplay'
 
 const modelStore = useModelStore()
 
@@ -21,6 +22,7 @@ const fetchError = ref('')
 
 const form = reactive({
   key: '',
+  engine: '',
   name: '',
   api_key: '',
   endpoint: '',
@@ -30,17 +32,25 @@ const form = reactive({
   max_tokens: null,
 })
 
-// ★ 常见服务商快捷模板：点击预填端点/认证/模型ID，减少手填
+// ★ 常见引擎名（可下拉选，也可直接输入任意自定义引擎名）
+//   默认选中的引擎名随「快捷模板」自动带出，无需手填
+const ENGINE_OPTIONS = [
+  '阿里云', 'DeepSeek', 'OpenAI', '智谱', '硅基流动',
+  '本地', '月之暗面', '字节豆包', '百度千帆', '腾讯混元',
+]
+
+// ★ 常见服务商快捷模板：点击预填引擎/端点/认证/模型ID，减少手填
 const PROVIDER_PRESETS = [
-  { label: 'DeepSeek', endpoint: 'https://api.deepseek.com/v1/chat/completions', modelHint: 'deepseek-chat', auth: 'bearer' },
-  { label: '阿里云百炼', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', modelHint: 'qwen-plus', auth: 'bearer' },
-  { label: 'OpenAI', endpoint: 'https://api.openai.com/v1/chat/completions', modelHint: 'gpt-4o', auth: 'bearer' },
-  { label: '智谱 GLM', endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', modelHint: 'glm-4.5-air', auth: 'bearer' },
-  { label: '硅基流动', endpoint: 'https://api.siliconflow.cn/v1/chat/completions', modelHint: 'deepseek-ai/DeepSeek-V3', auth: 'bearer' },
-  { label: '本地 Ollama', endpoint: 'http://localhost:11434/v1/chat/completions', modelHint: 'llama3.1', auth: 'none' },
+  { label: 'DeepSeek', engine: 'DeepSeek', endpoint: 'https://api.deepseek.com/v1/chat/completions', modelHint: 'deepseek-chat', auth: 'bearer' },
+  { label: '阿里云百炼', engine: '阿里云', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', modelHint: 'qwen-plus', auth: 'bearer' },
+  { label: 'OpenAI', engine: 'OpenAI', endpoint: 'https://api.openai.com/v1/chat/completions', modelHint: 'gpt-4o', auth: 'bearer' },
+  { label: '智谱 GLM', engine: '智谱', endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', modelHint: 'glm-4.5-air', auth: 'bearer' },
+  { label: '硅基流动', engine: '硅基流动', endpoint: 'https://api.siliconflow.cn/v1/chat/completions', modelHint: 'deepseek-ai/DeepSeek-V3', auth: 'bearer' },
+  { label: '本地 Ollama', engine: '本地', endpoint: 'http://localhost:11434/v1/chat/completions', modelHint: 'llama3.1', auth: 'none' },
 ]
 
 function applyPreset(p) {
+  form.engine = p.engine
   form.endpoint = p.endpoint
   form.auth_type = p.auth
   form.model_id = p.modelHint
@@ -66,7 +76,7 @@ function openAddDialog() {
   dialogMode.value = 'add'
   showApiKey.value = false
   Object.assign(form, {
-    key: '', name: '', api_key: '', endpoint: '',
+    key: '', engine: '', name: '', api_key: '', endpoint: '',
     model_id: '', auth_type: 'bearer', temperature: 0.3, max_tokens: null,
   })
   dialogVisible.value = true
@@ -78,6 +88,7 @@ function openEditDialog(model) {
   showApiKey.value = false
   Object.assign(form, {
     key: model.key,
+    engine: model.engine || '',
     name: model.name,
     api_key: model.api_key || '',
     endpoint: model.endpoint,
@@ -262,7 +273,9 @@ onMounted(() => {
 
     <el-card class="app-card" shadow="never">
       <el-table :data="modelStore.models" v-loading="modelStore.loading" stripe style="width: 100%;">
-      <el-table-column prop="name" label="名称" width="160" show-overflow-tooltip />
+      <el-table-column label="名称" width="220" show-overflow-tooltip>
+        <template #default="{ row }">{{ modelDisplayName(row) }}</template>
+      </el-table-column>
       <el-table-column prop="endpoint" label="端点" min-width="260" show-overflow-tooltip />
       <el-table-column prop="model_id" label="模型ID" width="160" show-overflow-tooltip />
       <el-table-column prop="auth_type" label="认证" width="76" show-overflow-tooltip />
@@ -306,6 +319,22 @@ onMounted(() => {
         </el-form-item>
         <el-form-item label="Key" required>
           <el-input v-model="form.key" :disabled="dialogMode === 'edit'" placeholder="唯一标识，如 my-gpt4" />
+        </el-form-item>
+        <el-form-item label="引擎">
+          <el-select
+            v-model="form.engine"
+            filterable
+            allow-create
+            default-first-option
+            clearable
+            placeholder="选择常见引擎或直接输入，如 阿里云"
+            style="width: 100%;"
+          >
+            <el-option v-for="e in ENGINE_OPTIONS" :key="e" :label="e" :value="e" />
+          </el-select>
+          <div style="font-size: 11px; color: #909399; line-height: 1.5; margin-top: 4px;">
+            填写后显示为「{{ form.engine || '引擎' }}-{{ form.name || '模型名' }}」，如 阿里云-qwen-plus；留空则直接显示名称
+          </div>
         </el-form-item>
         <el-form-item label="名称" required>
           <el-input v-model="form.name" placeholder="显示名称" />

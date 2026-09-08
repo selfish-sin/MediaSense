@@ -9,6 +9,7 @@ import { useModelStore } from '../stores/modelStore'
 import { jobsApi, exportApi, tokenApi, resultApi } from '../utils/api'
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
 import { buildSamePromptPayload } from '../utils/jobActions'
+import { modelDisplayName } from '../utils/modelDisplay'
 import socket, {
   onProgress, onLog, onAiToken, onAiDone, onPreview, onAiThinking,
   continueSummary, cancelPreview, cancelJob,
@@ -930,7 +931,7 @@ function formatTokenTime(t) {
             <el-option
               v-for="m in modelStore.models"
               :key="m.key"
-              :label="m.name"
+              :label="modelDisplayName(m)"
               :value="m.key"
             />
           </el-select>
@@ -1031,7 +1032,7 @@ function formatTokenTime(t) {
                 <el-option
                   v-for="m in modelStore.models"
                   :key="m.key"
-                  :label="m.name"
+                  :label="modelDisplayName(m)"
                   :value="m.key"
                 />
               </el-select>
