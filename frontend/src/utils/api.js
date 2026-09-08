@@ -124,17 +124,19 @@ export const exportApi = {
   pdf: (jobId) => _downloadExport('/export/pdf', jobId, 'pdf'),
   html: (jobId) => _downloadExport('/export/html', jobId, 'html'),
   txt: (jobId) => _downloadExport('/export/txt', jobId, 'txt'),
+  // 批量导出：多个任务的结果打包为 ZIP
+  batch: (jobIds) => _downloadBlob('/export/batch', { job_ids: jobIds }),
 }
 
-// 导出专用：POST请求返回blob文件流，触发浏览器下载
-async function _downloadExport(endpoint, jobId, format) {
-  const resp = await api.post(endpoint, { job_id: jobId, format }, {
+// 导出专用：POST返回blob文件流，触发浏览器下载（文件名取自 content-disposition）
+async function _downloadBlob(endpoint, body) {
+  const resp = await api.post(endpoint, body, {
     responseType: 'blob',
-    timeout: 60000,
+    timeout: 120000,
   })
   // 从response header提取文件名
   const contentDisposition = resp.headers?.['content-disposition']
-  let filename = `result.${format}`
+  let filename = 'result.bin'
   if (contentDisposition) {
     const match = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/)
     if (match && match[1]) {
@@ -152,6 +154,10 @@ async function _downloadExport(endpoint, jobId, format) {
   link.click()
   window.URL.revokeObjectURL(url)
   return { success: true, filename }
+}
+
+async function _downloadExport(endpoint, jobId, format) {
+  return _downloadBlob(endpoint, { job_id: jobId, format })
 }
 
 // ============ 翻译 API ============

@@ -3,7 +3,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Eye, Trash2, Search } from 'lucide-vue-next'
-import { jobsApi } from '../utils/api'
+import { jobsApi, exportApi } from '../utils/api'
 import {
   ACTIVE_JOB_STATUSES,
   buildRerunRoute,
@@ -253,6 +253,21 @@ async function handleBatchCancel() {
   }
 }
 
+async function handleBatchExport() {
+  // 只导出已完成且有结果的任务；其余状态由后端兜底跳过，不会报错
+  const exportable = selectedJobs.value.filter(j => j.status === 'completed')
+  if (exportable.length === 0) {
+    ElMessage.warning('选中的任务中没有已完成且可导出结果的任务')
+    return
+  }
+  try {
+    const res = await exportApi.batch(exportable.map(j => j.id))
+    ElMessage.success(`已导出 ${exportable.length} 个任务的结果（${res.filename}）`)
+  } catch (err) {
+    ElMessage.error('导出失败: ' + err.message)
+  }
+}
+
 async function handleBatchDelete() {
   if (selectedJobs.value.length === 0) return
   const ids = selectedJobs.value.map(j => j.id)
@@ -343,6 +358,9 @@ onMounted(() => {
           批量取消（{{ selectedJobs.filter(j => activeStatuses.includes(j.status)).length }}）
         </el-button>
         <el-button size="small" type="danger" @click="handleBatchDelete">批量删除</el-button>
+        <el-button size="small" type="success" @click="handleBatchExport">
+          批量导出结果（{{ selectedJobs.filter(j => j.status === 'completed').length }}）
+        </el-button>
         <el-button size="small" link @click="selectedJobs = []">取消选择</el-button>
       </div>
 
