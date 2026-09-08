@@ -14,14 +14,20 @@ router = APIRouter()
 
 
 def _normalize_endpoint(endpoint: str) -> str:
-    """OpenAI 兼容端点补全：缺 /chat/completions 时自动补上（幂等）；
-    末尾 /v1 不保留（一般服务商兼容模式不带 /v1，如 api.deepseek.com/chat/completions）"""
+    """OpenAI 兼容端点补全：统一规范化为 /v1/chat/completions（幂等）。
+
+    用户手填的格式一般不带 /v1（如 api.deepseek.com/chat/completions），
+    自动补全时统一加回 /v1；已含 /v1/chat/completions 的完整端点原样保留。
+    """
     url = (endpoint or '').strip().rstrip('/')
-    if not url or '/chat/completions' in url:
+    if not url:
         return url
-    if url.endswith('/v1'):
-        url = url[:-3]
-    return url + '/chat/completions'
+    if '/chat/completions' in url:
+        if '/v1/chat/completions' in url:
+            return url
+        return url.replace('/chat/completions', '/v1/chat/completions')
+    url = url[:-3] if url.endswith('/v1') else url
+    return url + '/v1/chat/completions'
 
 
 @router.get("")

@@ -65,10 +65,15 @@ function deriveKey(id) {
 function normalizeEndpoint(url) {
   let u = (url || '').trim().replace(/\/+$/, '')
   if (!u) return u
-  if (u.includes('/chat/completions')) return u
-  // ★ 一般不带 /v1：base 以 /v1 结尾先去掉，再补 /chat/completions
-  if (u.endsWith('/v1')) u = u.slice(0, -3)
-  return `${u}/chat/completions`
+  if (u.includes('/chat/completions')) {
+    // 已是 /v1/chat/completions 原样；否则自动补 /v1（用户输入的格式一般不带 v1）
+    return u.includes('/v1/chat/completions')
+      ? u
+      : u.replace(/\/chat\/completions$/, '/v1/chat/completions')
+  }
+  // 末尾恰是 /v1 先去掉，统一补 /v1/chat/completions
+  u = u.replace(/\/v1$/, '')
+  return `${u}/v1/chat/completions`
 }
 
 // ★ 端点自动补全预览：输入框下方实时显示保存后的完整格式
@@ -361,7 +366,7 @@ onMounted(() => {
           <el-input v-model="form.endpoint" placeholder="https://api.openai.com/chat/completions" />
           <div v-if="endpointPreview" style="font-size: 11px; color: #909399; line-height: 1.5; margin-top: 4px;">
             保存为：{{ endpointPreview }}<template v-if="endpointPreview !== (form.endpoint || '').trim()">
-              （已自动补全，一般不保留 /v1）
+              （已自动补全，统一带 /v1）
             </template>
           </div>
         </el-form-item>

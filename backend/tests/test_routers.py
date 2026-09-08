@@ -440,8 +440,25 @@ class TestModelsRouter:
         })
         assert resp.status_code == 200
         kwargs = mock_add.call_args.kwargs
-        # ★ 补全契约：末尾 /v1 不保留（一般服务商兼容模式不带 v1）
-        assert kwargs["endpoint"] == "https://api.example.com/chat/completions"
+        # ★ 补全契约：统一补成 /v1/chat/completions（手填格式一般不带 v1，自动加回）
+        assert kwargs["endpoint"] == "https://api.example.com/v1/chat/completions"
+
+    @patch("routers.models.add_model", return_value=True)
+    def test_add_model_normalizes_bare_host_without_v1(self, mock_add, client):
+        resp = client.post("/api/models", json={
+            "key": "m1", "name": "Test", "endpoint": "https://api.example.com/chat/completions"
+        })
+        assert resp.status_code == 200
+        # 已含 /chat/completions 但没有 /v1 → 自动插入 /v1
+        assert mock_add.call_args.kwargs["endpoint"] == "https://api.example.com/v1/chat/completions"
+
+    @patch("routers.models.add_model", return_value=True)
+    def test_add_model_bare_host_gets_v1(self, mock_add, client):
+        resp = client.post("/api/models", json={
+            "key": "m1", "name": "Test", "endpoint": "https://api.example.com"
+        })
+        assert resp.status_code == 200
+        assert mock_add.call_args.kwargs["endpoint"] == "https://api.example.com/v1/chat/completions"
 
     @patch("routers.models.add_model", return_value=True)
     def test_add_model_keeps_full_endpoint(self, mock_add, client):
