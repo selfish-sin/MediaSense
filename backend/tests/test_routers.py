@@ -486,6 +486,50 @@ class TestModelsRouter:
         assert resp.status_code == 200
         assert mock_add.call_args.kwargs["engine"] == ""
 
+    # ── fetch_available_models 错误可读性契约 ──
+    def _fake_fetch_client(self, status, text):
+        resp = MagicMock()
+        resp.status_code = status
+        resp.text = text
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=resp)
+        # ★ async with 必须返回同一个 client，否则 get 返回裸协程
+        client.__aenter__.return_value = client
+        client.__aexit__.return_value = False
+        return client
+
+    @patch("routers.models.httpx.AsyncClient")
+    def test_fetch_200_not_json(self, mock_cls, client):
+        mock_cls.return_value = self._fake_fetch_client(200, "<html>网关错误页</html>")
+        resp = client.post("/api/models/fetch", params={"endpoint": "https://x.com/v1/chat/completions"})
+        data = resp.json()
+        assert "不是 JSON" in data["error"]
+        assert "x.com" in data["error"]
+
+    @patch("routers.models.httpx.AsyncClient")
+    def test_fetch_401_shows_server_reason(self, mock_cls, client):
+        mock_cls.return_value = self._fake_fetch_client(
+            401, '{"error":{"message":"Incorrect API key provided"}}')
+        resp = client.post("/api/models/fetch", params={
+            "endpoint": "https://x.com/v1/chat/completions", "api_key": "sk-test"})
+        assert "Incorrect API key" in resp.json()["error"]
+
+    @patch("routers.models.httpx.AsyncClient")
+    def test_fetch_timeout_message(self, mock_cls, client):
+        from httpx import TimeoutException
+        client_inst = self._fake_fetch_client(200, "")
+        client_inst.get = AsyncMock(side_effect=TimeoutException("timeout"))
+        client_inst.__aenter__.return_value = client_inst
+        mock_cls.return_value = client_inst
+        resp = client.post("/api/models/fetch", params={"endpoint": "https://x.com/v1/chat/completions"})
+        assert "请求超时" in resp.json()["error"]
+
+    @patch("routers.models.httpx.AsyncClient")
+    def test_fetch_ok_returns_models(self, mock_cls, client):
+        mock_cls.return_value = self._fake_fetch_client(200, '{"data":[{"id":"m1"},{"id":"m2"}]}')
+        resp = client.post("/api/models/fetch", params={"endpoint": "https://x.com/v1/chat/completions"})
+        assert resp.json()["models"] == [{"id": "m1", "name": "m1"}, {"id": "m2", "name": "m2"}]
+
     @patch("routers.models.get_model_by_key")
     @patch("routers.models.update_model", return_value=True)
     def test_update_model_passes_engine(self, mock_upd, mock_get, client):

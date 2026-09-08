@@ -1,6 +1,7 @@
 """
 YouTube Tool V2 - AI模型管理路由
 """
+import json
 import logging
 import time
 import httpx
@@ -11,6 +12,27 @@ from db.model_repo import get_all_models, get_model_by_key, add_model, update_mo
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _extract_api_error(text: str) -> str:
+    """从服务端响应里提取人类可读的拒绝原因（OpenAI 兼容错误结构），截断防刷屏"""
+    text = (text or '').strip()
+    if not text:
+        return '空响应'
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return text[:120]
+    err = data.get('error') if isinstance(data, dict) else None
+    if isinstance(err, dict):
+        for k in ('message', 'msg'):
+            if err.get(k):
+                return str(err[k])[:200]
+    if isinstance(data, dict):
+        for k in ('message', 'msg'):
+            if data.get(k):
+                return str(data[k])[:200]
+    return text[:120]
 
 
 def _normalize_endpoint(endpoint: str) -> str:
@@ -175,15 +197,24 @@ async def fetch_available_models(key: str = None, endpoint: str = None, api_key:
         models_url = endpoint_url.replace('/chat/completions', '/models')
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(models_url, headers=headers)
+            text = resp.text
             if resp.status_code == 200:
-                data = resp.json()
-                models_list = data.get('data', [])
+                try:
+                    data = json.loads(text)
+                except (ValueError, TypeError):
+                    logger.error(f"模型列表响应不是JSON: url={models_url} status=200 body={text[:200]}")
+                    return {"models": [], "error": f"接口返回 200 但内容不是 JSON（{models_url}）：{text[:120] or '空响应'}"}
+                models_list = data.get('data', []) if isinstance(data, dict) else []
                 result = []
                 for m in models_list:
                     mid = str(m.get("id", ""))
                     result.append({"id": mid, "name": mid})
                 return {"models": result}
-            return {"models": [], "error": f"获取失败: {resp.status_code}"}
+            reason = _extract_api_error(text)
+            return {"models": [], "error": f"获取失败: HTTP {resp.status_code}（{models_url}）：{reason}"}
+    except httpx.TimeoutException:
+        logger.error(f"获取模型列表超时: {models_url}")
+        return {"models": [], "error": f"请求超时（{models_url}），请检查网络或代理"}
     except Exception as e:
-        logger.error(f"获取模型列表失败: {e}", exc_info=True)
-        return {"models": [], "error": f"获取失败: {str(e)}"}
+        logger.error(f"获取模型列表失败: {e} url={models_url}", exc_info=True)
+        return {"models": [], "error": f"网络/连接失败: {type(e).__name__} {e}（{models_url}）"}
