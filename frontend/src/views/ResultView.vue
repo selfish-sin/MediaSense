@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, Search, Loader2, Plus, FileText, Cpu, RefreshCcw } from 'lucide-vue-next'
+import { ArrowLeft, Search, Loader2, ExternalLink, FileText, Cpu, RefreshCcw } from 'lucide-vue-next'
 import { jobsApi, exportApi, chatApi } from '../utils/api'
 import { useModelStore } from '../stores/modelStore'
 import { useRafMarkdown } from '../composables/useMarkdownRender'
@@ -369,62 +369,6 @@ function formatTime(time) {
   return new Date(time).toLocaleString()
 }
 
-// ============ 标签管理 ============
-const tagGenerating = ref(false)
-const tagEditing = ref(false)
-const tagInputValue = ref('')
-
-async function handleGenerateTags() {
-  if (!job.value) return
-  tagGenerating.value = true
-  try {
-    const res = await jobsApi.generateTags(job.value.id, job.value.model)
-    job.value.tags = res.data?.tags || res.tags || []
-    ElMessage.success(`AI 生成了 ${job.value.tags.length} 个标签`)
-  } catch (err) {
-    ElMessage.error(`标签生成失败: ${err.message}`)
-  } finally {
-    tagGenerating.value = false
-  }
-}
-
-function startEditTags() {
-  tagEditing.value = true
-}
-
-async function addTag() {
-  const val = tagInputValue.value.trim()
-  if (!val) return
-  const tags = [...(job.value.tags || []), val]
-  try {
-    await jobsApi.updateTags(job.value.id, tags)
-    job.value.tags = tags
-    tagInputValue.value = ''
-  } catch (err) {
-    ElMessage.error(`添加失败: ${err.message}`)
-  }
-}
-
-async function removeTag(tag) {
-  const tags = (job.value.tags || []).filter(t => t !== tag)
-  try {
-    await jobsApi.updateTags(job.value.id, tags)
-    job.value.tags = tags
-  } catch (err) {
-    ElMessage.error(`删除失败: ${err.message}`)
-  }
-}
-
-async function saveTags() {
-  tagEditing.value = false
-  const tags = job.value.tags || []
-  try {
-    await jobsApi.updateTags(job.value.id, tags)
-  } catch (err) {
-    ElMessage.error(`保存失败: ${err.message}`)
-  }
-}
-
 // ============ 任务状态动作 ============
 const taskAction = computed(() => getJobActionModel(job.value?.status))
 
@@ -642,42 +586,19 @@ async function copyTranscript() {
       </el-descriptions-item>
       <el-descriptions-item label="模型">{{ activeModel }}</el-descriptions-item>
       <el-descriptions-item label="创建时间">{{ formatTime(job.created_at) }}</el-descriptions-item>
-      <el-descriptions-item label="标签" :span="2">
-        <template v-if="tagEditing">
-          <div style="display: flex; flex-wrap: wrap; gap: 4px; align-items: center;">
-            <el-tag
-              v-for="t in (job.tags || [])"
-              :key="t"
-              size="small"
-              closable
-              @close="removeTag(t)"
-              style="margin: 2px;"
-            >{{ t }}</el-tag>
-            <el-input
-              v-model="tagInputValue"
-              size="small"
-              placeholder="输入新标签"
-              style="width: 100px;"
-              @keyup.enter="addTag"
-            />
-            <el-button size="small" @click="addTag" :icon="Plus">添加</el-button>
-            <el-button size="small" type="primary" @click="saveTags">完成</el-button>
-          </div>
-        </template>
-        <template v-else>
-          <el-tag v-for="t in (job.tags || [])" :key="t" size="small" style="margin-right: 4px;">{{ t }}</el-tag>
-          <span v-if="!job.tags?.length" style="color: var(--app-text-secondary);">无标签</span>
-          <el-button size="small" text type="primary" @click="startEditTags" style="margin-left: 4px;">编辑</el-button>
-          <el-button
-            size="small"
-            text
-            type="warning"
-            @click="handleGenerateTags"
-            :loading="tagGenerating"
-            :disabled="job?.status !== 'completed'"
-            style="margin-left: 4px;"
-          >AI 生成</el-button>
-        </template>
+      <el-descriptions-item label="链接" :span="2">
+        <el-link
+          v-if="job.input_url"
+          :href="job.input_url"
+          type="primary"
+          target="_blank"
+          :underline="false"
+          style="font-size: 13px;"
+        >
+          <span style="word-break: break-all;">{{ job.input_url }}</span>
+          <el-icon style="margin-left: 4px; vertical-align: -2px;"><ExternalLink /></el-icon>
+        </el-link>
+        <span v-else style="color: var(--app-text-secondary);">本地文件导入，无网页链接</span>
       </el-descriptions-item>
     </el-descriptions>
     </el-card>
