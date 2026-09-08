@@ -33,11 +33,11 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `backend/routers/jobs.py` | 任务核心域：上传/提交/列表/删除/清理/取消/重试/编辑结果 + 共享的 `normalize_url`/`extract_urls` | 改任务生命周期 API |
 | `backend/routers/jobs_ai.py` | AI 域：重新总结/总结历史/标签/思维导图 | 改 AI 重跑相关端点 |
 | `backend/routers/jobs_batch.py` | 批量域：批量提交/批量状态/转录全文搜索 | 改批量提交或跨任务搜索 |
-| `backend/routers/` | 其余 API 路由（models/summary/export/translate/bilibili/download/templates/chat/search/storage cleanup） | 加/改其他 HTTP API |
+| `backend/routers/` | 其余 API 路由（models/summary/export/translate/bilibili/download/templates/chat/search/storage cleanup；export 含单任务 4 格式与 `/export/batch` 批量 ZIP） | 加/改其他 HTTP API |
 | `backend/socket_handlers.py` | 实时日志和进度事件 | 改前端实时反馈 |
 | `backend/scripts/cleanup_storage.py` | staged/orphan/export/media 清理 | 改清理策略；删除必须显式确认 |
 | `backend/verify.py` | 一键验证：backend pytest + frontend vitest + vite build | 改完代码做全量验证，或想快速回归 |
-| `frontend/src/utils/` | api 封装（axios 拦截器/错误归一化）、jobActions、clipboard/recipes/errorNotice 等工具 | 改 HTTP 调用或共享工具行为 |
+| `frontend/src/utils/` | api 封装（axios 拦截器/错误归一化）、jobActions、modelDisplay（引擎-模型显示名）、clipboard/recipes/errorNotice 等工具 | 改 HTTP 调用或共享工具行为 |
 | `frontend/src/views/HomeView.vue` | 核心工作台视图（业务逻辑已拆到 composables） | 改表单/提交/结果展示 |
 | `frontend/src/composables/` | `useBackendLogs`（日志增量拉取+全量回退）、`useBatchProgress`（Socket 推送+断线降级轮询）、`useJobRestore`（路由参数回填） | 改日志面板、批量进度或任务恢复逻辑 |
 | `frontend/`、`static/` | 页面和同源静态资源 | 改 UI |
@@ -78,3 +78,4 @@ python main.py
 - 冲刺复盘审查修复（2026-09-07，无 task，4 提交）：①系统日志面板增量失效——`/api/logs` 尾部回读改造时 `total` 硬编码 0，前端 `delta=total-lastTotal` 恒 0 致自动轮询永不显示（前端测试全 mock 非零 total 未拦截，教训：mock 必须覆盖空值/缺省契约形态）；契约重构为前端以旧窗口末行为锚点做尾部同步，后端不再返回 `total`；②`_read_log_tail` 仅在回读起点落在文件中间时丢不完整首行（文件 ≤256KB 时不再误丢完整首行）；③Whisper 模型缓存加 LRU 淘汰（上限 2，4 档尺寸 × GPU/CPU 降级双份会常驻多个大模型）；④哨兵拦截异常文案去掉脆弱的 `strip('[]')` 直接透传完整哨兵串；⑤删除 converter_router 墓碑注释。
 - v1.1.0 已发布（2026-09-07，无 task）：GitHub Release `v1.1.0`（tag 指向 48036ab，v1.0.0 以来 78 commits），安装包 137.6MB CPU-only（CUDA DLL 裁剪，v1.0.0 为 629MB）。构建坑点：①`build_installer.py` 的 `run()` 曾因 cwd 参数冲突必崩（已修，`kw.setdefault`）；②Inno Setup 6.7.3 装在用户目录 `C:\Users\21886\AppData\Local\Programs\Inno Setup 6\`，不在脚本搜索路径，构建前需把它注入 PATH；③PyInstaller 装在 `backend/venv`（6.22.2），须用 venv python 运行 `build_installer.py`。
 - 批量字幕三连修复（2026-09-08，无 task，2 提交 `ee446a4`/`a81a586`，pytest 401 全绿）：①字幕内容抽查采样语言跟随任务转录语言（默认中文）+ 中文简体提示词——此前采样用语言自动检测把清晰中文幻觉成英文（"什么是经方"→"What is the old?"），相似度恒≈0 致好字幕全被误杀、批量退化成整段 Whisper（实测 0.02→0.846，错字幕仍≈0 被丢）；②日志按天轮转（`backend.log` 只含当天、跨天归档 `backend.log.YYYY-MM-DD`、归档不自动删）+ 时间戳带日期——`/api/logs` 面板不再混入 7 月以来无日期的旧条目（"412 还在发生/日志时间不对"误判的根源，旧 412 实为 08-26 修复前旧日志）；③批量任务严格串行：`jobs_batch.batch_submit` 只 spawn 一个编排任务 `_run_batch_sequential` 逐个子任务 await 完成再启动下一个（"任务序列，一次只跑一个"），防批量齐射触发 B站 风控降级。
+- 模型引擎命名 + 历史批量导出（2026-09-08，无 task，5 提交，pytest 413 全绿、vite build 通过）：①`model_configs` 加 `engine` 列（迁移 `ALTER TABLE ... DEFAULT ''`，旧行回填空串），`add_model`/`get_all_models`/schema/router 贯通；模型页「名称」列显示 `引擎-名称`（`frontend/src/utils/modelDisplay.js` 的 `modelDisplayName`），表单引擎用 el-select `allow-create`（常见引擎候选 + 任意自由输入，不加「自定义」特殊选项/默认值），6 个快捷模板自动带出引擎，HomeView/ResummarizeControl/ChatPanel 下拉统一同显示（存储/传输仍用 `key`）；②新端点 `POST /api/export/batch`（body `{job_ids:[]}`，`routers/export.py`）：逐任务 `get_job` 取 `result_text`（无结果/不存在自动跳过，全空 400），每任务一个 `.md`（`# 标题` + 全文），重名标题文件名加序号，ZIP 落 `EXPORT_DIR`（storage_cleanup 7 天 TTL 覆盖）；历史页批量操作栏加「批量导出结果」按钮（只导出 completed，按钮上显示可导出数量），前端 `exportApi.batch` 复用 blob 下载 helper（api.js 抽出通用 `_downloadBlob`）。
