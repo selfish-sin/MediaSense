@@ -635,6 +635,72 @@ class TestModelsRouter:
         assert resp.status_code == 200
         assert mock_cls.call_args.kwargs["verify"] is True
 
+    # ── 自签名证书自动放行（CERTIFICATE_VERIFY_FAILED → verify=False 重试一次） ──
+    def _fake_fetch_client_seq(self, sequence):
+        client = AsyncMock()
+        client.get = AsyncMock(side_effect=sequence)
+        client.__aenter__.return_value = client
+        client.__aexit__.return_value = False
+        return client
+
+    def _cert_error(self):
+        return Exception("SSL: CERTIFICATE_VERIFY_FAILED certificate verify failed: self-signed")
+
+    @patch("routers.models.httpx.AsyncClient")
+    def test_fetch_auto_bypass_self_signed_cert(self, mock_cls, client):
+        """严格校验遇自签证书 → 自动关校验重试 → 返回模型并标 ssl_bypassed"""
+        ok_resp = MagicMock(status_code=200, text='{"data":[{"id":"m1"},{"id":"m2"}]}')
+        mock_cls.return_value = self._fake_fetch_client_seq([self._cert_error(), ok_resp])
+        resp = client.post("/api/models/fetch", params={
+            "endpoint": "https://103.236.67.108/v1"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ssl_bypassed"] is True
+        assert data["models"] == [{"id": "m1", "name": "m1"}, {"id": "m2", "name": "m2"}]
+        calls = mock_cls.call_args_list
+        assert len(calls) == 2
+        assert calls[0].kwargs["verify"] is True
+        assert calls[1].kwargs["verify"] is False
+
+    @patch("routers.models.get_model_by_key")
+    @patch("routers.models.update_model", return_value=True)
+    @patch("routers.models.httpx.AsyncClient")
+    def test_fetch_key_mode_heals_ssl_flag(self, mock_cls, mock_upd, mock_get, client):
+        """按已存 key 拉取遇自签证书 → 重试成功同时把 skip_ssl_verify 写回 DB（后续调用放行）"""
+        mock_get.return_value = {"key": "relay", "name": "Relay", "endpoint": "https://103.236.67.108/v1",
+            "api_key": "sk-x", "auth_type": "bearer", "temperature": 0.3,
+            "max_tokens": 4096, "model_id": "longmao"}
+        ok_resp = MagicMock(status_code=200, text='{"data":[{"id":"longmao"}]}')
+        mock_cls.return_value = self._fake_fetch_client_seq([self._cert_error(), ok_resp])
+        resp = client.post("/api/models/fetch", params={"key": "relay"})
+        assert resp.status_code == 200
+        assert resp.json()["ssl_bypassed"] is True
+        mock_upd.assert_called_once_with(key="relay", skip_ssl_verify=True)
+
+    @patch("routers.models.get_model_by_key")
+    @patch("routers.models.update_model", return_value=True)
+    @patch("routers.models.httpx.AsyncClient")
+    def test_test_model_auto_bypass_self_signed(self, mock_cls, mock_upd, mock_get, client):
+        """测试连接遇自签证书 → 关校验重试成功 + 把 skip_ssl_verify 写回 DB"""
+        mock_get.return_value = {"key": "relay", "name": "Relay", "endpoint": "https://103.236.67.108/v1",
+            "api_key": "sk-x", "auth_type": "bearer", "temperature": 0.3,
+            "max_tokens": 4096, "model_id": "longmao"}
+        ok_resp = MagicMock(status_code=200)
+        ok_resp.json.return_value = {"choices": [{"message": {"content": "你好，我是 longmao。"}}]}
+        # test_model 用 client.post，fake 需配 post
+        client_inst = AsyncMock()
+        client_inst.post = AsyncMock(side_effect=[self._cert_error(), ok_resp])
+        client_inst.__aenter__.return_value = client_inst
+        client_inst.__aexit__.return_value = False
+        mock_cls.return_value = client_inst
+        resp = client.post("/api/models/test", json={"key": "relay"})
+        data = resp.json()
+        assert data["success"] is True
+        assert data["response"] == "你好，我是 longmao。"
+        mock_upd.assert_called_once_with(key="relay", skip_ssl_verify=True)
+        assert mock_cls.call_args_list[0].kwargs["verify"] is True
+        assert mock_cls.call_args_list[1].kwargs["verify"] is False
+
 
 # ── Summary ──
 class TestSummaryRouter:

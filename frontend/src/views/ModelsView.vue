@@ -248,6 +248,12 @@ function handleFetchResult(res) {
     fetchError.value = res.error
     ElMessage.warning(res.error)
   } else {
+    // ★ 自签名证书自动放行：后端已跳过校验并（按key拉取时）写回 DB——这里直接勾上「跳过SSL校验」，
+    //   添加流程保存时标记随之入库；编辑已存模型时后端已自愈，无需额外操作
+    if (res.ssl_bypassed) {
+      form.skip_ssl_verify = true
+      ElMessage.info('服务器证书为自签名证书，已自动跳过证书校验')
+    }
     fetchedModels.value = res.models || []
     if (fetchedModels.value.length > 0) {
       ElMessage.success(`获取到 ${fetchedModels.value.length} 个模型`)

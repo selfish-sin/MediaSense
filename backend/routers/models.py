@@ -3,6 +3,7 @@ YouTube Tool V2 - AI模型管理路由
 """
 import json
 import logging
+import ssl
 import time
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -33,6 +34,11 @@ def _extract_api_error(text: str) -> str:
             if data.get(k):
                 return str(data[k])[:200]
     return text[:120]
+
+
+def _is_ssl_cert_error(e: Exception) -> bool:
+    """自签名证书/证书信任失败（CERTIFICATE_VERIFY_FAILED）——服务器侧信任问题，非用户输入错误"""
+    return isinstance(e, ssl.SSLCertVerificationError) or 'CERTIFICATE_VERIFY_FAILED' in str(e)
 
 
 def _client_verify(model_cfg: dict) -> bool:
@@ -167,22 +173,56 @@ async def test_model(req: ModelTestRequest):
     }
 
     start_time = time.time()
-    try:
-        async with httpx.AsyncClient(timeout=30.0, verify=_client_verify(model_cfg)) as client:
-            resp = await client.post(model_cfg['endpoint'], headers=headers, json=payload)
-            latency_ms = int((time.time() - start_time) * 1000)
 
-            if resp.status_code == 200:
-                data = resp.json()
-                choices = data.get('choices') or []
-                content = choices[0].get('message', {}).get('content', '') if choices else ''
-                return ModelTestResponse(success=True, response=content, latency_ms=latency_ms)
-            else:
-                return ModelTestResponse(success=False, error=f"API返回 {resp.status_code}: {resp.text[:200]}",
-                                         latency_ms=latency_ms)
-    except Exception as e:
+    async def _do_post(verify: bool) -> ModelTestResponse:
+        async with httpx.AsyncClient(timeout=30.0, verify=verify) as client:
+            resp = await client.post(model_cfg['endpoint'], headers=headers, json=payload)
         latency_ms = int((time.time() - start_time) * 1000)
-        return ModelTestResponse(success=False, error=str(e), latency_ms=latency_ms)
+        if resp.status_code == 200:
+            data = resp.json()
+            choices = data.get('choices') or []
+            content = choices[0].get('message', {}).get('content', '') if choices else ''
+            return ModelTestResponse(success=True, response=content, latency_ms=latency_ms)
+        return ModelTestResponse(success=False,
+                                 error=f"API返回 {resp.status_code}: {resp.text[:200]}",
+                                 latency_ms=latency_ms)
+
+    try:
+        return await _do_post(_client_verify(model_cfg))
+    except Exception as e:
+        if not _is_ssl_cert_error(e):
+            latency_ms = int((time.time() - start_time) * 1000)
+            return ModelTestResponse(success=False, error=str(e), latency_ms=latency_ms)
+        # ★ 自签名证书自动放行：关校验重试一次；重试能出结果就持久化标记，
+        #   后续 AI 摘要/翻译/追问等调用同步放行，用户无需手动勾选
+        try:
+            result = await _do_post(False)
+        except Exception as e2:
+            latency_ms = int((time.time() - start_time) * 1000)
+            return ModelTestResponse(success=False, error=str(e2), latency_ms=latency_ms)
+        update_model(key=req.key, skip_ssl_verify=True)
+        logger.info(f"模型 {req.key} 端点自签名证书，已自动开启跳过 SSL 校验")
+        return result
+
+
+async def _get_with_ssl_bypass(url: str, headers: dict, verify: bool, key: str = None):
+    """GET 请求；严格校验遇自签名证书时自动关校验重试一次。
+
+    返回 (resp, ssl_bypassed)。ssl_bypassed=True 表示首次证书失败、关校验后成功，
+    按 key 拉取时自动把 skip_ssl_verify 写回 DB（后续测试/AI 调用一起放行）。
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0, verify=verify) as client:
+            return await client.get(url, headers=headers), False
+    except Exception as e:
+        if verify and _is_ssl_cert_error(e):
+            async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+                resp = await client.get(url, headers=headers)
+            if key:
+                update_model(key=key, skip_ssl_verify=True)
+                logger.info(f"模型 {key} 端点自签名证书，已自动开启跳过 SSL 校验")
+            return resp, True
+        raise
 
 
 @router.post("/fetch")
@@ -215,23 +255,31 @@ async def fetch_available_models(key: str = None, endpoint: str = None, api_key:
 
     try:
         models_url = endpoint_url.replace('/chat/completions', '/models')
-        async with httpx.AsyncClient(timeout=10.0, verify=verify) as client:
-            resp = await client.get(models_url, headers=headers)
-            text = resp.text
-            if resp.status_code == 200:
-                try:
-                    data = json.loads(text)
-                except (ValueError, TypeError):
-                    logger.error(f"模型列表响应不是JSON: url={models_url} status=200 body={text[:200]}")
-                    return {"models": [], "error": f"接口返回 200 但内容不是 JSON（{models_url}）：{text[:120] or '空响应'}"}
-                models_list = data.get('data', []) if isinstance(data, dict) else []
-                result = []
-                for m in models_list:
-                    mid = str(m.get("id", ""))
-                    result.append({"id": mid, "name": mid})
-                return {"models": result}
-            reason = _extract_api_error(text)
-            return {"models": [], "error": f"获取失败: HTTP {resp.status_code}（{models_url}）：{reason}"}
+
+        # ★ 自签名证书自动放行：证书是服务器侧信任问题，不是用户操作错误。
+        #   严格校验失败（CERTIFICATE_VERIFY_FAILED）自动关校验重试一次；
+        #   成功即返回 ssl_bypassed（前端自动勾选「跳过SSL校验」），
+        #   按已存 key 拉取时顺手把标记写回 DB，后续 AI 调用同样放行
+        resp, ssl_bypassed = await _get_with_ssl_bypass(models_url, headers, verify, key=key)
+
+        text = resp.text
+        if resp.status_code == 200:
+            try:
+                data = json.loads(text)
+            except (ValueError, TypeError):
+                logger.error(f"模型列表响应不是JSON: url={models_url} status=200 body={text[:200]}")
+                return {"models": [], "error": f"接口返回 200 但内容不是 JSON（{models_url}）：{text[:120] or '空响应'}"}
+            models_list = data.get('data', []) if isinstance(data, dict) else []
+            result = []
+            for m in models_list:
+                mid = str(m.get("id", ""))
+                result.append({"id": mid, "name": mid})
+            response = {"models": result}
+            if ssl_bypassed:
+                response["ssl_bypassed"] = True
+            return response
+        reason = _extract_api_error(text)
+        return {"models": [], "error": f"获取失败: HTTP {resp.status_code}（{models_url}）：{reason}"}
     except httpx.TimeoutException:
         logger.error(f"获取模型列表超时: {models_url}")
         return {"models": [], "error": f"请求超时（{models_url}），请检查网络或代理"}
