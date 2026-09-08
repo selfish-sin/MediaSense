@@ -35,6 +35,11 @@ def _extract_api_error(text: str) -> str:
     return text[:120]
 
 
+def _client_verify(model_cfg: dict) -> bool:
+    """模型配置勾选 skip_ssl_verify（自签名证书/IP 直连中转）时关闭 httpx 证书校验"""
+    return not bool((model_cfg or {}).get('skip_ssl_verify'))
+
+
 def _normalize_endpoint(endpoint: str) -> str:
     """OpenAI 兼容端点补全：统一规范化为 /v1/chat/completions（幂等）。
 
@@ -90,6 +95,7 @@ async def add_model_api(model: ModelConfigCreate):
         temperature=model.temperature,
         max_tokens=model.max_tokens,
         engine=(model.engine or ""),
+        skip_ssl_verify=model.skip_ssl_verify,
     )
     if not success:
         raise HTTPException(status_code=400, detail="添加模型失败（可能key已存在）")
@@ -128,6 +134,7 @@ async def update_model_api(key: str, model: ModelConfigCreate):
         temperature=model.temperature,
         max_tokens=model.max_tokens,
         engine=(model.engine or ""),
+        skip_ssl_verify=model.skip_ssl_verify,
     )
     if not success:
         raise HTTPException(status_code=400, detail="更新失败，模型不存在")
@@ -161,7 +168,7 @@ async def test_model(req: ModelTestRequest):
 
     start_time = time.time()
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=_client_verify(model_cfg)) as client:
             resp = await client.post(model_cfg['endpoint'], headers=headers, json=payload)
             latency_ms = int((time.time() - start_time) * 1000)
 
@@ -179,7 +186,8 @@ async def test_model(req: ModelTestRequest):
 
 
 @router.post("/fetch")
-async def fetch_available_models(key: str = None, endpoint: str = None, api_key: str = None):
+async def fetch_available_models(key: str = None, endpoint: str = None, api_key: str = None,
+                                 skip_ssl_verify: bool = False):
     """从API获取可用模型列表（OpenAI兼容接口）
     支持两种方式：
     1. 传入已保存模型的 key
@@ -192,12 +200,14 @@ async def fetch_available_models(key: str = None, endpoint: str = None, api_key:
         endpoint_url = model_cfg['endpoint']
         auth_key = model_cfg.get('api_key', '')
         auth_type = model_cfg.get('auth_type', 'bearer')
+        verify = _client_verify(model_cfg)
     else:
         if not endpoint:
             raise HTTPException(status_code=400, detail="缺少 endpoint 参数")
         endpoint_url = endpoint
         auth_key = api_key or ''
         auth_type = 'bearer'
+        verify = not skip_ssl_verify
 
     headers = {}
     if auth_type == 'bearer' and auth_key:
@@ -205,7 +215,7 @@ async def fetch_available_models(key: str = None, endpoint: str = None, api_key:
 
     try:
         models_url = endpoint_url.replace('/chat/completions', '/models')
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, verify=verify) as client:
             resp = await client.get(models_url, headers=headers)
             text = resp.text
             if resp.status_code == 200:

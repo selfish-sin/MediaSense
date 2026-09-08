@@ -590,6 +590,51 @@ class TestModelsRouter:
         # 合法 key 仍要脱敏，且不能因为没有 key_broken 而裸奔
         assert "sk-legit" not in data["good"]["api_key"]
 
+    # ── 跳过 SSL 证书校验（自签名证书/IP 直连中转） ──
+    @patch("routers.models.add_model", return_value=True)
+    def test_add_model_passes_skip_ssl_verify(self, mock_add, client):
+        resp = client.post("/api/models", json={
+            "key": "relay", "name": "Relay", "endpoint": "https://103.236.67.108/v1",
+            "skip_ssl_verify": True,
+        })
+        assert resp.status_code == 200
+        assert mock_add.call_args.kwargs["skip_ssl_verify"] is True
+
+    @patch("routers.models.add_model", return_value=True)
+    def test_add_model_skip_ssl_verify_defaults_false(self, mock_add, client):
+        resp = client.post("/api/models", json={
+            "key": "m1", "name": "Test", "endpoint": "https://api.example.com/v1"
+        })
+        assert resp.status_code == 200
+        assert mock_add.call_args.kwargs["skip_ssl_verify"] is False
+
+    @patch("routers.models.get_model_by_key")
+    @patch("routers.models.update_model", return_value=True)
+    def test_update_model_passes_skip_ssl_verify(self, mock_upd, mock_get, client):
+        mock_get.return_value = {"key": "m1", "name": "Test", "endpoint": "https://x.com",
+            "auth_type": "bearer", "temperature": 0.3, "max_tokens": 4096, "model_id": "gpt-4"}
+        resp = client.put("/api/models/m1", json={
+            "name": "Test", "endpoint": "https://x.com", "key": "m1", "skip_ssl_verify": True
+        })
+        assert resp.status_code == 200
+        assert mock_upd.call_args.kwargs["skip_ssl_verify"] is True
+
+    @patch("routers.models.httpx.AsyncClient")
+    def test_fetch_with_skip_ssl_verify_disables_verify(self, mock_cls, client):
+        mock_cls.return_value = self._fake_fetch_client(200, '{"data":[{"id":"m1"}]}')
+        resp = client.post("/api/models/fetch", params={
+            "endpoint": "https://103.236.67.108/v1", "skip_ssl_verify": True})
+        assert resp.status_code == 200
+        assert mock_cls.call_args.kwargs["verify"] is False
+
+    @patch("routers.models.httpx.AsyncClient")
+    def test_fetch_default_keeps_verify(self, mock_cls, client):
+        mock_cls.return_value = self._fake_fetch_client(200, '{"data":[{"id":"m1"}]}')
+        resp = client.post("/api/models/fetch", params={
+            "endpoint": "https://api.example.com/v1"})
+        assert resp.status_code == 200
+        assert mock_cls.call_args.kwargs["verify"] is True
+
 
 # ── Summary ──
 class TestSummaryRouter:

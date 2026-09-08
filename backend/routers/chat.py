@@ -443,7 +443,8 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
             if model_cfg.get("auth_type") != "none":
                 headers["Authorization"] = f"Bearer {model_cfg.get('api_key', '')}"
 
-            async with httpx.AsyncClient(timeout=HTTPX_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=HTTPX_TIMEOUT,
+                                     verify=not bool(model_cfg.get('skip_ssl_verify'))) as client:
                 async with client.stream("POST", endpoint, json=payload, headers=headers) as resp:
                     if resp.status_code != 200:
                         err = await resp.aread()

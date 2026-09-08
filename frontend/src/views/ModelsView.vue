@@ -30,6 +30,7 @@ const form = reactive({
   auth_type: 'bearer',
   temperature: 0.3,
   max_tokens: null,
+  skip_ssl_verify: false,
 })
 
 // ★ 常见引擎名（可下拉选，也可直接输入任意自定义引擎名）
@@ -93,6 +94,7 @@ function openAddDialog() {
   Object.assign(form, {
     key: '', engine: '', name: '', api_key: '', endpoint: '',
     model_id: '', auth_type: 'bearer', temperature: 0.3, max_tokens: null,
+    skip_ssl_verify: false,
   })
   dialogVisible.value = true
 }
@@ -111,6 +113,7 @@ function openEditDialog(model) {
     auth_type: model.auth_type,
     temperature: model.temperature,
     max_tokens: model.max_tokens,
+    skip_ssl_verify: !!(model.skip_ssl_verify || model.skip_ssl_verify === 1),
   })
   if (model.key_broken) {
     ElMessage.warning(`模型「${model.name}」的密钥已失效（被星号污染），请粘贴真实密钥后保存`)
@@ -226,7 +229,11 @@ async function fetchModelsFromForm() {
   fetchError.value = ''
   fetchDialogVisible.value = true
   try {
-    const res = await modelsApi.fetch({ endpoint: form.endpoint, api_key: form.api_key })
+    const res = await modelsApi.fetch({
+      endpoint: form.endpoint,
+      api_key: form.api_key,
+      skip_ssl_verify: form.skip_ssl_verify,
+    })
     handleFetchResult(res)
   } catch (err) {
     fetchError.value = err.message
@@ -383,6 +390,14 @@ onMounted(() => {
             保存为：{{ endpointPreview }}<template v-if="endpointPreview !== (form.endpoint || '').trim()">
               （已自动补全，统一带 /v1）
             </template>
+          </div>
+        </el-form-item>
+        <el-form-item label="证书校验">
+          <el-checkbox v-model="form.skip_ssl_verify" style="font-weight: normal;">
+            跳过 SSL 证书校验（自签名证书/IP 直连的中转端点时勾选）
+          </el-checkbox>
+          <div style="font-size: 11px; color: #909399; line-height: 1.5; margin-top: 4px;">
+            勾选后获取模型列表、测试连接与 AI 调用对该端点都跳过证书校验
           </div>
         </el-form-item>
         <el-form-item label="模型ID">

@@ -95,6 +95,7 @@ class ModelConfigCreate(BaseModel):
     auth_type: str = Field("bearer", description="认证类型: bearer/direct/none")
     temperature: float = Field(0.3, description="温度参数")
     max_tokens: Optional[int] = Field(None, description="最大token数（留空=自动）")
+    skip_ssl_verify: bool = Field(False, description="跳过SSL证书校验（自签名证书/IP直连的中转端点勾选）")
 
 
 class ModelConfigResponse(BaseModel):
@@ -107,6 +108,7 @@ class ModelConfigResponse(BaseModel):
     auth_type: str = "bearer"
     temperature: float = 0.3
     max_tokens: int = 4096
+    skip_ssl_verify: bool = False
     is_builtin: bool = False
     # api_key 不返回给前端（安全）
 

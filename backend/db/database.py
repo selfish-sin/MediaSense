@@ -77,6 +77,8 @@ def init_db():
             temperature REAL DEFAULT 0.3,
             max_tokens INTEGER DEFAULT 4096,
             is_builtin INTEGER DEFAULT 0,
+            engine TEXT DEFAULT '',
+            skip_ssl_verify INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -84,6 +86,12 @@ def init_db():
     # ★ 引擎名列（迁移：旧 model_configs 表没有 engine；空串=不参与「引擎-模型」显示）
     try:
         cursor.execute("ALTER TABLE model_configs ADD COLUMN engine TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # 字段已存在
+
+    # ★ 跳过 SSL 证书校验（自签名证书/IP 直连的中转端点需勾选，0=严格校验）
+    try:
+        cursor.execute("ALTER TABLE model_configs ADD COLUMN skip_ssl_verify INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass  # 字段已存在
 

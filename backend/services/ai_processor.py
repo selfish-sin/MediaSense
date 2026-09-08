@@ -48,6 +48,11 @@ def _build_headers(model_cfg: Dict[str, Any]) -> Dict[str, str]:
     return headers
 
 
+def _client_verify(model_cfg: Dict[str, Any]) -> bool:
+    """模型配置勾选 skip_ssl_verify（自签名证书/IP 直连中转）时关闭 httpx 证书校验"""
+    return not bool(model_cfg.get('skip_ssl_verify'))
+
+
 # ============ 核心 AI 调用 ============
 async def _call_ai(
     model_cfg: Dict[str, Any],
@@ -90,7 +95,7 @@ async def _call_ai(
             last_flush_time = time.monotonic()
             batch_flush_count = 0
 
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(timeout=timeout, verify=_client_verify(model_cfg)) as client:
                 async with client.stream("POST", model_cfg['endpoint'], headers=headers, json=payload) as resp:
                     resp.raise_for_status()
                     async for line in resp.aiter_lines():
@@ -440,7 +445,7 @@ async def translate_subtitles(
         }
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=60.0, verify=_client_verify(model_cfg)) as client:
                 resp = await client.post(model_cfg['endpoint'], headers=headers, json=payload)
                 resp.raise_for_status()
                 result = resp.json()
@@ -695,7 +700,7 @@ async def generate_mindmap(
         "max_tokens": 4096,
     }
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=120.0, verify=_client_verify(model_cfg)) as client:
             resp = await client.post(model_cfg['endpoint'], headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -739,7 +744,7 @@ async def generate_tags(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=_client_verify(model_cfg)) as client:
             resp = await client.post(model_cfg['endpoint'], headers=headers, json=payload)
             resp.raise_for_status()
             content = resp.json()['choices'][0]['message']['content']
