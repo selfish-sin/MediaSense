@@ -992,6 +992,15 @@ function formatTokenTime(t) {
               </el-select>
             </div>
             <div class="adv-field">
+              <div class="adv-field-label">转录设备</div>
+              <el-select v-model="settings.advancedOptions.whisper_device" class="adv-field-control">
+                <el-option label="自动（推荐）" value="auto" />
+                <el-option label="CUDA GPU" value="cuda" />
+                <el-option label="CPU" value="cpu" />
+              </el-select>
+              <p class="adv-field-hint">选 CUDA 不可用时自动回退 CPU</p>
+            </div>
+            <div class="adv-field">
               <div class="adv-field-label">转录语言</div>
               <el-select v-model="settings.advancedOptions.transcribe_language" class="adv-field-control">
                 <el-option label="中文（默认）" value="zh" />

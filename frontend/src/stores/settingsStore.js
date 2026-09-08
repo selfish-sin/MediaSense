@@ -68,6 +68,8 @@ export const useSettingsStore = defineStore('settings', () => {
     purpose: '学习笔记',
     speaker_diarization: false,
     model_size: 'medium',
+    // ★ 转录设备：auto=自动探测（有GPU用GPU）/ cuda=强制CUDA(不可用回退CPU) / cpu=强制CPU
+    whisper_device: 'auto',
     // ★ 默认中文：Whisper自动识别会把中文误判成英文，强制中文避免误识别
     transcribe_language: 'zh',
     force_transcribe: false,
