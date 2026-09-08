@@ -541,6 +541,55 @@ class TestModelsRouter:
         assert resp.status_code == 200
         assert mock_upd.call_args.kwargs["engine"] == "OpenAI"
 
+    # ── 防星号污染契约 ──
+    @patch("routers.models.get_model_by_key")
+    @patch("routers.models.update_model", return_value=True)
+    def test_update_model_masked_key_keeps_existing(self, mock_upd, mock_get, client):
+        """携带脱敏星号串（前端回写）保存时，必须保留 DB 原 key，不得覆盖"""
+        real_key = "sk-REAL-SECRET-VALUE-1234"
+        mock_get.return_value = {"key": "m1", "name": "Test", "endpoint": "https://x.com",
+            "api_key": real_key, "auth_type": "bearer", "temperature": 0.3,
+            "max_tokens": 4096, "model_id": "gpt-4"}
+        resp = client.put("/api/models/m1", json={
+            "name": "Test", "endpoint": "https://x.com", "key": "m1",
+            "api_key": "sk-RE****-1234",
+        })
+        assert resp.status_code == 200
+        assert mock_upd.call_args.kwargs["api_key"] == real_key
+
+    @patch("routers.models.get_model_by_key")
+    @patch("routers.models.update_model", return_value=True)
+    def test_update_model_empty_key_keeps_existing(self, mock_upd, mock_get, client):
+        """编辑态留空 api_key（不修改）时，同样保留 DB 原 key"""
+        real_key = "sk-REAL-SECRET-VALUE-1234"
+        mock_get.return_value = {"key": "m1", "name": "Test", "endpoint": "https://x.com",
+            "api_key": real_key, "auth_type": "bearer", "temperature": 0.3,
+            "max_tokens": 4096, "model_id": "gpt-4"}
+        resp = client.put("/api/models/m1", json={
+            "name": "Updated", "endpoint": "https://x.com", "key": "m1", "api_key": ""
+        })
+        assert resp.status_code == 200
+        assert mock_upd.call_args.kwargs["api_key"] == real_key
+
+    @patch("routers.models.get_all_models")
+    @patch("routers.models.get_default_model_key", return_value="m1")
+    def test_list_models_marks_only_polluted_key_broken(self, mock_default, mock_all, client):
+        """污染的 key（DB 存的脱敏串）标记 key_broken=True；合法 key 脱敏后不得误标"""
+        mock_all.return_value = [
+            {"key": "bad", "name": "Bad", "api_key": "sk-e****eb56",
+             "endpoint": "https://x.com", "model_id": "", "auth_type": "bearer",
+             "temperature": 0.3, "max_tokens": 4096, "is_builtin": 0, "engine": ""},
+            {"key": "good", "name": "Good", "api_key": "sk-legit-secret-value-5678",
+             "endpoint": "https://y.com", "model_id": "", "auth_type": "bearer",
+             "temperature": 0.3, "max_tokens": 4096, "is_builtin": 0, "engine": ""},
+        ]
+        resp = client.get("/api/models")
+        data = {m["key"]: m for m in resp.json()["models"]}
+        assert data["bad"]["key_broken"] is True
+        assert data["good"]["key_broken"] is False
+        # 合法 key 仍要脱敏，且不能因为没有 key_broken 而裸奔
+        assert "sk-legit" not in data["good"]["api_key"]
+
 
 # ── Summary ──
 class TestSummaryRouter:

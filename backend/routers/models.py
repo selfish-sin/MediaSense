@@ -57,8 +57,12 @@ async def list_models():
     """获取所有模型配置"""
     models = get_all_models()
     for m in models:
-        if m.get('api_key') and len(m['api_key']) > 8:
-            m['api_key'] = m['api_key'][:4] + '****' + m['api_key'][-4:]
+        raw_key = m.get('api_key')
+        # ★ 密钥被星号污染标记：必须在脱敏前用原始值判断——历史 bug 曾把脱敏串存进 DB，
+        #   含 **** 的 key 必然失效，前端据此提示用户重新粘贴真实密钥
+        m['key_broken'] = bool(raw_key) and '****' in raw_key
+        if raw_key and len(raw_key) > 8:
+            m['api_key'] = raw_key[:4] + '****' + raw_key[-4:]
     return {"models": models, "default": get_default_model_key()}
 
 
@@ -108,10 +112,16 @@ async def update_model_api(key: str, model: ModelConfigCreate):
     if not existing:
         raise HTTPException(status_code=404, detail="模型不存在")
 
+    # ★ 防星号污染：前端编辑态 api_key 留空或含脱敏星号（****）都表示"不修改"，
+    #   必须保留 DB 原 key——否则脱敏串会被当成真 key 存回，导致该模型全部请求 401
+    new_api_key = model.api_key
+    if not new_api_key or '****' in new_api_key:
+        new_api_key = existing.get('api_key', '')
+
     success = update_model(
         key=key,
         name=model.name,
-        api_key=model.api_key if model.api_key is not None else existing.get('api_key', ''),
+        api_key=new_api_key,
         endpoint=_normalize_endpoint(model.endpoint),
         model_id=model.model_id,
         auth_type=model.auth_type,

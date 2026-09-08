@@ -105,13 +105,16 @@ function openEditDialog(model) {
     key: model.key,
     engine: model.engine || '',
     name: model.name,
-    api_key: model.api_key || '',
+    api_key: '',  // ★ 编辑态不预填密钥：留空 = 不修改（防止脱敏星号回写覆盖真 key）
     endpoint: model.endpoint,
     model_id: model.model_id,
     auth_type: model.auth_type,
     temperature: model.temperature,
     max_tokens: model.max_tokens,
   })
+  if (model.key_broken) {
+    ElMessage.warning(`模型「${model.name}」的密钥已失效（被星号污染），请粘贴真实密钥后保存`)
+  }
   dialogVisible.value = true
 }
 
@@ -288,8 +291,13 @@ onMounted(() => {
 
     <el-card class="app-card" shadow="never">
       <el-table :data="modelStore.models" v-loading="modelStore.loading" stripe style="width: 100%;">
-      <el-table-column label="名称" width="220" show-overflow-tooltip>
-        <template #default="{ row }">{{ modelDisplayName(row) }}</template>
+      <el-table-column label="名称" width="260" show-overflow-tooltip>
+        <template #default="{ row }">
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <span>{{ modelDisplayName(row) }}</span>
+            <el-tag v-if="row.key_broken" type="danger" size="small" effect="plain">密钥无效</el-tag>
+          </div>
+        </template>
       </el-table-column>
       <el-table-column prop="endpoint" label="端点" min-width="260" show-overflow-tooltip />
       <el-table-column prop="model_id" label="模型ID" width="160" show-overflow-tooltip />
@@ -355,12 +363,19 @@ onMounted(() => {
           <el-input v-model="form.name" placeholder="显示名称" />
         </el-form-item>
         <el-form-item label="API Key">
-          <el-input v-model="form.api_key" :type="showApiKey ? 'text' : 'password'" placeholder="API密钥">
+          <el-input
+            v-model="form.api_key"
+            :type="showApiKey ? 'text' : 'password'"
+            :placeholder="dialogMode === 'edit' ? '留空 = 保持原密钥' : 'API密钥'"
+          >
             <template #suffix>
               <el-icon v-if="!showApiKey" style="cursor: pointer;" @click="showApiKey = true"><Eye /></el-icon>
               <el-icon v-else style="cursor: pointer;" @click="showApiKey = false"><EyeOff /></el-icon>
             </template>
           </el-input>
+          <div v-if="dialogMode === 'edit'" style="font-size: 11px; color: #909399; line-height: 1.5; margin-top: 4px;">
+            编辑时留空表示不修改原密钥；含星号的密钥无效，需重新粘贴真实密钥
+          </div>
         </el-form-item>
         <el-form-item label="端点" required>
           <el-input v-model="form.endpoint" placeholder="https://api.openai.com/chat/completions" />
