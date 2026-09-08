@@ -28,7 +28,7 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `backend/config.py` | 数据目录、7001、Whisper 模型和清理 TTL | 改路径、端口或默认值 |
 | `backend/db/` | SQLite 初始化、job、模型、token 用量仓储 | 改持久化或任务状态 |
 | `backend/services/downloader.py` | yt-dlp 下载/媒体准备 | 改 URL 下载和代理 |
-| `backend/services/transcriber.py` | 字幕读取、Whisper 转录、语言/模型 | 改转录回退 |
+| `backend/services/transcriber.py` | 字幕读取、Whisper 转录、语言/模型/设备（auto/cuda/cpu） | 改转录回退或设备选择 |
 | `backend/services/` | 分段、摘要、翻译、导出、搜索等处理 | 改具体媒体流程 |
 | `backend/routers/jobs.py` | 任务核心域：上传/提交/列表/删除/清理/取消/重试/编辑结果 + 共享的 `normalize_url`/`extract_urls` | 改任务生命周期 API |
 | `backend/routers/jobs_ai.py` | AI 域：重新总结/总结历史/标签/思维导图 | 改 AI 重跑相关端点 |
@@ -84,3 +84,4 @@ python main.py
 - 自签名证书自动放行（2026-09-08，pytest 430 全绿）：`routers/models.py` 加 `_is_ssl_cert_error`/`_get_with_ssl_bypass`——fetch 与 test 首次严格校验遇 CERTIFICATE_VERIFY_FAILED 自动 verify=False 重试一次，成功即返回 `ssl_bypassed` 标记（前端收到后自动勾选「跳过SSL校验」，添加流程保存即入库）；按已存 key 拉取/测试成功时顺手 `update_model(key, skip_ssl_verify=True)` 自愈，后续 AI 调用无需用户任何操作。已实测该中转（new-api 类型）：跳过校验后链路通、`/v1/models` 路径正确，卡点为令牌有效性（服务端 "Invalid token"）。
 - 裸域名端点获取模型修复（2026-09-08，pytest 432 全绿）：用户手填端点常不带路径（如 `https://xxx.top`），此前 fetch 直接 `replace('/chat/completions','/models')` 推导，路径缺失时去请求域名根目录拿到网站首页 HTML（200 非 JSON）。改为 fetch 前先 `_normalize_endpoint` 补全为 `/v1/chat/completions` 再推导 `/v1/models`（与保存时同逻辑，幂等）；响应为 HTML 时提示「端点返回的是网页而不是 API，请填写完整端点如 https://主机/v1/chat/completions」。实测两个 new-api 中转 `/v1/models` 均返回标准 JSON（4xx 报错含令牌原因）。
 - 模型获取链路打通 + 选用回填（2026-09-09，pytest 439 全绿，5 提交）：①`main.py` 新增 `merge_no_proxy`/`apply_proxy_bypass_hosts`——本地 `config.py`（gitignored）的 `PROXY_BYPASS_HOSTS` 启动时合并进 `NO_PROXY` 环境变量，httpx 全客户端（fetch/测试/AI/chat）对该域名直连（场景：Clash 代理隧道对中转域名 ConnectError 空消息、直连正常；当前配置 redumbrellacloudlink.himscp.top）；②fetch 失败的空消息 ConnectError 给出可行动提示（代理放行/直连排查）；③前端获取结果列表每行加「选用」——点选（或点行）把模型ID回填表单（名称空缺自动带出），确认后「添加/保存」落库，「添加」仍为直接存新模型；④**fetch 支持第三种姿势 `key+endpoint`（编辑表单获取）：端点用表单值，api_key 留空回退 DB 原密钥**（编辑态不回填密钥，空密钥直发必 401）；前端编辑态获取自动带 key；⑤gpt-5-6-luna 中转已用有效令牌打通，model_id 修正为 gemini-3.1-pro（该令牌分组仅 gemini 系），测试连接 200。浏览器 E2E：添加/编辑两种表单获取→列表→选用回填→取消均通过。
+- 转录设备自选（2026-09-09，task 09-09-whisper-device-selector 已归档，pytest 447 / vitest 51 / build 全绿）：工作台「语音转录」新增「转录设备」下拉（自动/CUDA/CPU，默认自动）。`options.whisper_device` 存于任务 options（提交/批量/重跑整包透传，无 schema 变更、无新端点），`transcriber._resolve_device` 单点解析贯穿单段/分片转录；显式 CUDA 本机不可用（无 GPU/缺 cublas/cudnn DLL）→ 进度回调可见告警并回退 CPU 保流程跑通；显式 CPU → 跳过 CUDA 探测；`WHISPER_FORCE_CPU` 环境变量仍最高优先级；B站字幕抽查 `transcribe_audio_sample` 固定 CPU 不受影响。新增 `_resolve_device` 9 个单测。
