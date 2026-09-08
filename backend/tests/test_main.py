@@ -2,7 +2,7 @@
 main.py process_job + token API 测试
 mock socketio import 前解决副作用
 """
-import pytest, sys, asyncio
+import pytest, sys, asyncio, os
 from unittest.mock import patch, MagicMock, AsyncMock
 from pathlib import Path
 
@@ -328,3 +328,30 @@ class TestTokenEndpoints:
         with patch("main.get_connection", return_value=mc):
             r = c.get("/api/token-usage")
             assert r.status_code == 200
+
+
+class TestProxyBypass:
+    """PROXY_BYPASS_HOSTS → NO_PROXY 合并（中转域名代理隧道不通时直连）"""
+
+    def test_merge_no_proxy_dedup_keep_order(self):
+        import main as m
+        assert m.merge_no_proxy('', ['a.com']) == 'a.com'
+        assert m.merge_no_proxy('localhost, a.com', ['a.com', 'b.com']) == 'localhost,a.com,b.com'
+        assert m.merge_no_proxy('x', ['', '  ', None]) == 'x'
+        assert m.merge_no_proxy(None, []) == ''
+
+    def test_apply_proxy_bypass_hosts_merges_env(self, monkeypatch):
+        # Windows 的 os.environ 对大小写不敏感（NO_PROXY/no_proxy 同键），勿做跨写法删除断言
+        import main as m
+        monkeypatch.setenv('NO_PROXY', 'localhost,127.0.0.1')
+        monkeypatch.setattr(m.config, 'PROXY_BYPASS_HOSTS', ['relay.example.com', 'relay.example.com'])
+        m.apply_proxy_bypass_hosts()
+        assert 'localhost,127.0.0.1' in os.environ['NO_PROXY']
+        assert 'relay.example.com' in os.environ['NO_PROXY']
+
+    def test_apply_proxy_bypass_hosts_noop_when_empty(self, monkeypatch):
+        import main as m
+        monkeypatch.setenv('NO_PROXY', 'localhost')
+        monkeypatch.setattr(m.config, 'PROXY_BYPASS_HOSTS', [])
+        m.apply_proxy_bypass_hosts()
+        assert os.environ['NO_PROXY'] == 'localhost'

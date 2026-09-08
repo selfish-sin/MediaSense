@@ -46,6 +46,11 @@ ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "")
 # ============ 代理配置 ============
 PROXY = ""  # 需要时设置，如 "http://127.0.0.1:7890"
 
+# 走系统代理不稳定的域名 → 启动时合并进 NO_PROXY，直连访问（httpx 全客户端生效）。
+# 适用场景：自建 new-api 中转，Clash 代理隧道对该域名 ConnectError、直连正常。
+# 例：PROXY_BYPASS_HOSTS = ["relay.example.com"]
+PROXY_BYPASS_HOSTS = []  # 需要时填写域名列表
+
 # ============ AI 模型（在 /models 页面管理，API Key 存数据库） ============
 DEFAULT_MODEL = "deepseek-v4-flash"
 

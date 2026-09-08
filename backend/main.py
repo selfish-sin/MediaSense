@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse
 from starlette.middleware.cors import CORSMiddleware
 
 from config import SERVER_HOST, SERVER_PORT, STATIC_DIR, DOWNLOAD_DIR, DEFAULT_MODEL, DATA_DIR
+import config
 from db.database import init_db, get_connection
 from db.job_repo import create_job, get_job, update_job, finish_job, fail_interrupted_jobs
 from db.model_repo import get_default_model_key
@@ -70,6 +71,37 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(), file_handler],
 )
 logger = logging.getLogger(__name__)
+
+
+# ============ 代理绕过（config.PROXY_BYPASS_HOSTS → NO_PROXY） ============
+def merge_no_proxy(existing: str, hosts) -> str:
+    """把 hosts 去重合并进逗号分隔的 NO_PROXY 串（保留原有顺序）"""
+    parts = [p.strip() for p in (existing or '').split(',') if p.strip()]
+    for h in hosts:
+        h = str(h or '').strip()
+        if h and h not in parts:
+            parts.append(h)
+    return ','.join(parts)
+
+
+def apply_proxy_bypass_hosts() -> None:
+    """config.PROXY_BYPASS_HOSTS 里的域名直连、不走系统代理。
+
+    httpx（获取模型/测试连接/AI 总结/翻译/chat 所有客户端）trust_env 在客户端
+    创建时读 NO_PROXY——启动早期合并写回环境变量即可一处生效、全客户端覆盖。
+    用于「走代理隧道对某中转域名 ConnectError、直连正常」的场景。
+    """
+    hosts = [str(h or '').strip() for h in (getattr(config, 'PROXY_BYPASS_HOSTS', None) or [])]
+    hosts = [h for h in hosts if h]
+    if not hosts:
+        return
+    merged = merge_no_proxy(os.environ.get('NO_PROXY', ''), hosts)
+    os.environ['NO_PROXY'] = merged
+    os.environ['no_proxy'] = merged
+    logger.info(f"代理绕过域名已合并进 NO_PROXY: {','.join(hosts)}")
+
+
+apply_proxy_bypass_hosts()
 
 # ============ 运行中的任务追踪 ============
 RUNNING_JOBS: Dict[str, Dict[str, Any]] = {}
