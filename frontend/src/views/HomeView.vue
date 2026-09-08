@@ -364,8 +364,7 @@ async function handleSubmit() {
         do_summary: settings.doSummary,
         do_translate: settings.doTranslate,
         do_subtitle: settings.doSubtitle,
-        preview_before_summary: settings.previewBeforeSummary,
-        // ★ 与单 URL 路径对齐：force_new=true 跳过跨历史去重，允许重跑已处理过的 URL
+        // ★ 批量固定不做转录预览确认（后端 batch_submit 同样强制忽略），流程统一直通总结
         force_new: true,
       })
       batchResult.value = {
@@ -966,7 +965,7 @@ function formatTokenTime(t) {
               <el-switch v-model="settings.previewBeforeSummary" size="small" />
               <span class="adv-switch-meta">
                 <span class="adv-switch-name">转录预览</span>
-                <span class="adv-switch-desc">总结前可校对文本</span>
+                <span class="adv-switch-desc">总结前可校对文本（仅单任务）</span>
               </span>
             </label>
             <label class="adv-switch-tile" :class="{ on: settings.advancedOptions.speaker_diarization }">

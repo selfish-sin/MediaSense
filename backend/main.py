@@ -720,7 +720,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
         do_summary = options.get('do_summary', True)
         do_translate = options.get('do_translate', False)
         do_subtitle = options.get('do_subtitle', False)
-        preview_before_summary = options.get('preview_before_summary', True)
+        preview_before_summary = options.get('preview_before_summary', False)
         model_size = options.get('model_size', 'base')
         speaker_diarization = options.get('speaker_diarization', False)
         # ★ 转录语言默认中文（Whisper自动识别会把中文误判为英文）

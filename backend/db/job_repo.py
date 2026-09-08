@@ -44,7 +44,7 @@ def create_job(
     do_summary: bool = True,
     do_translate: bool = False,
     do_subtitle: bool = False,
-    preview_before_summary: bool = True,
+    preview_before_summary: bool = False,
     dimensions: Optional[Dict[str, str]] = None,
     batch_id: Optional[str] = None,
 ) -> str:

@@ -79,7 +79,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const doSummary = ref(true)
   const doTranslate = ref(false)
   const doSubtitle = ref(false)
-  const previewBeforeSummary = ref(true)
+  const previewBeforeSummary = ref(false)  // 默认不做转录预览确认（批量固定忽略此开关）
 
   // ============ Actions ============
   async function loadDeepConfig() {

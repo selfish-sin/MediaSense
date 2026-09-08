@@ -42,7 +42,7 @@ class JobCreate(BaseModel):
     do_summary: bool = Field(True, description="是否AI总结")
     do_translate: bool = Field(False, description="是否翻译")
     do_subtitle: bool = Field(False, description="是否字幕翻译")
-    preview_before_summary: bool = Field(True, description="转录后先预览")
+    preview_before_summary: bool = Field(False, description="转录后先预览")
     force_new: bool = Field(False, description="强制创建新任务，跳过URL去重")
 
 

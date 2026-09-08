@@ -65,7 +65,8 @@ async def batch_submit(request: Request):
         model = get_default_model_key()
         summary_type = "summary"
         do_summary, do_translate, do_subtitle = True, False, False
-        preview_before_summary = True
+        # ★ 批量固定不做转录预览确认：每任务直通总结，流程统一（用户要求批量不用确认）
+        preview_before_summary = False
         dimensions = None
         force_new = False  # 旧前端 list 格式无法表达 force_new，保守不去重
     else:
@@ -76,7 +77,9 @@ async def batch_submit(request: Request):
         do_summary = body.get("do_summary", True)
         do_translate = body.get("do_translate", False)
         do_subtitle = body.get("do_subtitle", False)
-        preview_before_summary = body.get("preview_before_summary", True)
+        # ★ 批量固定不做转录预览确认：即使前端传了 preview_before_summary 也忽略，
+        #   批量串行与「等待人工确认」天然冲突，会卡住后续任务
+        preview_before_summary = False
         # ★ 与单 URL 路径对齐：默认 force_new=True（用户主动批量提交即意图处理）
         force_new = body.get("force_new", True)
 
