@@ -23,6 +23,7 @@ from db.database import get_connection
 from db.job_repo import get_job
 from db.model_repo import get_model_by_key
 from services.research_processor import web_search_collect
+from services.httpx_errors import describe_http_response
 from config import DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
@@ -447,12 +448,8 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
                                      verify=not bool(model_cfg.get('skip_ssl_verify'))) as client:
                 async with client.stream("POST", endpoint, json=payload, headers=headers) as resp:
                     if resp.status_code != 200:
-                        err = await resp.aread()
-                        try:
-                            err_text = err.decode("utf-8", "ignore")
-                        except Exception:
-                            err_text = str(err)
-                        yield _sse({"type": "error", "message": f"模型调用失败 HTTP {resp.status_code}: {err_text[:300]}"})
+                        # ★ 透出服务端返回的真实原因（如 model_not_found），过滤 HTML 错误页
+                        yield _sse({"type": "error", "message": f"模型调用失败 {describe_http_response(resp)}"})
                         return
                     async for line in resp.aiter_lines():
                         if await request.is_disconnected():

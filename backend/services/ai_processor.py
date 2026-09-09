@@ -19,6 +19,7 @@ from services.prompts import (
     SUMMARY_PROMPTS, ORG_STRATEGY_DESCS,
     build_prompt_vars, CATEGORY_PROMPTS,
 )
+from services.httpx_errors import describe_http_error
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +193,15 @@ async def _call_ai(
                 # ★ 用户取消必须向上抛，不能被下面的通用 except 吞成
                 #   '[处理失败: ...]' 哨兵串（否则 main.py 会把 cancelled 记成 failed）
                 raise
+            except httpx.HTTPStatusError as e:
+                # ★ 服务端返回的 4xx/5xx：透出响应体里的真实原因（如 model_not_found、
+                #   密钥无效、余额不足），而不是裸的 "Client error '404 Not Found' for url ..."
+                detail = describe_http_error(e)
+                logger.error(f'AI调用失败（HTTP {e.response.status_code}）: {detail}')
+                if sio:
+                    from socket_handlers import emit_log
+                    await emit_log(sio, job_id, f'AI处理失败: {detail}')
+                return f'[处理失败: {detail}]', 0, 0
             except Exception as e:
                 # 非网络错误（如 JSON 解析失败等），不重试
                 logger.error(f'AI调用失败: {e}')
@@ -219,6 +229,13 @@ async def _call_ai(
     except TaskCancelledError:
         # ★ 用户取消：透传给上层（_process_job_impl 会把任务标记为 cancelled）
         raise
+    except httpx.HTTPStatusError as e:
+        detail = describe_http_error(e)
+        logger.error(f'AI调用失败（HTTP {e.response.status_code}）: {detail}')
+        if sio:
+            from socket_handlers import emit_log
+            await emit_log(sio, job_id, f'AI处理失败: {detail}')
+        return f'[处理失败: {detail}]', 0, 0
     except Exception as e:
         logger.error(f'AI调用失败: {e}')
         if sio:
@@ -451,6 +468,9 @@ async def translate_subtitles(
                 result = resp.json()
                 translated_text = result['choices'][0]['message']['content']
                 translated.append(translated_text)
+        except httpx.HTTPStatusError as e:
+            logger.warning(f'字幕翻译失败 (批次 {i+1}): {describe_http_error(e)}')
+            translated.append(batch_text)
         except Exception as e:
             logger.warning(f'字幕翻译失败 (批次 {i+1}): {e}')
             translated.append(batch_text)
@@ -709,6 +729,9 @@ async def generate_mindmap(
             out_tok = data.get('usage', {}).get('completion_tokens', 0)
             _record_token_usage(model, in_tok, out_tok, job_id)
             return content or ''
+    except httpx.HTTPStatusError as e:
+        logger.error(f'思维导图生成失败: {describe_http_error(e)}')
+        return ''
     except Exception as e:
         logger.error(f'思维导图生成失败: {e}')
         return ''
@@ -759,6 +782,9 @@ async def generate_tags(
                 tags = json.loads(match.group())
                 return [t for t in tags if isinstance(t, str)][:5]
             return []
+    except httpx.HTTPStatusError as e:
+        logger.warning(f'自动打标签失败: {describe_http_error(e)}')
+        return []
     except Exception as e:
         logger.warning(f'自动打标签失败: {e}')
         return []

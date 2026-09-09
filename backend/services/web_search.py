@@ -9,6 +9,8 @@ import os
 import logging
 from typing import List, Dict, Optional
 
+from services.httpx_errors import describe_http_error
+
 logger = logging.getLogger(__name__)
 
 # 结果上限
@@ -209,6 +211,9 @@ async def _search_http(query: str, max_results: int, search_engine: str, api_key
         logger.info(f"智谱 HTTP 搜索完成: query={query}, results={len(results)}")
         return results
 
+    except httpx.HTTPStatusError as e:
+        logger.error(f"智谱 HTTP 搜索失败: {describe_http_error(e)}")
+        return []
     except Exception as e:
         logger.error(f"智谱 HTTP 搜索失败: {e}")
         return []

@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 
 from models.schemas import ModelConfigCreate, ModelConfigResponse, ModelTestRequest, ModelTestResponse
 from db.model_repo import get_all_models, get_model_by_key, add_model, update_model, delete_model, get_default_model_key, set_default_model
+from services.httpx_errors import describe_http_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -191,7 +192,7 @@ async def test_model(req: ModelTestRequest):
             content = choices[0].get('message', {}).get('content', '') if choices else ''
             return ModelTestResponse(success=True, response=content, latency_ms=latency_ms)
         return ModelTestResponse(success=False,
-                                 error=f"API返回 {resp.status_code}: {resp.text[:200]}",
+                                 error=f"API返回 {describe_http_response(resp)}",
                                  latency_ms=latency_ms)
 
     try:

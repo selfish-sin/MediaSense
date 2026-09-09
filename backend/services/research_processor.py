@@ -17,6 +17,7 @@ import httpx
 from config import DEFAULT_MODEL, ZHIPU_API_KEY
 from db.model_repo import get_model_by_key
 from services.ai_processor import _call_ai
+from services.httpx_errors import describe_http_error
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,9 @@ async def _zhipu_web_search(
             msg = choice.get('message', {})
             content = msg.get('content', '') or ''
             return content.strip()
+    except httpx.HTTPStatusError as e:
+        logger.warning(f'智谱 web_search 调用失败: {describe_http_error(e)}')
+        return ''
     except Exception as e:
         logger.warning(f'智谱 web_search 调用失败: {e}')
         return ''
@@ -153,6 +157,8 @@ async def web_search_collect(query: str, context: str = "") -> Tuple[List[Dict[s
                     search_text = content or _fmt_sources(sources)
                     logger.info(f"[web_search] 智谱返回 {len(sources)} 条来源")
                     return sources, search_text
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"[web_search] 智谱联网失败，转 DDGS: {describe_http_error(e)}")
         except Exception as e:
             logger.warning(f"[web_search] 智谱联网失败，转 DDGS: {e}")
 
