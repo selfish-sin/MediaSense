@@ -20,6 +20,7 @@ import { useJobRestore } from '../composables/useJobRestore'
 import { useRafMarkdown } from '../composables/useMarkdownRender'
 import { copyText } from '../utils/clipboard'
 import { createFailureNotifier } from '../utils/errorNotice'
+import { uploadRejectReason } from '../utils/uploadRules'
 import ResummarizeControl from '../components/ResummarizeControl.vue'
 import SplitPromptPanel from '../components/SplitPromptPanel.vue'
 import ChatPanel from '../components/ChatPanel.vue'
@@ -410,12 +411,24 @@ async function handleSubmit() {
 }
 
 // ============ 文件上传 ============
+// 上传区可见状态只由上传结果驱动：成功才显示「已上传」，失败/超限不留任何痕迹
 const uploadedFilePath = ref('')
 const uploadedFileName = ref('')
+const uploadingFileName = ref('')
+const uploadRef = ref(null)
 
 async function handleFileUpload(file) {
   if (file.status !== 'ready') return
+  // 内部列表始终清空：不展示未上传成功的文件，也保证同一文件可以重新选择
+  uploadRef.value?.clearFiles()
+  const reject = uploadRejectReason(file.name, file.raw?.size || 0)
+  if (reject) {
+    ElMessage.error({ message: reject, duration: 6000 })
+    return
+  }
+  if (uploading.value) { ElMessage.warning('文件正在上传中，请稍候'); return }
   uploading.value = true
+  uploadingFileName.value = file.name
   try {
     const formData = new FormData()
     formData.append('file', file.raw)
@@ -438,6 +451,7 @@ async function handleFileUpload(file) {
     ElMessage.error(err.message)
   } finally {
     uploading.value = false
+    uploadingFileName.value = ''
   }
 }
 
@@ -809,23 +823,24 @@ function formatTokenTime(t) {
         <template #prepend>URL</template>
       </el-input>
 
-      <!-- 文件上传 -->
+      <!-- 文件上传：内部列表隐藏，状态区只展示真实上传结果（成功才有「已上传」） -->
       <el-upload
         v-else-if="inputType === 'file'"
+        ref="uploadRef"
         class="input-upload"
         drag
         :auto-upload="false"
+        :show-file-list="false"
         :on-change="handleFileUpload"
-        :on-remove="handleFileRemove"
-        :limit="1"
         accept="audio/*,video/*,.srt,.vtt,.txt,.md"
       >
         <el-icon class="upload-icon"><UploadCloud /></el-icon>
         <div class="upload-title">拖拽文件到此处，或点击上传</div>
         <template #tip>
           <div class="upload-tip">
-            支持音频、视频、字幕、TXT、Markdown
-            <span v-if="uploadedFileName" class="upload-ok"><el-icon :size="12" style="vertical-align: -1px;"><Check /></el-icon> 已上传: {{ uploadedFileName }}</span>
+            支持音频、视频、字幕、TXT、Markdown，单个文件不超过 2GB
+            <span v-if="uploading && uploadingFileName" class="upload-busy">上传中: {{ uploadingFileName }}…</span>
+            <span v-else-if="uploadedFileName" class="upload-ok"><el-icon :size="12" style="vertical-align: -1px;"><Check /></el-icon> 已上传: {{ uploadedFileName }}<el-icon class="upload-remove" :size="12" title="移除" @click.stop="handleFileRemove"><X /></el-icon></span>
           </div>
         </template>
       </el-upload>
@@ -1461,6 +1476,20 @@ function formatTokenTime(t) {
   color: #67c23a;
   margin-left: 8px;
   font-weight: 600;
+}
+.upload-busy {
+  color: var(--el-color-primary, #409eff);
+  margin-left: 8px;
+  font-weight: 600;
+}
+.upload-remove {
+  margin-left: 6px;
+  cursor: pointer;
+  vertical-align: -1px;
+  color: var(--app-text-secondary);
+}
+.upload-remove:hover {
+  color: var(--el-color-danger, #f56c6c);
 }
 
 /* 批量面板 */
