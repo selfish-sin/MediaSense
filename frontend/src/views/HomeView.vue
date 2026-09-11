@@ -987,7 +987,7 @@ function formatTokenTime(t) {
               <el-switch v-model="settings.advancedOptions.speaker_diarization" size="small" />
               <span class="adv-switch-meta">
                 <span class="adv-switch-name">说话人分离</span>
-                <span class="adv-switch-desc">区分不同发言人</span>
+                <span class="adv-switch-desc">{{ settings.advancedOptions.transcribe_engine === 'cloud' ? '云端引擎暂不支持，仅本地 Whisper 生效' : '区分不同发言人' }}</span>
               </span>
             </label>
           </div>
@@ -1038,7 +1038,7 @@ function formatTokenTime(t) {
                 <el-option label="德语" value="de" />
                 <el-option label="自动检测（中文易误判）" :value="null" />
               </el-select>
-              <p class="adv-field-hint">外文视频请改对应语言</p>
+              <p class="adv-field-hint">{{ settings.advancedOptions.transcribe_engine === 'cloud' ? '云端自动识别语种；此设置仅影响本地兜底与字幕抽查' : '外文视频请改对应语言' }}</p>
             </div>
             <div class="adv-field adv-field--switch">
               <div class="adv-field-label">强制 Whisper 转录</div>

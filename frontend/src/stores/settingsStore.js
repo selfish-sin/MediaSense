@@ -68,7 +68,8 @@ export const useSettingsStore = defineStore('settings', () => {
     purpose: '学习笔记',
     speaker_diarization: false,
     model_size: 'medium',
-    // ★ 转录引擎：cloud=云端 SenseVoice（默认，推荐）/ local=本地 Whisper / auto=云端优先
+    // ★ 转录引擎：cloud=云端 SenseVoice（默认，推荐）/ local=本地 Whisper
+    //   只有两态（auto 已废弃）；云端未配置或失败时自动回退本地，原因可见
     transcribe_engine: 'cloud',
     // ★ 转录设备：auto=自动探测（有GPU用GPU）/ cuda=强制CUDA(不可用回退CPU) / cpu=强制CPU（仅本地引擎）
     whisper_device: 'auto',

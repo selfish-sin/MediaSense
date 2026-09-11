@@ -603,13 +603,14 @@ def _transcribe_sync(
     progress_callback=None,
     cancel_check=None,
     device: str = 'auto',
-    engine: str = 'auto',
+    engine: str = 'cloud',
 ) -> Tuple[str, str, int]:
     """同步转录入口（引擎路由 + 自动检测长音频并分片）
 
-    engine: 'auto' | 'cloud' | 'local'（非法值按 auto：非 'local' 一律走云端优先路径）
-    - cloud/auto 且云端已配置 → 云端 SenseVoice 优先，失败自动回退本地（原因可见）
-    - local 或云端未配置 → faster-whisper 本地路径
+    engine: 'cloud' | 'local'（非法值按 cloud：非 'local' 一律走云端优先路径）
+    - cloud 且云端已配置 → 云端 SenseVoice 优先，失败自动回退本地（原因可见）
+    - cloud 但云端未配置 → 告警后走本地（不静默回落，原因对用户可见）
+    - local → faster-whisper 本地路径
     时长 > 20 分钟 → 分片转录（每段 5 分钟，模型只加载一次）
     时长 ≤ 20 分钟 → 单次转录（原逻辑）
     """
@@ -633,7 +634,7 @@ def _transcribe_sync(
                 if progress_callback:
                     progress_callback(2, f'⚠ {reason}')
                 # 落到本地 Whisper 路径
-        elif engine == 'cloud':
+        else:
             reason = '云端 ASR 未配置（config.py 缺 ASR_CLOUD_* 配置），使用本地 Whisper'
             logger.warning(reason)
             if progress_callback:
@@ -807,7 +808,7 @@ async def transcribe_audio(
     job_id: str = '',
     cancel_check=None,
     device: str = 'auto',
-    engine: str = 'auto',
+    engine: str = 'cloud',
 ) -> Tuple[str, str, int]:
     """
     异步转录音频（在线程池中运行同步引擎，云端/本地由 engine 路由）
@@ -816,7 +817,8 @@ async def transcribe_audio(
     """
     if sio:
         from socket_handlers import emit_progress, emit_log
-        engine_label = {'cloud': '云端 SenseVoice', 'local': '本地 Whisper'}.get(engine, '自动（云端优先）')
+        # engine 只有 cloud/local 两态（auto 已废弃）；非法值按 cloud 展示
+        engine_label = {'local': '本地 Whisper'}.get(engine, '云端 SenseVoice')
         await emit_progress(sio, job_id, 'transcribe', 0, f'正在初始化转录（引擎: {engine_label}, 模型: {model_size}, 语言: {language or "自动检测"}）...')
         await emit_log(sio, job_id, f'🎬 开始转录 | 音频: {Path(audio_path).name} | 引擎: {engine_label} | 模型: {model_size} | 语言: {language or "自动检测"}')
 

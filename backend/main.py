@@ -445,7 +445,7 @@ async def _handle_subtitle_file(input_file, job_dir, sio, job_id):
 
 
 async def _handle_media_file(input_file, job_dir, sio, job_id, model_size, speaker_diarization, language,
-                             whisper_device: str = 'auto', transcribe_engine: str = 'auto'):
+                             whisper_device: str = 'auto', transcribe_engine: str = 'cloud'):
     """音视频文件上传：提取音频后转录（云端/本地由引擎路由）。"""
     from services.downloader import handle_file_upload
     from services.transcriber import transcribe_audio
@@ -466,7 +466,7 @@ async def _handle_media_file(input_file, job_dir, sio, job_id, model_size, speak
 
 async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                             model_size, speaker_diarization, language, whisper_device: str = 'auto',
-                            transcribe_engine: str = 'auto'):
+                            transcribe_engine: str = 'cloud'):
     """URL 输入：B站字幕（含内容抽查）→ 平台原文字幕 → 下载+Whisper 转录（含断点续传）。"""
     from socket_handlers import check_cancelled
     from services.transcriber import transcribe_audio
@@ -768,11 +768,11 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
         whisper_device = options.get('whisper_device', 'auto')
         if whisper_device not in ('auto', 'cuda', 'cpu'):
             whisper_device = 'auto'
-        # ★ 转录引擎（auto/cloud/local）：云端 SenseVoice 优先，本地 Whisper 兜底
-        #   非法值按 auto 处理；cloud/auto 在云端未配置或失败时自动回退本地（原因可见）
-        transcribe_engine = options.get('transcribe_engine', 'auto')
-        if transcribe_engine not in ('auto', 'cloud', 'local'):
-            transcribe_engine = 'auto'
+        # ★ 转录引擎（cloud/local）：云端 SenseVoice 优先，本地 Whisper 兜底
+        #   非法值按 cloud 处理；cloud 在云端未配置或失败时自动回退本地（原因可见）
+        transcribe_engine = options.get('transcribe_engine', 'cloud')
+        if transcribe_engine not in ('cloud', 'local'):
+            transcribe_engine = 'cloud'
         # ★ 转录语言默认中文（Whisper自动识别会把中文误判为英文）
         #   前端 settingsStore 默认 'zh'，这里做兜底：None → 'zh'
         #   用户在前端选"自动检测"才会传 null，否则一律尊重用户选择
