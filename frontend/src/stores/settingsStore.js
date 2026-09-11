@@ -68,8 +68,8 @@ export const useSettingsStore = defineStore('settings', () => {
     purpose: '学习笔记',
     speaker_diarization: false,
     model_size: 'medium',
-    // ★ 转录引擎：cloud=云端 SenseVoice（默认，推荐）/ local=本地 Whisper
-    //   只有两态（auto 已废弃）；云端未配置或失败时自动回退本地，原因可见
+    // ★ 转录引擎：cloud=云端 SenseVoice（默认，推荐）/ firered=本地 FireRedASR2（中英最准）/
+    //   local=本地 Whisper；云端未配置或失败时自动回退本地，原因可见
     transcribe_engine: 'cloud',
     // ★ 转录设备：auto=自动探测（有GPU用GPU）/ cuda=强制CUDA(不可用回退CPU) / cpu=强制CPU（仅本地引擎）
     whisper_device: 'auto',
@@ -82,6 +82,8 @@ export const useSettingsStore = defineStore('settings', () => {
   // 云端 ASR 可用性（/api/asr/status 同步；未配置时云端选项禁用并回落 local）
   const cloudAsrAvailable = ref(false)
   const cloudAsrModel = ref('')
+  // 本地 FireRedASR 模型就绪（models/ 下三件套+标点+VAD 齐全；未就绪时首次使用会自动下载）
+  const fireredReady = ref(false)
 
   // 功能开关
   const doSummary = ref(true)
@@ -119,6 +121,7 @@ export const useSettingsStore = defineStore('settings', () => {
       const res = await asrApi.status()
       cloudAsrAvailable.value = !!res.cloud_configured
       cloudAsrModel.value = res.model || ''
+      fireredReady.value = !!res.firered_ready
       if (!cloudAsrAvailable.value && advancedOptions.value.transcribe_engine === 'cloud') {
         advancedOptions.value.transcribe_engine = 'local'
       }
@@ -248,6 +251,7 @@ export const useSettingsStore = defineStore('settings', () => {
     advancedOptions,
     cloudAsrAvailable,
     cloudAsrModel,
+    fireredReady,
     doSummary,
     doTranslate,
     doSubtitle,

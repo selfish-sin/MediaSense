@@ -768,10 +768,10 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
         whisper_device = options.get('whisper_device', 'auto')
         if whisper_device not in ('auto', 'cuda', 'cpu'):
             whisper_device = 'auto'
-        # ★ 转录引擎（cloud/local）：云端 SenseVoice 优先，本地 Whisper 兜底
+        # ★ 转录引擎（cloud/firered/local）：云端 SenseVoice 优先，FireRedASR/Whisper 本地兜底
         #   非法值按 cloud 处理；cloud 在云端未配置或失败时自动回退本地（原因可见）
         transcribe_engine = options.get('transcribe_engine', 'cloud')
-        if transcribe_engine not in ('cloud', 'local'):
+        if transcribe_engine not in ('cloud', 'firered', 'local'):
             transcribe_engine = 'cloud'
         # ★ 转录语言默认中文（Whisper自动识别会把中文误判为英文）
         #   前端 settingsStore 默认 'zh'，这里做兜底：None → 'zh'

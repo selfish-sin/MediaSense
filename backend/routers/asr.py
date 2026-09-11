@@ -22,7 +22,10 @@ async def asr_status():
     - cloud_configured：endpoint + key 齐全且开关打开（可用）
     - model：云端模型名（透传给前端展示）
     - provider_host：端点主机名（前端展示用，不回完整 URL 避免歧义）
+    - firered_ready：本地 FireRedASR 模型三件套+标点+VAD 是否就位（前端提示是否需下载）
     """
+    from services.local_asr import firered_model_ready
+
     cfg = _asr_cfg()
     host = ''
     try:
@@ -33,4 +36,5 @@ async def asr_status():
         "cloud_configured": cloud_asr_configured(),
         "model": cfg['model'],
         "provider_host": host,
+        "firered_ready": firered_model_ready(),
     }

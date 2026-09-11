@@ -286,3 +286,43 @@ class TestEngineRouting:
         m = self._patch_cloud(monkeypatch, configured=True)
         _transcribe_sync('a.wav', engine='bogus')
         m.assert_called_once()
+
+    # ── firered（本地 FireRedASR2-AED）路由 ──
+
+    def _patch_firered(self, monkeypatch, result=None, exc=None):
+        import services.local_asr as la
+        m = MagicMock()
+        if exc is not None:
+            m.side_effect = exc
+        else:
+            m.return_value = result or ('f.srt', 'f.txt', 4)
+        monkeypatch.setattr(la, 'transcribe_audio_firered', m)
+        return m
+
+    def test_firered_success_short_circuits_whisper(self, monkeypatch):
+        m = self._patch_firered(monkeypatch, result=('f.srt', 'f.txt', 4))
+        with patch('services.transcriber._transcribe_sync_single') as w:
+            result = _transcribe_sync('a.wav', engine='firered')
+        assert result == ('f.srt', 'f.txt', 4)
+        m.assert_called_once()
+        w.assert_not_called()
+
+    def test_firered_failure_falls_back_to_whisper(self, monkeypatch):
+        self._patch_firered(monkeypatch, exc=Exception('下载 FireRedASR 模型失败'))
+        progress = []
+        with patch('services.transcriber._get_audio_duration_seconds', return_value=None), \
+             patch('services.transcriber._transcribe_sync_single', return_value=('l.srt', 'l.txt', 2)) as w:
+            result = _transcribe_sync(
+                'a.wav', engine='firered',
+                progress_callback=lambda pct, msg: progress.append((pct, msg)))
+        w.assert_called_once()
+        assert result == ('l.srt', 'l.txt', 2)
+        # 回退原因在进度里可见（错误必须可行动）
+        assert any('FireRedASR 转录失败' in msg for _pct, msg in progress)
+
+    def test_firered_cancel_not_swallowed_by_fallback(self, monkeypatch):
+        self._patch_firered(monkeypatch, exc=TranscriptionCancelledError('用户取消，转录中止'))
+        with patch('services.transcriber._transcribe_sync_single') as w:
+            with pytest.raises(TranscriptionCancelledError):
+                _transcribe_sync('a.wav', engine='firered')
+        w.assert_not_called()

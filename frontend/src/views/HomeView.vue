@@ -92,6 +92,35 @@ const LEGACY_MODEL_KEYS = new Set(['', 'glm-4.5-air', 'deepseek-v4-flash'])
 function isLegacyModelSelection(key) {
   return LEGACY_MODEL_KEYS.has(key)
 }
+
+// ── 转录引擎相关的提示文案（cloud/firered/local 三态） ──
+const engineHint = computed(() => {
+  const engine = settings.advancedOptions.transcribe_engine
+  if (engine === 'firered') {
+    return settings.fireredReady
+      ? '本地大模型，中英比云端 SenseVoice 更准（CPU 可跑，自动加标点）'
+      : '首次使用将自动下载约 1.1GB 模型；也可手动放置到 models/ 目录'
+  }
+  if (engine === 'local') {
+    return '通用兜底引擎，速度取决于设备'
+  }
+  return settings.cloudAsrAvailable
+    ? '云端中文更准更快，失败自动回退本地'
+    : '云端未配置（config.py 缺 ASR_CLOUD_API_KEY）'
+})
+const speakerDiarizationDesc = computed(() => {
+  const engine = settings.advancedOptions.transcribe_engine
+  if (engine === 'cloud') return '云端引擎暂不支持，仅本地 Whisper 生效'
+  if (engine === 'firered') return 'FireRedASR 暂不支持，仅本地 Whisper 生效'
+  return '区分不同发言人'
+})
+const transcribeLanguageHint = computed(() => {
+  const engine = settings.advancedOptions.transcribe_engine
+  if (engine === 'cloud') return '云端自动识别语种；此设置仅影响本地兜底与字幕抽查'
+  if (engine === 'firered') return 'FireRedASR 支持中英，自动识别；此设置仅影响本地兜底与字幕抽查'
+  return '外文视频请改对应语言'
+})
+
 watch(() => settings.selectedDimensions.word_count, (wordCount) => {
   if (!modelTouched.value && isLegacyModelSelection(settings.selectedModel)) {
     settings.selectedModel = settings.recommendModel(wordCount)
@@ -987,7 +1016,7 @@ function formatTokenTime(t) {
               <el-switch v-model="settings.advancedOptions.speaker_diarization" size="small" />
               <span class="adv-switch-meta">
                 <span class="adv-switch-name">说话人分离</span>
-                <span class="adv-switch-desc">{{ settings.advancedOptions.transcribe_engine === 'cloud' ? '云端引擎暂不支持，仅本地 Whisper 生效' : '区分不同发言人' }}</span>
+                <span class="adv-switch-desc">{{ speakerDiarizationDesc }}</span>
               </span>
             </label>
           </div>
@@ -1001,13 +1030,12 @@ function formatTokenTime(t) {
               <div class="adv-field-label">转录引擎</div>
               <el-select v-model="settings.advancedOptions.transcribe_engine" class="adv-field-control">
                 <el-option label="云端 SenseVoice（推荐）" value="cloud" :disabled="!settings.cloudAsrAvailable" />
+                <el-option label="本地 FireRedASR（中英最准）" value="firered" />
                 <el-option label="本地 Whisper" value="local" />
               </el-select>
-              <p class="adv-field-hint">
-                {{ settings.cloudAsrAvailable ? '云端中文更准更快，失败自动回退本地' : '云端未配置（config.py 缺 ASR_CLOUD_API_KEY）' }}
-              </p>
+              <p class="adv-field-hint">{{ engineHint }}</p>
             </div>
-            <template v-if="settings.advancedOptions.transcribe_engine !== 'cloud'">
+            <template v-if="settings.advancedOptions.transcribe_engine === 'local'">
               <div class="adv-field">
                 <div class="adv-field-label">Whisper 模型</div>
                 <el-select v-model="settings.advancedOptions.model_size" class="adv-field-control">
@@ -1038,7 +1066,7 @@ function formatTokenTime(t) {
                 <el-option label="德语" value="de" />
                 <el-option label="自动检测（中文易误判）" :value="null" />
               </el-select>
-              <p class="adv-field-hint">{{ settings.advancedOptions.transcribe_engine === 'cloud' ? '云端自动识别语种；此设置仅影响本地兜底与字幕抽查' : '外文视频请改对应语言' }}</p>
+              <p class="adv-field-hint">{{ transcribeLanguageHint }}</p>
             </div>
             <div class="adv-field adv-field--switch">
               <div class="adv-field-label">强制 Whisper 转录</div>

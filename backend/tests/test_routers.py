@@ -903,6 +903,8 @@ class TestAsrStatusRouter:
         assert data["cloud_configured"] is True
         assert data["model"] == "FunAudioLLM/SenseVoiceSmall"
         assert data["provider_host"] == "api.siliconflow.cn"
+        # firered_ready 契约：布尔（模型未就绪的 CI 环境为 False，本机就位为 True）
+        assert isinstance(data["firered_ready"], bool)
         # 契约：绝不回密钥
         assert "sk-" not in json.dumps(data)
 

@@ -607,14 +607,35 @@ def _transcribe_sync(
 ) -> Tuple[str, str, int]:
     """同步转录入口（引擎路由 + 自动检测长音频并分片）
 
-    engine: 'cloud' | 'local'（非法值按 cloud：非 'local' 一律走云端优先路径）
+    engine: 'cloud' | 'firered' | 'local'（非法值按 cloud：非 'local'/'firered' 一律走云端优先路径）
     - cloud 且云端已配置 → 云端 SenseVoice 优先，失败自动回退本地（原因可见）
     - cloud 但云端未配置 → 告警后走本地（不静默回落，原因对用户可见）
+    - firered → 本地 FireRedASR2-AED（sherpa-onnx/CPU），失败自动回退 Whisper（取消不回退）
     - local → faster-whisper 本地路径
-    时长 > 20 分钟 → 分片转录（每段 5 分钟，模型只加载一次）
-    时长 ≤ 20 分钟 → 单次转录（原逻辑）
+    时长 > 20 分钟 → 分片转录（每段 5 分钟，模型只加载一次）——仅 Whisper 路径；
+    cloud/firered 引擎自带分片/VAD，不受此限制
     """
-    if engine != 'local':
+    if engine == 'firered':
+        # 惰性导入避免循环依赖（local_asr → cloud_asr → 本模块）
+        from services import local_asr
+        try:
+            return local_asr.transcribe_audio_firered(
+                audio_path,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+                language=language,
+                speaker_diarization=speaker_diarization,
+            )
+        except TranscriptionCancelledError:
+            raise  # 用户主动取消不是故障，不回退
+        except Exception as e:
+            reason = f'本地 FireRedASR 转录失败（{type(e).__name__}: {e}），自动回退本地 Whisper'
+            logger.warning(reason)
+            if progress_callback:
+                progress_callback(2, f'⚠ {reason}')
+            # 落到本地 Whisper 路径
+
+    elif engine != 'local':
         # 惰性导入避免循环依赖（cloud_asr 模块级 import 本模块）
         from services import cloud_asr
         if cloud_asr.cloud_asr_configured():
@@ -817,8 +838,8 @@ async def transcribe_audio(
     """
     if sio:
         from socket_handlers import emit_progress, emit_log
-        # engine 只有 cloud/local 两态（auto 已废弃）；非法值按 cloud 展示
-        engine_label = {'local': '本地 Whisper'}.get(engine, '云端 SenseVoice')
+        # engine 只有 cloud/firered/local 三态；非法值按 cloud 展示
+        engine_label = {'local': '本地 Whisper', 'firered': '本地 FireRedASR'}.get(engine, '云端 SenseVoice')
         await emit_progress(sio, job_id, 'transcribe', 0, f'正在初始化转录（引擎: {engine_label}, 模型: {model_size}, 语言: {language or "自动检测"}）...')
         await emit_log(sio, job_id, f'🎬 开始转录 | 音频: {Path(audio_path).name} | 引擎: {engine_label} | 模型: {model_size} | 语言: {language or "自动检测"}')
 
