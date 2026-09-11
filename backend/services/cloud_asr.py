@@ -173,23 +173,37 @@ def detect_silences(audio_path: str, total_duration: Optional[float]) -> List[Tu
 
 
 def export_chunks(audio_path: str, cuts: List[float]) -> List[str]:
-    """按切点一次性导出 16k 单声道 mp3 分片，返回分片路径列表（有序）。
+    """按切点导出 16k 单声道 mp3 分片，返回分片路径列表（有序）。
 
+    cuts 含收尾切点（=总时长），但 segment_times 只传内部切点：
+    ffprobe 时长与实际音频存在毫秒级偏差，把收尾切点传给 ffmpeg 会在
+    EOF 前多切出一个微型尾片（冒烟实测 4 片 vs 计划 3 片）。最后一片
+    由 ffmpeg 自动延伸到实际 EOF。单片场景（无内部切点）直接整段转码。
     每片 ≤30s → ≤200KB，远小于 API 单次 ≤50MB 限制。
     """
     src = Path(audio_path)
     out_dir = src.parent
     prefix = src.stem
-    times = ','.join(f'{t:.3f}' for t in cuts)
     pattern = str(out_dir / f'{prefix}_cloud_%03d.mp3')
-    cmd = [
-        _ffmpeg_bin(), '-y', '-v', 'error',
-        '-i', audio_path,
-        '-f', 'segment', '-segment_times', times,
-        '-ac', '1', '-ar', '16000',
-        '-c:a', 'libmp3lame', '-b:a', '48k',
-        pattern,
-    ]
+    internal_cuts = cuts[:-1] if len(cuts) > 1 else []
+    if internal_cuts:
+        times = ','.join(f'{t:.3f}' for t in internal_cuts)
+        cmd = [
+            _ffmpeg_bin(), '-y', '-v', 'error',
+            '-i', audio_path,
+            '-f', 'segment', '-segment_times', times,
+            '-ac', '1', '-ar', '16000',
+            '-c:a', 'libmp3lame', '-b:a', '48k',
+            pattern,
+        ]
+    else:
+        cmd = [
+            _ffmpeg_bin(), '-y', '-v', 'error',
+            '-i', audio_path,
+            '-ac', '1', '-ar', '16000',
+            '-c:a', 'libmp3lame', '-b:a', '48k',
+            pattern.replace('%03d', '000'),
+        ]
     subprocess.run(cmd, capture_output=True, check=False, timeout=600)
     chunks = sorted(out_dir.glob(f'{prefix}_cloud_*.mp3'))
     if not chunks:
@@ -313,17 +327,25 @@ def transcribe_audio_cloud(
         progress_callback(4, f'静音探测完成：{len(silences)} 处静音 → {seg_count_est} 个分片，导出中...')
 
     chunk_paths = export_chunks(audio_path, cuts)
-    # 分片区间：[0, c1), [c1, c2), ..., [cN-1, total]
+    # 分片区间：[0, c1), [c1, c2), ..., [cN-1, total]（切点数 = 分片数）
     boundaries = [0.0] + cuts
     segments: List[Tuple[float, float]] = list(zip(boundaries[:-1], boundaries[1:]))
     if len(chunk_paths) != len(segments):
-        # ffmpeg -segment_times 按 keyframe 对齐，极端情况下分片数可能对不上计划区间；
-        # 退化为按实际分片数等分时长，时间轴仍近似正确
-        logger.warning(
-            f'分片数与计划不一致（{len(chunk_paths)} vs {len(segments)}），按等分时长处理'
-        )
-        step = duration / len(chunk_paths) if len(chunk_paths) else 0.0
-        segments = [(i * step, (i + 1) * step) for i in range(len(chunk_paths))]
+        planned = len(segments)
+        if len(chunk_paths) > planned:
+            # 实际分片多于计划（探测时长偏差导致尾部多切）：前段区间保持，
+            # 从计划的最后一段起点起全部并入尾段直到总时长
+            head = segments[:len(chunk_paths) - 1]
+            last_start = head[-1][1] if head else 0.0
+            segments = head + [(last_start, duration)]
+            logger.warning(f'分片数多于计划（{len(chunk_paths)} vs {planned}），多余分片已并入尾段')
+        else:
+            # 分片少于计划（探测时长高估，末尾内部切点越过 EOF）：退化为等分
+            logger.warning(
+                f'分片数少于计划（{len(chunk_paths)} vs {len(segments)}），按等分时长处理'
+            )
+            step = duration / len(chunk_paths) if len(chunk_paths) else 0.0
+            segments = [(i * step, (i + 1) * step) for i in range(len(chunk_paths))]
 
     if progress_callback:
         progress_callback(8, f'开始云端转录：{len(chunk_paths)} 个分片，{_concurrency()} 路并发上传识别...')

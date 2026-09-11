@@ -2,7 +2,10 @@
 云端 ASR（SiliconFlow SenseVoice）纯逻辑与编排测试
 
 不触网：_do_request / detect_silences / export_chunks / transcribe_file 均可注入替身。
+export_chunks 用项目自带 ffmpeg 生成真实音频验证（毫秒级，不触网）。
 """
+import subprocess
+
 import httpx
 import pytest
 import time
@@ -218,6 +221,53 @@ class TestTranscribeFile:
         monkeypatch.setattr(cloud_asr, '_do_request', lambda cfg, p, t: r)
         with pytest.raises(CloudASRUnavailableError):
             transcribe_file('a.mp3')
+
+
+# ============ export_chunks（真实 ffmpeg，毫秒级） ============
+
+class TestExportChunksReal:
+    """冒烟实测教训：收尾切点传给 segment_times 会在 EOF 前多切微型尾片（4 vs 3）。
+    修复后只传内部切点，分片数必须等于计划切点数。"""
+
+    @pytest.fixture
+    def sine_wav(self, tmp_path):
+        """ffmpeg 生成 3 秒 440Hz 正弦波（恰好略长于探测时长，模拟毫秒级偏差场景）"""
+        wav = tmp_path / 'sine.wav'
+        subprocess.run(
+            [cloud_asr._ffmpeg_bin(), '-y', '-v', 'error',
+             '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3.0',
+             '-ac', '1', '-ar', '16000', str(wav)],
+            check=True, capture_output=True, timeout=30,
+        )
+        return str(wav)
+
+    def test_trailing_cut_not_passed_to_segment_times(self, sine_wav, tmp_path):
+        # cuts 含收尾切点 3.0：只应按内部切点 1.5 切，产出 2 片而非 3 片
+        chunks = cloud_asr.export_chunks(sine_wav, [1.5, 3.0])
+        assert len(chunks) == 2
+        for c in chunks:
+            assert Path(c).stat().st_size > 0
+
+    def test_single_chunk_direct_transcode(self, sine_wav, tmp_path):
+        # 无内部切点（cuts 只有收尾）→ 整段 1 片
+        chunks = cloud_asr.export_chunks(sine_wav, [3.0])
+        assert len(chunks) == 1
+        assert Path(chunks[0]).stat().st_size > 0
+        assert Path(chunks[0]).name.endswith('_cloud_000.mp3')
+
+    def test_chunks_are_mp3_16k_mono(self, sine_wav, tmp_path):
+        chunks = cloud_asr.export_chunks(sine_wav, [1.0, 2.0, 3.0])
+        assert len(chunks) == 3
+        # 分片可被 ffprobe 识别为 mp3（16k 单声道）
+        ffprobe = str(Path(cloud_asr._ffmpeg_bin()).with_name('ffprobe.exe'))
+        if not Path(ffprobe).exists():
+            ffprobe = 'ffprobe'  # PATH 兜底
+        r = subprocess.run(
+            [ffprobe, '-v', 'quiet', '-show_entries', 'stream=codec_name,sample_rate,channels',
+             '-of', 'csv=p=0', chunks[0]],
+            capture_output=True, text=True, timeout=15,
+        )
+        assert 'mp3,16000,1' in r.stdout
 
 
 # ============ transcribe_audio_cloud（编排，全 mock） ============
