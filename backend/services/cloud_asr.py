@@ -63,6 +63,16 @@ _RICH_TAG_RE = re.compile(r'<\|[A-Za-z_]+\|>')
 _SILENCE_START_RE = re.compile(r'silence_start:\s*([\d.]+)')
 _SILENCE_END_RE = re.compile(r'silence_end:\s*([\d.]+)')
 
+# 句级字幕切分：云端 API 只回纯文本、无时间戳，若把整个分片文本塞进一条字幕，
+# SRT 会退化成「一片一行」（3~30s 一坨），与本地 Whisper 的句级体验明显退化。
+# 写盘前按句末标点切句、再按字符数比例把分片时长分配给各句——不增加任何
+# API 调用/成本，纯本地后处理，即可把字幕粒度拉回句级。
+_SUB_SENT_END = '。！？!?…；;'   # 句末标点（含中英）
+_SUB_CLOSERS = '”"』」）)】]'      # 句末标点后可能跟随的收尾符号，一并并入前句
+_SUB_MIN_CHARS = 4               # 短于该长度的碎片并入前句，避免字幕抖动
+_SUB_MAX_CHARS = 40              # 单条字幕硬上限：无标点长句在此强制断开
+_SUB_HARD_BREAK = '，,、 '        # 强制断句时优先选择的次级停顿符
+
 
 class CloudASRConfigError(Exception):
     """云端 ASR 配置类错误（401/403/404/未配置），修复前重试无意义。"""
@@ -121,6 +131,113 @@ def strip_rich_tags(text: str) -> str:
         return ''
     cleaned = _RICH_TAG_RE.sub(' ', text)
     return re.sub(r'\s+', ' ', cleaned).strip()
+
+
+def _hard_split_long(sentence: str) -> List[str]:
+    """把无标点长句在次级停顿符（逗号/顿号/空格）附近断开（纯函数）。"""
+    parts: List[str] = []
+    start = 0
+    n = len(sentence)
+    while n - start > _SUB_MAX_CHARS:
+        end = start + _SUB_MAX_CHARS
+        window = sentence[start:end]
+        cut = -1
+        # 从窗口末尾往回找最近的次级停顿符（保证不切得太短）
+        for j in range(len(window) - 1, _SUB_MIN_CHARS - 1, -1):
+            if window[j] in _SUB_HARD_BREAK:
+                cut = start + j + 1
+                break
+        if cut <= start:
+            cut = end
+        parts.append(sentence[start:cut].strip())
+        start = cut
+    if start < n:
+        parts.append(sentence[start:].strip())
+    return [p for p in parts if p]
+
+
+def split_sentences(text: str) -> List[str]:
+    """把一段纯文本切成句级片段（纯函数，单测覆盖）。
+
+    规则：
+    1. 以句末标点（``。！？!?…；;``）或换行断句；英文句点仅在后面是空白/结尾时算句末
+       （避免把小数/缩写切开）；句末标点后紧跟的引号括号并入前句
+    2. 过短片段（< ``_SUB_MIN_CHARS``）并入前句，避免字幕碎片
+    3. 超长无标点句子（> ``_SUB_MAX_CHARS``）在次级停顿符附近强制断开
+
+    返回去除空白后的句列表；空输入返回 ``[]``。无标点时整段 = 1 句（行为不变）。
+    """
+    if not text:
+        return []
+    raw = text.strip()
+    if not raw:
+        return []
+
+    chunks: List[str] = []
+    buf: List[str] = []
+    n = len(raw)
+    i = 0
+    while i < n:
+        ch = raw[i]
+        buf.append(ch)
+        is_end = ch in _SUB_SENT_END or ch == '\n'
+        if not is_end and ch == '.':
+            nxt = raw[i + 1] if i + 1 < n else ''
+            is_end = nxt == '' or nxt.isspace()
+        if is_end:
+            # 吸收句末标点之后的收尾符号（引号/括号等）
+            while i + 1 < n and raw[i + 1] in _SUB_CLOSERS:
+                i += 1
+                buf.append(raw[i])
+            chunks.append(''.join(buf).strip())
+            buf = []
+        i += 1
+    if buf:
+        chunks.append(''.join(buf).strip())
+
+    # 合并：累积到 _SUB_MIN_CHARS 才落一条（过短碎片并向后，避免出现
+    # 「嗯。」这类残缺字幕行；行尾残余若仍过短则并回前一条）
+    merged: List[str] = []
+    buf = ''
+    for s in (c for c in chunks if c):
+        buf += s
+        if len(buf) >= _SUB_MIN_CHARS:
+            merged.append(buf)
+            buf = ''
+    if buf:
+        if merged:
+            merged[-1] += buf
+        else:
+            merged.append(buf)
+
+    out: List[str] = []
+    for s in merged:
+        out.extend(_hard_split_long(s) if len(s) > _SUB_MAX_CHARS else [s])
+    return out
+
+
+def distribute_times(start: float, end: float, sentences: List[str]) -> List[Tuple[float, float, str]]:
+    """把 [start, end] 按句子字符数比例分配给各句（纯函数，单测覆盖）。
+
+    返回 ``[(seg_start, seg_end, text), ...]``。单句或总字数为 0 时原样返回整段。
+    保证首句起点 == start、末句终点 == end、各区间单调不重叠。
+    """
+    if not sentences:
+        return []
+    total = sum(len(s) for s in sentences)
+    span = max(0.0, end - start)
+    if total <= 0 or len(sentences) == 1:
+        return [(start, end, sentences[0])]
+    out: List[Tuple[float, float, str]] = []
+    acc = start
+    for k, s in enumerate(sentences):
+        # 末句强制对齐 end，避免浮点误差累积导致时间轴漂移
+        seg_end = end if k == len(sentences) - 1 else round(acc + span * (len(s) / total), 3)
+        if seg_end < acc:  # 兜底：极端比例下不让区间倒退
+            seg_end = acc
+        out.append((acc, seg_end, s))
+        acc = seg_end
+    return out
 
 
 def parse_silences(stderr_text: str, total_duration: Optional[float] = None) -> List[Tuple[float, float]]:
@@ -501,18 +618,23 @@ def transcribe_audio_cloud(
     txt_path = str(src.with_suffix('.txt'))
     # 并发完成顺序不定，写盘前按音频时间重排（SRT 序号/时间轴必须单调）
     results.sort(key=lambda r: r[0])
+    # 句级化：把每个分片的整坨文本拆成句，并按字数比例分配该分片时长。
+    # 纯本地后处理，不增加 API 调用；无标点文本退化为原「一片一条」。
+    segments_out: List[Tuple[float, float, str]] = []
+    for seg_start, seg_end, text in results:
+        segments_out.extend(distribute_times(seg_start, seg_end, split_sentences(text)))
     with open(srt_path, 'w', encoding='utf-8') as f_srt, \
          open(txt_path, 'w', encoding='utf-8') as f_txt:
-        for idx, (seg_start, seg_end, text) in enumerate(results):
+        for idx, (seg_start, seg_end, text) in enumerate(segments_out):
             f_srt.write(f"{idx + 1}\n{_format_srt_time(seg_start)} --> {_format_srt_time(seg_end)}\n{text}\n\n")
             f_txt.write(f"[{_format_mmss(seg_start)} - {_format_mmss(seg_end)}] {text}\n")
 
     elapsed = time.time() - transcribe_start
     speed_x = (duration / elapsed) if elapsed > 0 and duration > 0 else 0.0
-    logger.info(f'云端转录完成: {len(results)} 段（{total} 分片）, 耗时 {_format_duration(elapsed)}')
+    logger.info(f'云端转录完成: {len(segments_out)} 段（{total} 分片）, 耗时 {_format_duration(elapsed)}')
     if progress_callback:
         done_msg = (
-            f'云端转录完成，共 {len(results)} 段 | 音频 {_format_duration(duration)} | '
+            f'云端转录完成，共 {len(segments_out)} 段 | 音频 {_format_duration(duration)} | '
             f'耗时 {_format_duration(elapsed)}'
         )
         if failures:
@@ -521,4 +643,4 @@ def transcribe_audio_cloud(
             done_msg += f' | 均速 {speed_x:.1f}x'
         progress_callback(99, done_msg)
         progress_callback(100, '转录完成！')
-    return srt_path, txt_path, len(results)
+    return srt_path, txt_path, len(segments_out)

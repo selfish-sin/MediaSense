@@ -18,8 +18,10 @@ from services.cloud_asr import (
     CloudASRConfigError,
     CloudASRUnavailableError,
     cloud_asr_configured,
+    distribute_times,
     parse_silences,
     plan_cuts,
+    split_sentences,
     strip_rich_tags,
     transcribe_file,
     transcribe_audio_cloud,
@@ -460,3 +462,104 @@ class TestTranscribeAudioCloud:
         assert cloud_asr._concurrency() == 1  # 下限
         monkeypatch.setattr('config.ASR_CLOUD_CONCURRENCY', 'bad', raising=False)
         assert cloud_asr._concurrency() == cloud_asr._DEFAULT_CONCURRENCY
+
+
+# ============ split_sentences（句级切分，纯函数） ============
+
+class TestSplitSentences:
+    def test_chinese_sentences(self):
+        assert split_sentences('今天天气很好。我们去公园吧！') == ['今天天气很好。', '我们去公园吧！']
+
+    def test_english_sentences(self):
+        assert split_sentences('Hello world. This is a test.') == ['Hello world.', 'This is a test.']
+
+    def test_question_and_exclamation(self):
+        assert split_sentences('真的吗？我表示怀疑！那就算了吧。') == [
+            '真的吗？', '我表示怀疑！', '那就算了吧。']
+
+    def test_closing_quote_merged_into_previous(self):
+        # 句末标点后的引号并入前句，不另起一条
+        assert split_sentences('他说：“你好。”然后走了。') == ['他说：“你好。”', '然后走了。']
+
+    def test_decimal_point_not_split(self):
+        # 小数点/缩写后的 '.' 后不是空白 → 不算句末
+        assert split_sentences('价格是3.5元，很便宜。') == ['价格是3.5元，很便宜。']
+
+    def test_short_fragment_merged(self):
+        # 过短碎片（< _SUB_MIN_CHARS）并入前句，避免字幕抖动
+        assert split_sentences('嗯。今天我们来讨论这个问题。') == ['嗯。今天我们来讨论这个问题。']
+
+    def test_no_punctuation_single_sentence(self):
+        # 无标点 → 整段 1 句（与修复前「一片一条」行为一致）
+        assert split_sentences('文本一') == ['文本一']
+
+    def test_long_sentence_hard_split(self):
+        long_text = '啊' * 100  # 无任何标点
+        parts = split_sentences(long_text)
+        assert len(parts) >= 3
+        assert all(len(p) <= cloud_asr._SUB_MAX_CHARS for p in parts)
+        assert ''.join(parts) == long_text
+
+    def test_hard_split_prefers_secondary_break(self):
+        # 超长句里若有逗号，优先在逗号处断，不硬切字符
+        text = '前面内容' * 4 + '，' + '后面内容' * 20
+        parts = split_sentences(text)
+        assert len(parts) >= 2
+        assert parts[0].endswith('，')
+
+    def test_newline_boundary(self):
+        assert split_sentences('第一行内容\n第二行内容') == ['第一行内容', '第二行内容']
+
+    def test_empty_and_none(self):
+        assert split_sentences('') == []
+        assert split_sentences('   ') == []
+        assert split_sentences(None) == []
+
+
+# ============ distribute_times（时长按字数比例分配，纯函数） ============
+
+class TestDistributeTimes:
+    def test_single_sentence_keeps_full_range(self):
+        assert distribute_times(10.0, 20.0, ['一句话']) == [(10.0, 20.0, '一句话')]
+
+    def test_empty_sentences(self):
+        assert distribute_times(0.0, 5.0, []) == []
+
+    def test_proportional_split(self):
+        # 'aa'(2) + 'bbbb'(4) 共 6 字，跨度 6s → 2s / 4s
+        out = distribute_times(0.0, 6.0, ['aa', 'bbbb'])
+        assert out == [(0.0, 2.0, 'aa'), (2.0, 6.0, 'bbbb')]
+
+    def test_first_start_and_last_end_aligned(self):
+        out = distribute_times(3.5, 13.5, ['一二三', '四五六七八', '九'])
+        assert out[0][0] == 3.5
+        assert out[-1][1] == 13.5
+        # 区间单调不重叠
+        for (s0, e0, _), (s1, _e1, _) in zip(out, out[1:]):
+            assert e0 == s1
+            assert s1 >= s0
+
+    def test_zero_length_sentences_fall_back_to_whole(self):
+        # 全是空串（理论不会出现）时按整段返回，不崩溃
+        assert distribute_times(0.0, 4.0, ['', '']) == [(0.0, 4.0, '')]
+
+
+# ============ 编排：句级化后 SRT 条目数 ============
+
+class TestSentenceLevelOutput:
+    def test_punctuated_chunk_expands_to_multiple_entries(self, monkeypatch, tmp_path, fake_audio):
+        """带标点的分片文本被拆成多条 SRT，而非整片一坨。"""
+        texts = ['今天天气很好。我们去公园玩耍吧！非常感谢你啊。'] * 5
+        _setup_orchestration(monkeypatch, tmp_path, texts=texts)
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        lines = [l for l in Path(srt).read_text(encoding='utf-8').splitlines() if '-->' in l]
+        # 每片 3 句 × 5 片 = 15 条，远多于分片数
+        assert seg_count == 15
+        assert len(lines) == 15
+        assert '今天天气很好。' in Path(srt).read_text(encoding='utf-8')
+
+    def test_no_punctuation_keeps_one_entry_per_chunk(self, monkeypatch, tmp_path, fake_audio):
+        """无标点分片退化行为不变：1 片 = 1 条。"""
+        _setup_orchestration(monkeypatch, tmp_path, texts=['文本一', '文本二', '文本三', '文本四', '文本五'])
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        assert seg_count == 5
