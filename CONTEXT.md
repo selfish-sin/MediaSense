@@ -28,8 +28,8 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `backend/config.py` | 数据目录、7001、Whisper 模型和清理 TTL | 改路径、端口或默认值 |
 | `backend/db/` | SQLite 初始化、job、模型、token 用量仓储 | 改持久化或任务状态 |
 | `backend/services/downloader.py` | yt-dlp 下载/媒体准备 | 改 URL 下载和代理 |
-| `backend/services/transcriber.py` | 字幕读取、Whisper 转录、语言/模型/设备（auto/cuda/cpu）、`_transcribe_sync` 引擎路由单点（cloud/firered/local，失败回退 Whisper） | 改转录回退、引擎路由或设备选择 |
-| `backend/services/cloud_asr.py` | 云端 SenseVoice 转录（静音切分→并发分片→句级化写盘）；`split_sentences`/`distribute_times` 被本地引擎复用 | 改云端引擎或句级切分 |
+| `backend/services/transcriber.py` | 字幕读取、Whisper 转录、语言/模型/设备（auto/cuda/cpu）、`_transcribe_sync` 引擎路由单点（回退链 cloud→firered→local，firered 仅模型就绪时参与且不触发下载，取消不回退） | 改转录回退、引擎路由或设备选择 |
+| `backend/services/cloud_asr.py` | 云端 SenseVoice 转录（静音切分→并发分片→句级化写盘；单片失败本地补录不留空洞；结束打延迟画像日志）；`split_sentences`/`distribute_times` 被本地引擎复用 | 改云端引擎、句级切分或补录策略 |
 | `backend/services/local_asr.py` | 本地 FireRedASR2-AED（sherpa-onnx int8/CPU）：模型按需下载→VAD 分段（+padding）→段间并行解码→标点恢复→句级写盘 | 改本地 FireRed 引擎、模型下载或 VAD/标点参数 |
 | `backend/services/` | 分段、摘要、翻译、导出、搜索等处理 | 改具体媒体流程 |
 | `backend/routers/jobs.py` | 任务核心域：上传/提交/列表/删除/清理/取消/重试/编辑结果 + 共享的 `normalize_url`/`extract_urls` | 改任务生命周期 API |
