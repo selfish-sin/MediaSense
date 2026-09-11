@@ -31,6 +31,7 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `backend/services/transcriber.py` | 字幕读取、Whisper 转录、语言/模型/设备（auto/cuda/cpu）、`_transcribe_sync` 引擎路由单点（回退链 cloud→firered→local，firered 仅模型就绪时参与且不触发下载，取消不回退） | 改转录回退、引擎路由或设备选择 |
 | `backend/services/cloud_asr.py` | 云端 SenseVoice 转录（静音切分→并发分片→句级化写盘；单片失败本地补录不留空洞；结束打延迟画像日志）；`split_sentences`/`distribute_times` 被本地引擎复用 | 改云端引擎、句级切分或补录策略 |
 | `backend/services/local_asr.py` | 本地 FireRedASR2-AED（sherpa-onnx int8/CPU）：模型按需下载→VAD 分段（+padding）→段间并行解码→标点恢复→句级写盘 | 改本地 FireRed 引擎、模型下载或 VAD/标点参数 |
+| `.trellis/spec/backend/transcription-chain.md` | **识别链全链路权威文档**：输入四策略/字幕优先防错位/引擎回退链/三引擎内部/分片补录/横评结论/参数速查/坑点汇总 | 改转录链任何环节前必读 |
 | `backend/services/` | 分段、摘要、翻译、导出、搜索等处理 | 改具体媒体流程 |
 | `backend/routers/jobs.py` | 任务核心域：上传/提交/列表/删除/清理/取消/重试/编辑结果 + 共享的 `normalize_url`/`extract_urls` | 改任务生命周期 API |
 | `backend/routers/jobs_ai.py` | AI 域：重新总结/总结历史/标签/思维导图 | 改 AI 重跑相关端点 |
