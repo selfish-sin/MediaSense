@@ -217,7 +217,7 @@ class TestEngineRouting:
     def _patch_cloud(self, monkeypatch, configured=True, cloud_result=None, cloud_exc=None):
         """注入云端替身：返回 cloud_asr.transcribe_audio_cloud 的 mock。"""
         import services.cloud_asr as ca
-        monkeypatch.setattr(ca, 'cloud_asr_configured', lambda: configured)
+        monkeypatch.setattr(ca, 'cloud_asr_configured', lambda provider='mimo': configured)
         m = MagicMock()
         if cloud_exc is not None:
             m.side_effect = cloud_exc
@@ -272,7 +272,7 @@ class TestEngineRouting:
         w.assert_called_once()
         assert result == ('l.srt', 'l.txt', 2)
         # 回退原因在进度里可见（错误必须可行动）
-        assert any('云端 SenseVoice 转录失败' in msg and '503' in msg for _pct, msg in progress)
+        assert any('云端 MiMo 转录失败' in msg and '503' in msg for _pct, msg in progress)
         assert any('回退 本地 Whisper' in msg for _pct, msg in progress)
 
     def test_cloud_failure_falls_back_to_firered_when_ready(self, monkeypatch):
@@ -289,7 +289,7 @@ class TestEngineRouting:
         f.assert_called_once()  # firered 参与了回退并成功
         w.assert_not_called()
         # 回退原因可见
-        assert any('云端 SenseVoice 转录失败' in msg and '回退 本地 FireRedASR' in msg
+        assert any('云端 MiMo 转录失败' in msg and '回退 本地 FireRedASR' in msg
                    for _pct, msg in progress)
 
     def test_firered_fallback_never_downloads_model(self, monkeypatch):
@@ -327,6 +327,21 @@ class TestEngineRouting:
         m = self._patch_cloud(monkeypatch, configured=True)
         _transcribe_sync('a.wav', engine='bogus')
         m.assert_called_once()
+
+    def test_cloud_free_routes_to_xingchen_provider(self, monkeypatch):
+        """cloud_free（免费档）走 xingchen provider，成功即短路。"""
+        import services.cloud_asr as ca
+        monkeypatch.setattr(ca, 'cloud_asr_configured',
+                            lambda provider='mimo': provider == 'xingchen')
+        m = MagicMock()
+        m.return_value = ('free.srt', 'free.txt', 2)
+        monkeypatch.setattr(ca, 'transcribe_audio_cloud', m)
+        with patch('services.transcriber._transcribe_sync_single') as w:
+            result = _transcribe_sync('a.wav', engine='cloud_free')
+        assert result == ('free.srt', 'free.txt', 2)
+        m.assert_called_once()
+        assert m.call_args.kwargs.get('provider') == 'xingchen'
+        w.assert_not_called()
 
     # ── firered（本地 FireRedASR2-AED）路由 ──
 

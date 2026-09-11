@@ -596,15 +596,18 @@ def _transcribe_chunked(
 
 # 引擎回退链（路由递归的静态视图）：用户选的引擎失败后按序降级，链尾 Whisper 兜底。
 # - 'local'（Whisper）语义不变：历史 job options 已存 'local'
+# - 'cloud'=MiMo（付费主力），'cloud_free'=XingChen Ultra（免费档，简单视频）
 # - firered 只在模型就绪时参与回退（兜底绝不触发 1.1GB 下载，见 _fallback_chain）
 _FALLBACK_CHAINS = {
     'cloud': ('cloud', 'firered', 'local'),
+    'cloud_free': ('cloud_free', 'firered', 'local'),
     'firered': ('firered', 'local'),
     'local': ('local',),
 }
 
 _ENGINE_LABELS = {
-    'cloud': '云端 SenseVoice',
+    'cloud': '云端 MiMo',
+    'cloud_free': '云端 XingChen（免费）',
     'firered': '本地 FireRedASR',
     'local': '本地 Whisper',
 }
@@ -656,9 +659,10 @@ def _transcribe_by_engine(
             audio_path, model_size, platform, speaker_diarization, language, progress_callback,
             cancel_check=cancel_check, device=device,
         )
-    # cloud（默认）：未配置视为该引擎失败，交给回退链
+    # cloud / cloud_free：未配置视为该引擎失败，交给回退链
     from services import cloud_asr
-    if not cloud_asr.cloud_asr_configured():
+    provider = 'xingchen' if engine == 'cloud_free' else 'mimo'
+    if not cloud_asr.cloud_asr_configured(provider):
         raise Exception('云端 ASR 未配置（config.py 缺 ASR_CLOUD_* 配置）')
     return cloud_asr.transcribe_audio_cloud(
         audio_path,
@@ -666,6 +670,7 @@ def _transcribe_by_engine(
         cancel_check=cancel_check,
         language=language,
         speaker_diarization=speaker_diarization,
+        provider=provider,
     )
 
 
@@ -872,7 +877,7 @@ async def transcribe_audio(
     if sio:
         from socket_handlers import emit_progress, emit_log
         # engine 只有 cloud/firered/local 三态；非法值按 cloud 展示
-        engine_label = {'local': '本地 Whisper', 'firered': '本地 FireRedASR'}.get(engine, '云端 SenseVoice')
+        engine_label = {'local': '本地 Whisper', 'firered': '本地 FireRedASR'}.get(engine, '云端 MiMo')
         await emit_progress(sio, job_id, 'transcribe', 0, f'正在初始化转录（引擎: {engine_label}, 模型: {model_size}, 语言: {language or "自动检测"}）...')
         await emit_log(sio, job_id, f'🎬 开始转录 | 音频: {Path(audio_path).name} | 引擎: {engine_label} | 模型: {model_size} | 语言: {language or "自动检测"}')
 

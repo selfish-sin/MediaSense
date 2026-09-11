@@ -153,7 +153,7 @@ class TestConfigured:
         assert cloud_asr_configured() is False
 
 
-# ============ transcribe_file（mock _do_request） ============
+# ============ transcribe_file（mock _do_request，MiMo chat 响应形态） ============
 
 def _resp(status, text='', json_body=None):
     r = MagicMock()
@@ -162,6 +162,11 @@ def _resp(status, text='', json_body=None):
     if json_body is not None:
         r.json = lambda: json_body
     return r
+
+
+def _mimo_body(content):
+    """MiMo chat/completions 响应形态。"""
+    return {'choices': [{'message': {'role': 'assistant', 'content': content}}]}
 
 
 class TestTranscribeFile:
@@ -174,13 +179,41 @@ class TestTranscribeFile:
     def test_success(self, asr_enabled, monkeypatch):
         called = []
         monkeypatch.setattr(cloud_asr, '_do_request',
-                            lambda cfg, p, t: (called.append(p), _resp(200, json_body={'text': ' 识别结果 '}))[1])
+                            lambda cfg, p, t: (called.append(p), _resp(200, json_body=_mimo_body(' 识别结果 ')))[1])
         assert transcribe_file('a.mp3') == '识别结果'
         assert called == ['a.mp3']
 
+    def test_extract_text_handles_empty_choices(self):
+        """choices 空数组/缺字段必须安全返回空串（防越界，同 MaaS usage chunk 教训）。"""
+        assert cloud_asr._extract_asr_text('mimo', {}) == ''
+        assert cloud_asr._extract_asr_text('mimo', {'choices': []}) == ''
+        assert cloud_asr._extract_asr_text('mimo', {'choices': [{'message': {}}]}) == ''
+        assert cloud_asr._extract_asr_text('mimo', _mimo_body('内容')) == '内容'
+        # xingchen（multipart）响应形态：{'text': ...}
+        assert cloud_asr._extract_asr_text('xingchen', {'text': '识别内容'}) == '识别内容'
+        assert cloud_asr._extract_asr_text('xingchen', {}) == ''
+
+    def test_xingchen_provider_multipart_parse(self, asr_enabled, monkeypatch):
+        """免费档 xingchen（multipart）走 {'text': ...} 解析，模型为 XingChenASR。"""
+        monkeypatch.setattr(cloud_asr, '_do_request',
+                            lambda cfg, p, t: _resp(200, json_body={'text': '免费档结果'}))
+        assert transcribe_file('a.mp3', provider='xingchen') == '免费档结果'
+
+    def test_xingchen_provider_default_model(self, monkeypatch):
+        import config as _config
+        for attr in ('ASR_FREE_ENABLED', 'ASR_FREE_ENDPOINT', 'ASR_FREE_API_KEY', 'ASR_FREE_MODEL'):
+            if hasattr(_config, attr):
+                monkeypatch.delattr(_config, attr, raising=False)
+        cfg = cloud_asr._provider_cfg('xingchen')
+        assert cfg['api'] == 'multipart'
+        assert 'XingChenASR-V3.2-Ultra' in cfg['model']
+        assert 'siliconflow' in cfg['endpoint']
+        # 未配密钥 = 未配置
+        assert cloud_asr.cloud_asr_configured('xingchen') is False
+
     def test_rich_tags_stripped(self, asr_enabled, monkeypatch):
         monkeypatch.setattr(cloud_asr, '_do_request',
-                            lambda cfg, p, t: _resp(200, json_body={'text': '<|HAPPY|>开心<|BGM|>'}))
+                            lambda cfg, p, t: _resp(200, json_body=_mimo_body('<|HAPPY|>开心<|BGM|>')))
         assert transcribe_file('a.mp3') == '开心'
 
     def test_401_no_retry(self, asr_enabled, monkeypatch):
@@ -199,9 +232,16 @@ class TestTranscribeFile:
         with pytest.raises(CloudASRConfigError, match='模型不存在'):
             transcribe_file('a.mp3')
 
+    def test_400_retried_then_unavailable(self, asr_enabled, monkeypatch, no_sleep):
+        """400（可能是单片内容问题）走重试，耗尽后 Unavailable（交给本地补录），不判配置错误。"""
+        monkeypatch.setattr(cloud_asr, '_do_request',
+                            lambda cfg, p, t: _resp(400, json_body={'message': 'bad request'}))
+        with pytest.raises(CloudASRUnavailableError, match='400'):
+            transcribe_file('a.mp3', max_retries=2)
+
     def test_429_then_success(self, asr_enabled, monkeypatch, no_sleep):
         responses = [_resp(429, 'rate limited'), _resp(429, 'rate limited'),
-                     _resp(200, json_body={'text': 'ok'})]
+                     _resp(200, json_body=_mimo_body('ok'))]
         monkeypatch.setattr(cloud_asr, '_do_request', lambda cfg, p, t: responses.pop(0))
         assert transcribe_file('a.mp3') == 'ok'
 

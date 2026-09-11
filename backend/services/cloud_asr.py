@@ -1,20 +1,27 @@
 """
-云端 ASR 转录服务（SiliconFlow / SenseVoiceSmall）
+云端 ASR 转录服务（双 provider 共存，2026-09-12）
 
-SiliconFlow /v1/audio/transcriptions 只返回纯文本（无时间戳），
-时间轴由本地静音切分边界提供：ffmpeg silencedetect 找静音中点作切点，
-分片 6~30s（≤30s/片 ≈ ≤200KB mp3，天然绕开单次调用 ≤1h/≤50MB 限制，
-两小时以上的视频也按 ~几百个分片顺序上传）。
+- mimo（默认，付费主力）：小米 MiMo-v2.5-ASR，chat/completions 音频多模态姿势。
+  messages 只放音频 {"type":"input_audio","input_audio":{"data":"data:audio/mpeg;base64,..."}}，
+  **禁带 text 部分**（网关注入提示词，带文本 400）；文本取 choices[0].message.content。
+  ¥0.5/小时，10min 素材实测 9.4s，术语最准。
+- xingchen（免费档，简单视频用）：硅基流动 XingChenASR-V3.2-Ultra，OpenAI multipart
+  /audio/transcriptions 姿势（同旧 SenseVoice 接口），响应 {'text': ...}。
+  实测单片 1.7~4.7s 稳定无抖动（SenseVoice 同基建 46~83s，已退役）。
+
+本地仍做静音切分：分片 3~30s；时间轴由分片边界 + 句级后处理提供。
 契约与本地 Whisper 引擎一致：返回 (srt_path, txt_path, seg_count)。
 
 错误语义（必须可见可行动，禁止静默吞错）：
 - CloudASRConfigError：401/403/404 配置类错误，不重试，立即抛给调用方回退本地并给修复指引
-- CloudASRUnavailableError：429/5xx/网络错误退避重试耗尽
+- CloudASRUnavailableError：400/429/5xx/网络错误退避重试耗尽（400 可能是单片内容问题，
+  重试耗尽后跳过交给本地补录，不能上升为整体配置失败）
 分片级韧性（长视频数百片，单片抖动不应整体回退本地）：
-- 单片 Unavailable 失败 → 跳过该段记日志，其余分片照常转录
-- 全部分片失败 → 抛 CloudASRUnavailableError，调用方整体回退本地 Whisper
-- 部分失败 → 返回部分结果并在日志/进度条告警失败区间
+- 单片 Unavailable 失败 → 先本地引擎补录（_rescue_chunks_locally），补不回才留空洞
+- 全部分片失败且补录无收获 → 抛 CloudASRUnavailableError，调用方整体回退本地 Whisper
+- 部分失败 → 返回补录后的结果并在日志/进度条告警
 """
+import base64
 import logging
 import math
 import os
@@ -48,7 +55,7 @@ _SILENCE_NOISE_DB = -35  # 静音判定阈值
 _SILENCE_MIN_D = 0.5     # 静音最短时长
 
 # API 调用
-# SiliconFlow SenseVoice 是排队式推理，常态延迟常 >90s（冒烟实测 90s 单次超时屡发
+# 旧 SenseVoice 是排队式推理（单片延迟 1s~360s 随机抖动）；mimo 中位 ~4s，
 # ReadTimeout，重试后多数即返回 200）：单次超时放宽到 180s，env ASR_CLOUD_TIMEOUT 可调
 _TIMEOUT_PER_CALL = 180.0
 _MAX_RETRIES = 3
@@ -57,7 +64,7 @@ _BACKOFF_CAP = 8.0
 # 8 路并发 + 429 退避重试自适应兜底；env ASR_CLOUD_CONCURRENCY 可调（上限 16）
 _DEFAULT_CONCURRENCY = 8
 
-# SenseVoice 富文本标签（<|HAPPY|> / <|BGM|> / <|zh|> 等），防御性清洗
+# 富文本标签（<|HAPPY|> / <|BGM|> / <|zh|> 等）防御性清洗（多 provider 通用）
 _RICH_TAG_RE = re.compile(r'<\|[A-Za-z_]+\|>')
 # silencedetect 输出解析
 _SILENCE_START_RE = re.compile(r'silence_start:\s*([\d.]+)')
@@ -84,21 +91,41 @@ class CloudASRUnavailableError(Exception):
     """云端 ASR 暂不可用（429/5xx/网络），重试耗尽后抛出。"""
 
 
-def _asr_cfg() -> dict:
-    """读取云端 ASR 配置（getattr 容错，便于测试 monkeypatch config 属性）。"""
+_DEFAULT_FREE_ENDPOINT = 'https://api.siliconflow.cn/v1/audio/transcriptions'
+_DEFAULT_FREE_MODEL = 'XingChenAGI/XingChenASR-V3.2-Ultra'
+
+_PROVIDER_LABELS = {'mimo': 'MiMo-ASR', 'xingchen': 'XingChen-ASR'}
+
+
+def _provider_cfg(provider: str = 'mimo') -> dict:
+    """读取指定云端 provider 的配置（getattr 容错，便于测试 monkeypatch config 属性）。"""
     import config as _config
+    if provider == 'xingchen':
+        return {
+            'enabled': bool(getattr(_config, 'ASR_FREE_ENABLED', True)),
+            'endpoint': getattr(_config, 'ASR_FREE_ENDPOINT', _DEFAULT_FREE_ENDPOINT),
+            'api_key': getattr(_config, 'ASR_FREE_API_KEY', ''),
+            'model': getattr(_config, 'ASR_FREE_MODEL', _DEFAULT_FREE_MODEL),
+            'api': 'multipart',
+        }
     return {
         'enabled': bool(getattr(_config, 'ASR_CLOUD_ENABLED', False)),
         'endpoint': getattr(_config, 'ASR_CLOUD_ENDPOINT',
-                            'https://api.siliconflow.cn/v1/audio/transcriptions'),
+                            'https://api.xiaomimimo.com/v1/chat/completions'),
         'api_key': getattr(_config, 'ASR_CLOUD_API_KEY', ''),
-        'model': getattr(_config, 'ASR_CLOUD_MODEL', 'FunAudioLLM/SenseVoiceSmall'),
+        'model': getattr(_config, 'ASR_CLOUD_MODEL', 'mimo-v2.5-asr'),
+        'api': 'chat',
     }
 
 
-def cloud_asr_configured() -> bool:
-    """云端 ASR 是否已配置可用（开关开 + 端点 + 密钥齐全）。"""
-    cfg = _asr_cfg()
+def _asr_cfg() -> dict:
+    """默认云端 provider（mimo）配置，供 /api/asr/status 等使用。"""
+    return _provider_cfg('mimo')
+
+
+def cloud_asr_configured(provider: str = 'mimo') -> bool:
+    """指定云端 provider 是否已配置可用（开关开 + 端点 + 密钥齐全）。"""
+    cfg = _provider_cfg(provider)
     return cfg['enabled'] and bool(cfg['endpoint']) and bool(cfg['api_key'])
 
 
@@ -128,7 +155,7 @@ def _call_timeout() -> float:
 
 
 def strip_rich_tags(text: str) -> str:
-    """清洗 SenseVoice 富文本标签并归一化空白。"""
+    """清洗富文本标签并归一化空白。"""
     if not text:
         return ''
     cleaned = _RICH_TAG_RE.sub(' ', text)
@@ -388,7 +415,32 @@ def export_chunks(audio_path: str, cuts: List[float]) -> Tuple[List[str], Option
 
 
 def _do_request(cfg: dict, path: str, timeout: float) -> httpx.Response:
-    """单次 API 调用（独立函数便于测试 monkeypatch）。"""
+    """单次云端 ASR 调用（独立函数便于测试 monkeypatch），按 provider 分派请求姿势。"""
+    if cfg.get('api') == 'multipart':
+        return _request_multipart(cfg, path, timeout)
+    return _request_chat(cfg, path, timeout)
+
+
+def _request_chat(cfg: dict, path: str, timeout: float) -> httpx.Response:
+    """MiMo：chat/completions 音频姿势，messages 只放 input_audio（base64 data URI），
+    **禁带 text 部分**——mimo 网关对 ASR 请求注入固定提示词，带文本会 400。"""
+    audio_b64 = base64.b64encode(Path(path).read_bytes()).decode()
+    with httpx.Client(timeout=timeout) as client:
+        return client.post(
+            cfg['endpoint'],
+            headers={'Authorization': f"Bearer {cfg['api_key']}"},
+            json={
+                'model': cfg['model'],
+                'messages': [{'role': 'user', 'content': [
+                    {'type': 'input_audio',
+                     'input_audio': {'data': f'data:audio/mpeg;base64,{audio_b64}'}}]},
+                ],
+            },
+        )
+
+
+def _request_multipart(cfg: dict, path: str, timeout: float) -> httpx.Response:
+    """XingChen/SiliconFlow：OpenAI multipart /audio/transcriptions 姿势（旧 SenseVoice 同款）。"""
     with open(path, 'rb') as f:
         with httpx.Client(timeout=timeout) as client:
             return client.post(
@@ -397,6 +449,17 @@ def _do_request(cfg: dict, path: str, timeout: float) -> httpx.Response:
                 files={'file': (Path(path).name, f, 'audio/mpeg')},
                 data={'model': cfg['model']},
             )
+
+
+def _extract_asr_text(provider: str, payload: dict) -> str:
+    """按 provider 从响应取转写文本（choices 可能为空数组，取值必须防越界）。"""
+    if provider == 'xingchen':
+        return (payload or {}).get('text', '') or ''
+    choices = payload.get('choices') or []
+    if not choices:
+        return ''
+    msg = choices[0].get('message') or {}
+    return msg.get('content') or ''
 
 
 def extract_sample(audio_path: str, max_seconds: float = 90.0) -> str:
@@ -423,15 +486,16 @@ def extract_sample(audio_path: str, max_seconds: float = 90.0) -> str:
     return str(out)
 
 
-def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int = _MAX_RETRIES) -> str:
+def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int = _MAX_RETRIES,
+                    provider: str = 'mimo') -> str:
     """单文件一次云端转写，返回清洗后的纯文本。
 
     401/403/404 配置类错误立即抛 CloudASRConfigError（重试无意义）；
-    429/5xx/网络错误指数退避重试，耗尽抛 CloudASRUnavailableError。
+    400/429/5xx/网络错误指数退避重试，耗尽抛 CloudASRUnavailableError。
     供完整转录与 B站字幕抽查共用。
     """
-    cfg = _asr_cfg()
-    if not cloud_asr_configured():
+    cfg = _provider_cfg(provider)
+    if not (cfg['enabled'] and bool(cfg['endpoint']) and bool(cfg['api_key'])):
         raise CloudASRConfigError('云端 ASR 未配置（config.py 缺 endpoint/api_key 或未启用）')
     if timeout is None:
         timeout = _call_timeout()
@@ -446,7 +510,7 @@ def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int
         else:
             if resp.status_code == 200:
                 try:
-                    text = (resp.json() or {}).get('text', '')
+                    text = _extract_asr_text(provider, resp.json() or {})
                 except ValueError:
                     last_reason = f'响应非 JSON: {resp.text[:200]}'
                     logger.warning(f'云端 ASR 响应异常: {last_reason}')
@@ -457,7 +521,7 @@ def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int
                 if resp.status_code == 401:
                     hint = 'ASR 密钥无效，请检查 config.py 的 ASR_CLOUD_API_KEY'
                 elif resp.status_code == 403:
-                    hint = 'ASR 密钥无权限（可能未开通语音服务或余额不足）'
+                    hint = 'ASR 密钥无权限（可能未开通服务或余额不足）'
                 else:
                     hint = f'ASR 模型不存在（model={cfg["model"]}），请检查 ASR_CLOUD_MODEL'
                 raise CloudASRConfigError(f'云端 ASR {resp.status_code}: {hint} | 响应: {detail}')
@@ -525,21 +589,23 @@ def transcribe_audio_cloud(
     cancel_check: Optional[Callable] = None,
     language: Optional[str] = None,
     speaker_diarization: bool = False,
+    provider: str = 'mimo',
 ) -> Tuple[str, str, int]:
-    """云端完整转录：静音切分 → 分片上传 → 句级时间戳 SRT/TXT。
+    """云端完整转录：静音切分 → 分片上传（指定 provider）→ 句级时间戳 SRT/TXT。
 
     与本地 Whisper 引擎同契约，返回 (srt_path, txt_path, seg_count)。
-    SenseVoice 自动识别语种（language 参数仅记录）；不支持说话人分离。
+    provider: 'mimo'（付费主力）| 'xingchen'（免费档）。两者均按音频内容直接转写
+    （language 参数仅记录）；不支持说话人分离。
     """
     if language:
-        logger.info(f'云端 SenseVoice 自动识别语种（忽略指定语言 {language}）')
+        logger.info(f'云端引擎按音频内容转写（忽略指定语言 {language}）')
     if speaker_diarization:
         logger.warning('云端引擎暂不支持说话人分离，已忽略该选项')
 
     src = Path(audio_path)
     duration = _get_audio_duration_seconds(audio_path) or 0.0
     if progress_callback:
-        progress_callback(2, f'云端转录（SenseVoice）| 时长 {_format_duration(duration)} | 静音探测中...')
+        progress_callback(2, f'云端转录（{_PROVIDER_LABELS.get(provider, provider)}）| 时长 {_format_duration(duration)} | 静音探测中...')
 
     silences = detect_silences(audio_path, duration)
     midpoints = [(s + e) / 2 for s, e in silences]
@@ -595,7 +661,7 @@ def transcribe_audio_cloud(
                                   thread_name_prefix='cloud-asr')
     try:
         futures = {
-            executor.submit(transcribe_file, cp): (i, seg_start, seg_end, cp)
+            executor.submit(transcribe_file, cp, provider=provider): (i, seg_start, seg_end, cp)
             for i, (cp, (seg_start, seg_end)) in enumerate(zip(chunk_paths, segments))
         }
         completed = 0
@@ -667,13 +733,14 @@ def transcribe_audio_cloud(
             except OSError:
                 pass
 
-    # 延迟画像：SenseVoice 是排队式推理，单片延迟波动大（实测 6s~300s+），
+    # 延迟画像：单片延迟波动大（旧 SenseVoice 实测 6s~300s+，mimo ~1-10s），
     # 中位/p90 直接决定整条转录快慢；日志留档便于诊断"云端突然变慢"
     if chunk_latencies:
         lat_sorted = sorted(chunk_latencies)
         n = len(lat_sorted)
         logger.info(
-            f'云端分片延迟画像: n={n} min={lat_sorted[0]:.1f}s 中位={lat_sorted[n // 2]:.1f}s '
+            f'[{_PROVIDER_LABELS.get(provider, provider)}] 云端分片延迟画像: n={n} '
+            f'min={lat_sorted[0]:.1f}s 中位={lat_sorted[n // 2]:.1f}s '
             f'p90={lat_sorted[min(int(n * 0.9), n - 1)]:.1f}s max={lat_sorted[-1]:.1f}s '
             f'（并发 {_concurrency()}，总耗时 {time.time() - transcribe_start:.1f}s）'
         )

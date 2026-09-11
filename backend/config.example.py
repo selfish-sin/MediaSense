@@ -43,17 +43,23 @@ FIRERED_MODEL_DIR = WHISPER_BASE / "firered_asr2_aed" / "sherpa-onnx-fire-red-as
 FIRERED_PUNCT_MODEL_DIR = WHISPER_BASE / "punct" / "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12"
 FIRERED_VAD_MODEL_PATH = WHISPER_BASE / "vad" / "silero_vad.onnx"
 
-# ============ 云端 ASR（SiliconFlow SenseVoice，主力转录引擎） ============
+# ============ 云端 ASR（小米 MiMo-v2.5-ASR，主力转录引擎；SenseVoice 已退役） ============
 # 密钥只写在 config.py（gitignored），绝不入库/不入文档。
-# 分片粒度/并发等参数见 services/cloud_asr.py：
-#   ASR_CLOUD_CONCURRENCY：并发上传路数（默认 8，上限 16；免费档排队延迟抖动大，
-#                          长视频提高并发可让总耗时贴近「最慢单片」而非累加）
+# MiMo 走 chat/completions 音频多模态姿势（请求禁带 text 部分），参数见 services/cloud_asr.py：
+#   ASR_CLOUD_CONCURRENCY：并发路数（默认 8，上限 16）
 #   ASR_CLOUD_TIMEOUT：单次调用超时秒数（默认 180）
+# 获取密钥：https://platform.xiaomimimo.com/ （¥0.5/小时，按音频时长计费）
 ASR_CLOUD_ENABLED = True
-ASR_CLOUD_ENDPOINT = "https://api.siliconflow.cn/v1/audio/transcriptions"
-ASR_CLOUD_API_KEY = ""  # 填你的 SiliconFlow API Key（https://cloud.siliconflow.cn/account/ak）
-ASR_CLOUD_MODEL = "FunAudioLLM/SenseVoiceSmall"
+ASR_CLOUD_ENDPOINT = "https://api.xiaomimimo.com/v1/chat/completions"
+ASR_CLOUD_API_KEY = ""  # 填你的小米 MiMo API Key
+ASR_CLOUD_MODEL = "mimo-v2.5-asr"
 ASR_CLOUD_CONCURRENCY = 8
+
+# ---- 免费档云端 ASR（engine=cloud_free，简单视频用；XingChen Ultra 限时免费） ----
+ASR_FREE_ENABLED = True
+ASR_FREE_ENDPOINT = "https://api.siliconflow.cn/v1/audio/transcriptions"
+ASR_FREE_API_KEY = ""  # 填你的 SiliconFlow API Key（https://cloud.siliconflow.cn/account/ak）
+ASR_FREE_MODEL = "XingChenAGI/XingChenASR-V3.2-Ultra"
 
 # ============ 服务端口 ============
 SERVER_PORT = 7001

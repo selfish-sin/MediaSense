@@ -93,30 +93,35 @@ function isLegacyModelSelection(key) {
   return LEGACY_MODEL_KEYS.has(key)
 }
 
-// ── 转录引擎相关的提示文案（cloud/firered/local 三态） ──
+// ── 转录引擎相关的提示文案（cloud/cloud_free/firered/local） ──
 const engineHint = computed(() => {
   const engine = settings.advancedOptions.transcribe_engine
   if (engine === 'firered') {
     return settings.fireredReady
-      ? '本地大模型，中英比云端 SenseVoice 更准（CPU 可跑，自动加标点）'
+      ? '本地大模型，中英识别自动加标点（CPU 可跑，无需联网）'
       : '首次使用将自动下载约 1.1GB 模型；也可手动放置到 models/ 目录'
   }
   if (engine === 'local') {
     return '通用兜底引擎，速度取决于设备'
   }
+  if (engine === 'cloud_free') {
+    return settings.freeCloudAvailable
+      ? '免费档 XingChen-ASR，速度快，适合简单清晰的视频；失败自动回退本地'
+      : '免费档未配置（config.py 缺 ASR_FREE_API_KEY）'
+  }
   return settings.cloudAsrAvailable
-    ? '云端中文更准更快，失败自动回退本地'
+    ? '云端中文最准最快（付费），失败自动回退本地'
     : '云端未配置（config.py 缺 ASR_CLOUD_API_KEY）'
 })
 const speakerDiarizationDesc = computed(() => {
   const engine = settings.advancedOptions.transcribe_engine
-  if (engine === 'cloud') return '云端引擎暂不支持，仅本地 Whisper 生效'
+  if (engine === 'cloud' || engine === 'cloud_free') return '云端引擎暂不支持，仅本地 Whisper 生效'
   if (engine === 'firered') return 'FireRedASR 暂不支持，仅本地 Whisper 生效'
   return '区分不同发言人'
 })
 const transcribeLanguageHint = computed(() => {
   const engine = settings.advancedOptions.transcribe_engine
-  if (engine === 'cloud') return '云端自动识别语种；此设置仅影响本地兜底与字幕抽查'
+  if (engine === 'cloud' || engine === 'cloud_free') return '云端自动识别语种；此设置仅影响本地兜底与字幕抽查'
   if (engine === 'firered') return 'FireRedASR 支持中英，自动识别；此设置仅影响本地兜底与字幕抽查'
   return '外文视频请改对应语言'
 })
@@ -1029,7 +1034,8 @@ function formatTokenTime(t) {
             <div class="adv-field">
               <div class="adv-field-label">转录引擎</div>
               <el-select v-model="settings.advancedOptions.transcribe_engine" class="adv-field-control">
-                <el-option label="云端 SenseVoice（推荐）" value="cloud" :disabled="!settings.cloudAsrAvailable" />
+                <el-option label="云端 MiMo-ASR（推荐）" value="cloud" :disabled="!settings.cloudAsrAvailable" />
+                <el-option label="云端 XingChen（免费·简单视频）" value="cloud_free" :disabled="!settings.freeCloudAvailable" />
                 <el-option label="本地 FireRedASR（中英最准）" value="firered" />
                 <el-option label="本地 Whisper" value="local" />
               </el-select>
