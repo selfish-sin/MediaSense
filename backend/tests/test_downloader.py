@@ -408,3 +408,60 @@ class TestSubtitleContentCheck:
         ok, detail = await verify_subtitle_against_audio(txt, "audio.m4a")
         assert ok is True
         assert "抽查不可用" in detail
+
+    @pytest.mark.asyncio
+    async def test_verify_cloud_first_skips_local(self, tmp_path, monkeypatch):
+        """云端已配置且成功 → 直接用云端结果，本地 Whisper 不参与"""
+        txt = tmp_path / "sub.txt"
+        txt.write_text("[00:00 - 00:05] 芯片简史第一集，我们开讲\n", encoding="utf-8")
+        sample = tmp_path / "s.mp3"
+        sample.write_bytes(b"x")
+        monkeypatch.setattr("services.cloud_asr.cloud_asr_configured", lambda: True)
+        monkeypatch.setattr("services.cloud_asr.extract_sample",
+                            lambda p, m: str(sample))
+        monkeypatch.setattr("services.cloud_asr.transcribe_file",
+                            lambda p, **kw: "芯片简史第一集，我们开讲")
+        local_calls = []
+
+        def fake_local(path, max_seconds, language, prompt):
+            local_calls.append(1)
+            return "本地不应被调用"
+
+        monkeypatch.setattr("services.transcriber.transcribe_audio_sample", fake_local)
+
+        ok, detail = await verify_subtitle_against_audio(txt, "audio.m4a")
+        assert ok is True
+        assert "云端" in detail
+        assert local_calls == []
+        assert not sample.exists()  # 云端抽查临时片段已清理
+
+    @pytest.mark.asyncio
+    async def test_verify_cloud_failure_falls_back_local(self, tmp_path, monkeypatch):
+        """云端抽查失败 → 回退本地 Whisper base"""
+        txt = tmp_path / "sub.txt"
+        txt.write_text("[00:00 - 00:05] 芯片简史第一集，我们开讲\n", encoding="utf-8")
+        monkeypatch.setattr("services.cloud_asr.cloud_asr_configured", lambda: True)
+        monkeypatch.setattr(
+            "services.cloud_asr.extract_sample",
+            lambda p, m: (_ for _ in ()).throw(RuntimeError("ffmpeg gone")))
+        monkeypatch.setattr(
+            "services.transcriber.transcribe_audio_sample",
+            lambda path, max_seconds, language, prompt: "芯片简史第一集，我们开讲")
+
+        ok, detail = await verify_subtitle_against_audio(txt, "audio.m4a")
+        assert ok is True
+        assert "本地" in detail
+
+    @pytest.mark.asyncio
+    async def test_verify_cloud_not_configured_goes_local(self, tmp_path, monkeypatch):
+        """云端未配置 → 本地抽查，日志说明走本地"""
+        txt = tmp_path / "sub.txt"
+        txt.write_text("[00:00 - 00:05] 芯片简史第一集，我们开讲\n", encoding="utf-8")
+        monkeypatch.setattr("services.cloud_asr.cloud_asr_configured", lambda: False)
+        monkeypatch.setattr(
+            "services.transcriber.transcribe_audio_sample",
+            lambda path, max_seconds, language, prompt: "芯片简史第一集，我们开讲")
+
+        ok, detail = await verify_subtitle_against_audio(txt, "audio.m4a")
+        assert ok is True
+        assert "本地" in detail

@@ -211,6 +211,30 @@ def _do_request(cfg: dict, path: str, timeout: float) -> httpx.Response:
             )
 
 
+def extract_sample(audio_path: str, max_seconds: float = 90.0) -> str:
+    """提取音频开头片段为 16k 单声道 mp3（B站字幕抽查云端转写用）。
+
+    与本地 Whisper 抽查（transcribe_audio_sample）互为备份：云端先试，
+    失败回本地。调用方负责删除返回的临时文件。
+    """
+    src = Path(audio_path)
+    out = src.with_name(f'{src.stem}_sample_cloud.mp3')
+    cmd = [
+        _ffmpeg_bin(), '-y', '-v', 'error',
+        '-i', audio_path,
+        '-t', str(max_seconds),
+        '-ac', '1', '-ar', '16000',
+        '-c:a', 'libmp3lame', '-b:a', '48k',
+        str(out),
+    ]
+    result = subprocess.run(cmd, capture_output=True, check=False, timeout=120)
+    if not out.exists() or out.stat().st_size <= 0:
+        raise CloudASRUnavailableError(
+            f'ffmpeg 抽取音频开头片段失败（{src.name}, returncode={result.returncode}）'
+        )
+    return str(out)
+
+
 def transcribe_file(path: str, timeout: float = _TIMEOUT_PER_CALL, max_retries: int = _MAX_RETRIES) -> str:
     """单文件一次云端转写，返回清洗后的纯文本。
 

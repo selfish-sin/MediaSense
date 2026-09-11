@@ -675,22 +675,46 @@ async def verify_subtitle_against_audio(txt_path, audio_path, sio=None, job_id: 
                                         language: Optional[str] = None) -> Tuple[bool, str]:
     """校验字幕内容与音频开头是否一致（防 B站 返回旧/错误字幕）。
 
-    用本地 Whisper 转写音频开头 max_seconds 秒，与字幕开头文本做相似度比对；
+    转写引擎云端优先（SenseVoice 中文准确率高，且无 base 模型
+    把中文幻觉成英文的老毛病），云端失败回退本地 Whisper base，
+    双失败按现行语义保留字幕（不让校验本身拖垮任务）。
     字幕与音频是两个独立来源，内容对不上即说明字幕不是当前视频的。
-    language 必须跟随字幕语言（中文传 'zh'）：base 模型自动检测会把
-    中文语音幻觉成英文，相似度恒≈0，好字幕也会被误杀（2026-09-08 复盘）。
-    返回 (是否保留字幕, 说明)。任何抽查异常都按“保留字幕”处理，
-    不让校验本身拖垮任务（异常时宁可慢也不能出错误内容的前提另行兜底）。
+    返回 (是否保留字幕, 说明)。
     """
     try:
         from services.transcriber import transcribe_audio_sample
         sub_head = _subtitle_head_text(txt_path, max_seconds)
-        zh_prompt = '以下是简体中文。' if language == 'zh' else None
-        wh_text = await asyncio.to_thread(
-            transcribe_audio_sample, str(audio_path), max_seconds, language, zh_prompt
+        asr_text: Optional[str] = None
+        engine_used = 'local'
+
+        # ★ 云端抽查（已配置才走）：90s 片段一次 API 调用
+        try:
+            from services import cloud_asr
+            if cloud_asr.cloud_asr_configured():
+                sample_mp3 = await asyncio.to_thread(
+                    cloud_asr.extract_sample, str(audio_path), max_seconds)
+                try:
+                    asr_text = await asyncio.to_thread(cloud_asr.transcribe_file, sample_mp3)
+                    engine_used = 'cloud'
+                finally:
+                    Path(sample_mp3).unlink(missing_ok=True)
+        except Exception as cloud_e:
+            logger.warning(f'云端字幕抽查失败，回退本地 Whisper base: {cloud_e}')
+            if sio:
+                from socket_handlers import emit_log
+                await emit_log(sio, job_id, f'  ⚠ 云端抽查失败（{type(cloud_e).__name__}），回退本地转写')
+
+        if asr_text is None:
+            zh_prompt = '以下是简体中文。' if language == 'zh' else None
+            asr_text = await asyncio.to_thread(
+                transcribe_audio_sample, str(audio_path), max_seconds, language, zh_prompt
+            )
+
+        ratio = _text_similarity(sub_head, asr_text)
+        detail = (
+            f'相似度 {ratio:.2f}（{"云端" if engine_used == "cloud" else "本地"}抽查 | '
+            f'字幕头 {len(sub_head)} 字 vs 音频转写 {len(asr_text)} 字）'
         )
-        ratio = _text_similarity(sub_head, wh_text)
-        detail = f'相似度 {ratio:.2f}（字幕头 {len(sub_head)} 字 vs 音频转写 {len(wh_text)} 字）'
         logger.info(f'字幕内容抽查: {detail}')
         if sio:
             from socket_handlers import emit_log
