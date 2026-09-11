@@ -1,0 +1,29 @@
+{
+ "qwen": {
+  "n_chunks": 88,
+  "failures": 9,
+  "seconds": 29.6,
+  "lat_min": 0.45,
+  "lat_med": 16.77,
+  "lat_max": 29.58,
+  "usage": {
+   "duration": 513
+  },
+  "srt_segments": 133
+ },
+ "mimo": {
+  "n_chunks": 88,
+  "failures": 0,
+  "seconds": 9.4,
+  "lat_min": 0.43,
+  "lat_med": 3.86,
+  "lat_max": 9.43,
+  "usage": {
+   "completion_tokens": 2272,
+   "prompt_tokens": 5624,
+   "total_tokens": 7896,
+   "seconds": 644
+  },
+  "srt_segments": 147
+ }
+}
