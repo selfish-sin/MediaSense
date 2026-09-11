@@ -465,7 +465,7 @@ async function applyLib(item) {
               />
 
               <el-collapse style="margin-top: 12px;">
-                <el-collapse-item title="查看代码默认文本（只读参考）" name="default">
+                <el-collapse-item title="查看代码默认文本" name="default">
                   <pre class="default-text-ref">{{ originalDefault || '（无默认文本）' }}</pre>
                 </el-collapse-item>
               </el-collapse>

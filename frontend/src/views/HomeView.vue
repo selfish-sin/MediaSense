@@ -94,24 +94,17 @@ function isLegacyModelSelection(key) {
 }
 
 // ── 转录引擎相关的提示文案（cloud/cloud_free/firered/local） ──
+// 引擎异常状态提示（未配置/需下载时显示，正常为空不渲染）
 const engineHint = computed(() => {
   const engine = settings.advancedOptions.transcribe_engine
   if (engine === 'firered') {
-    return settings.fireredReady
-      ? '本地大模型，中英识别自动加标点（CPU 可跑，无需联网）'
-      : '首次使用将自动下载约 1.1GB 模型；也可手动放置到 models/ 目录'
+    return settings.fireredReady ? '' : '首次使用将自动下载约 1.1GB 模型'
   }
-  if (engine === 'local') {
-    return '通用兜底引擎，速度取决于设备'
-  }
+  if (engine === 'local') return ''
   if (engine === 'cloud_free') {
-    return settings.freeCloudAvailable
-      ? '免费档 XingChen-ASR，速度快，适合简单清晰的视频；失败自动回退本地'
-      : '免费档未配置（config.py 缺 ASR_FREE_API_KEY）'
+    return settings.freeCloudAvailable ? '' : '免费档未配置（config.py 缺 ASR_FREE_API_KEY）'
   }
-  return settings.cloudAsrAvailable
-    ? '云端中文最准最快（付费），失败自动回退本地'
-    : '云端未配置（config.py 缺 ASR_CLOUD_API_KEY）'
+  return settings.cloudAsrAvailable ? '' : '云端未配置（config.py 缺 ASR_CLOUD_API_KEY）'
 })
 const speakerDiarizationDesc = computed(() => {
   const engine = settings.advancedOptions.transcribe_engine
@@ -121,8 +114,8 @@ const speakerDiarizationDesc = computed(() => {
 })
 const transcribeLanguageHint = computed(() => {
   const engine = settings.advancedOptions.transcribe_engine
-  if (engine === 'cloud' || engine === 'cloud_free') return '云端自动识别语种；此设置仅影响本地兜底与字幕抽查'
-  if (engine === 'firered') return 'FireRedASR 支持中英，自动识别；此设置仅影响本地兜底与字幕抽查'
+  if (engine === 'cloud' || engine === 'cloud_free') return '云端自动识别语种，此设置仅本地转录生效'
+  if (engine === 'firered') return '支持中英，自动识别'
   return '外文视频请改对应语言'
 })
 
@@ -834,7 +827,6 @@ function formatTokenTime(t) {
       <template #header>
         <div class="card-head-row">
           <span class="wb-card-title">输入</span>
-          <span class="card-head-hint">URL · 批量 · 本地文件 · 文本</span>
         </div>
       </template>
 
@@ -849,7 +841,7 @@ function formatTokenTime(t) {
       <el-input
         v-if="inputType === 'url'"
         v-model="inputUrl"
-        placeholder="粘贴视频 URL（YouTube / Bilibili / 抖音等）"
+        placeholder="粘贴视频 URL"
         size="large"
         clearable
         class="input-main"
@@ -897,7 +889,7 @@ function formatTokenTime(t) {
         type="textarea"
         :rows="6"
         resize="vertical"
-        placeholder="每行一个 URL（自动去重、去空行）"
+        placeholder="每行一个 URL"
         class="input-main"
       />
 
@@ -950,7 +942,6 @@ function formatTokenTime(t) {
       <template #header>
         <div class="card-head-row">
           <span class="wb-card-title">总结配置</span>
-          <span class="card-head-hint">预设配方 · 8 维度 · 完全自定义</span>
         </div>
       </template>
       <SplitPromptPanel />
@@ -961,7 +952,6 @@ function formatTokenTime(t) {
       <template #header>
         <div class="card-head-row">
           <span class="wb-card-title">高级选项</span>
-          <span class="card-head-hint">模型 · 流程开关 · 转录 · 输出</span>
         </div>
       </template>
 
@@ -972,7 +962,7 @@ function formatTokenTime(t) {
           <el-select
             v-model="settings.selectedModel"
             class="adv-model-select"
-            placeholder="选择用于总结/翻译的模型"
+            placeholder="选择模型"
             filterable
             @change="modelTouched = true"
           >
@@ -993,28 +983,24 @@ function formatTokenTime(t) {
               <el-switch v-model="settings.doSummary" size="small" />
               <span class="adv-switch-meta">
                 <span class="adv-switch-name">AI 总结</span>
-                <span class="adv-switch-desc">生成结构化结果</span>
               </span>
             </label>
             <label class="adv-switch-tile" :class="{ on: settings.doTranslate }">
               <el-switch v-model="settings.doTranslate" size="small" />
               <span class="adv-switch-meta">
                 <span class="adv-switch-name">全文翻译</span>
-                <span class="adv-switch-desc">整文译为目标语言</span>
               </span>
             </label>
             <label class="adv-switch-tile" :class="{ on: settings.doSubtitle }">
               <el-switch v-model="settings.doSubtitle" size="small" />
               <span class="adv-switch-meta">
                 <span class="adv-switch-name">字幕翻译</span>
-                <span class="adv-switch-desc">SRT 分段翻译</span>
               </span>
             </label>
             <label class="adv-switch-tile" :class="{ on: settings.previewBeforeSummary }">
               <el-switch v-model="settings.previewBeforeSummary" size="small" />
               <span class="adv-switch-meta">
                 <span class="adv-switch-name">转录预览</span>
-                <span class="adv-switch-desc">总结前可校对文本（仅单任务）</span>
               </span>
             </label>
             <label class="adv-switch-tile" :class="{ on: settings.advancedOptions.speaker_diarization }">
@@ -1034,12 +1020,12 @@ function formatTokenTime(t) {
             <div class="adv-field">
               <div class="adv-field-label">转录引擎</div>
               <el-select v-model="settings.advancedOptions.transcribe_engine" class="adv-field-control">
-                <el-option label="云端 MiMo-ASR（推荐）" value="cloud" :disabled="!settings.cloudAsrAvailable" />
-                <el-option label="云端 XingChen（免费·简单视频）" value="cloud_free" :disabled="!settings.freeCloudAvailable" />
-                <el-option label="本地 FireRedASR（中英最准）" value="firered" />
+                <el-option label="云端 MiMo-ASR" value="cloud" :disabled="!settings.cloudAsrAvailable" />
+                <el-option label="云端 XingChen（免费）" value="cloud_free" :disabled="!settings.freeCloudAvailable" />
+                <el-option label="本地 FireRedASR" value="firered" />
                 <el-option label="本地 Whisper" value="local" />
               </el-select>
-              <p class="adv-field-hint">{{ engineHint }}</p>
+              <p v-if="engineHint" class="adv-field-hint">{{ engineHint }}</p>
             </div>
             <template v-if="settings.advancedOptions.transcribe_engine === 'local'">
               <div class="adv-field">
@@ -1048,44 +1034,42 @@ function formatTokenTime(t) {
                   <el-option label="tiny · 最快 / 精度低" value="tiny" />
                   <el-option label="base · 快速 / 中文尚可" value="base" />
                   <el-option label="small · 平衡" value="small" />
-                  <el-option label="medium · 高质量（默认）" value="medium" />
+                  <el-option label="medium · 高质量" value="medium" />
                 </el-select>
               </div>
               <div class="adv-field">
                 <div class="adv-field-label">转录设备</div>
                 <el-select v-model="settings.advancedOptions.whisper_device" class="adv-field-control">
-                  <el-option label="自动（推荐）" value="auto" />
+                  <el-option label="自动" value="auto" />
                   <el-option label="CUDA GPU" value="cuda" />
                   <el-option label="CPU" value="cpu" />
                 </el-select>
-                <p class="adv-field-hint">选 CUDA 不可用时自动回退 CPU</p>
               </div>
             </template>
             <div class="adv-field">
               <div class="adv-field-label">转录语言</div>
               <el-select v-model="settings.advancedOptions.transcribe_language" class="adv-field-control">
-                <el-option label="中文（默认）" value="zh" />
+                <el-option label="中文" value="zh" />
                 <el-option label="英语" value="en" />
                 <el-option label="日语" value="ja" />
                 <el-option label="韩语" value="ko" />
                 <el-option label="法语" value="fr" />
                 <el-option label="德语" value="de" />
-                <el-option label="自动检测（中文易误判）" :value="null" />
+                <el-option label="自动检测" :value="null" />
               </el-select>
-              <p class="adv-field-hint">{{ transcribeLanguageHint }}</p>
+              <p v-if="transcribeLanguageHint" class="adv-field-hint">{{ transcribeLanguageHint }}</p>
             </div>
             <div class="adv-field adv-field--switch">
               <div class="adv-field-label">强制 Whisper 转录</div>
               <div class="adv-inline-switch">
                 <el-switch v-model="settings.advancedOptions.force_transcribe" />
-                <span class="adv-field-hint-inline">跳过 B 站字幕，更准更慢</span>
               </div>
             </div>
             <div class="adv-field adv-field--switch">
               <div class="adv-field-label">AI 校正转录</div>
               <div class="adv-inline-switch">
                 <el-switch v-model="settings.advancedOptions.ai_correct" />
-                <span class="adv-field-hint-inline">纠同音字 / 专名 / 标点（多耗 token）</span>
+                <span class="adv-field-hint-inline">纠同音字 / 专名 / 标点</span>
               </div>
             </div>
             <!-- ★ 校正模型选择器：仅开启 AI 校正时显示，留空则用主模型 -->
@@ -1306,7 +1290,6 @@ function formatTokenTime(t) {
       <template #header>
         <div class="card-head-row">
           <span class="wb-card-title">系统日志</span>
-          <span class="card-head-hint">后端文件 · 排障用</span>
           <div class="card-head-actions">
             <el-switch v-if="showBackendLogs" v-model="autoScroll" active-text="自动滚动" size="small" />
             <el-button v-if="showBackendLogs" size="small" text @click="loadAllHistory">全部</el-button>
@@ -1339,7 +1322,6 @@ function formatTokenTime(t) {
       <template #header>
         <div class="card-head-row">
           <span class="wb-card-title">转录预览</span>
-          <span class="card-head-hint">可编辑后继续 AI 总结</span>
         </div>
       </template>
       <el-input

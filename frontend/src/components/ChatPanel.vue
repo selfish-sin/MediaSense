@@ -6,7 +6,7 @@
           <el-icon style="margin-right: 4px; vertical-align: -2px;"><MessageCircle /></el-icon>追问
         </span>
         <div class="chat-header-tools">
-          <el-tooltip content="开启后，追问时会先通过智谱API联网搜索（与所选模型无关），结果带来源引用" placement="top">
+          <el-tooltip content="开启后追问先联网搜索，结果带来源引用" placement="top">
             <span class="search-switch">
               <el-switch v-model="enableSearch" size="small" active-text="联网" inline-prompt />
             </span>

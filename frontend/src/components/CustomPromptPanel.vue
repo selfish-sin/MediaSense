@@ -136,13 +136,12 @@ function previewText(p) {
   <div class="custom-prompt-panel">
     <div class="panel-header">
       <span class="panel-title">完全自定义提示词</span>
-      <span class="panel-sub">纯空白 prompt，启用后覆盖一切维度拼装</span>
     </div>
 
     <!-- 启用状态指示条 -->
     <div v-if="isActive" class="override-active-bar">
       <el-icon><Check /></el-icon>
-      <span>已启用自定义提示词（覆盖维度拼装）</span>
+      <span>已启用自定义提示词</span>
       <el-button size="small" text :icon="X" @click="disableOverride" class="close-btn">关闭</el-button>
     </div>
 
