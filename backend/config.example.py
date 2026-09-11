@@ -36,6 +36,13 @@ LOCAL_MODEL_DIRS = {
 }
 DEFAULT_WHISPER_MODEL = "base"
 
+# ============ 本地 FireRedASR2-AED（sherpa-onnx int8，CPU，不依赖 torch） ============
+# 模型目录与 Whisper 同级（项目同级 models/，gitignored）；缺失时首次使用自动下载，
+# 也支持手动从 GitHub release 下载后按目录名放置。参数与下载地址见 services/local_asr.py。
+FIRERED_MODEL_DIR = WHISPER_BASE / "firered_asr2_aed" / "sherpa-onnx-fire-red-asr2-zh_en-int8-2026-02-26"
+FIRERED_PUNCT_MODEL_DIR = WHISPER_BASE / "punct" / "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12"
+FIRERED_VAD_MODEL_PATH = WHISPER_BASE / "vad" / "silero_vad.onnx"
+
 # ============ 云端 ASR（SiliconFlow SenseVoice，主力转录引擎） ============
 # 密钥只写在 config.py（gitignored），绝不入库/不入文档。
 # 分片粒度/并发等参数见 services/cloud_asr.py：
