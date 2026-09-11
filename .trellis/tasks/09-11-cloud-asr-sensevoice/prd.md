@@ -20,6 +20,7 @@
 - [ ] 云端失败（网络/429 重试耗尽/401）→ 自动回退本地 Whisper，日志与进度条可见回退原因，任务不中断
 - [ ] `GET /api/asr/status` 返回云端配置状态（不含密钥），前端云端未配置时禁用云端选项
 - [ ] 取消任务能在分片间中止（TranscriptionCancelledError）
+- [ ] 上传上限从 2GB 提高到 8GB（后端 `jobs.py MAX_UPLOAD_SIZE` 与前端 `uploadRules.js` 同步，流式落盘已验证无内存风险；上传/云端的 1h/50MB 限制由静音分片天然绕开）
 - [ ] 本地模型清理：删除 `models/whisper_tiny`、`whisper_small`、`whisper_small_broken`、`whisper_medium_broken`；保留 `whisper_base`（B站字幕抽查依赖）与 `whisper_medium`（本地兜底）
 - [ ] 后端 pytest 全绿（含新增 cloud_asr 单测：切点计划、标签清洗、SRT 组装、mock httpx 成功/429/401）、前端 vitest 全绿、vite build 通过
 - [ ] 真实 API 冒烟：用真实 key 转录一段真实音频成功（用户提供 key 即为授权）

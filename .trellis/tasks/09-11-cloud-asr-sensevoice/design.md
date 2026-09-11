@@ -25,9 +25,16 @@ main._process_job_impl
 2. **切点计划（纯函数 `_plan_cuts`，单测覆盖）**：输入 (总时长, 候选切点)，输出分片区间：
    - 目标段长 6~20s，硬上限 30s（超长且无切点时强制中点二分），下限 3s（过短并入前段）
 3. **导出分片**：一次 `ffmpeg -f segment -segment_times t1,t2,... -ac 1 -ar 16000 -c:a libmp3lame -b:a 48k chunk_%03d.mp3`（单片 ≤30s → ≤200KB，远小于 50MB 限制）
-4. **逐片上传**：httpx multipart POST（file + model），超时 90s/片；429/5xx 指数退避重试 ≤3；片间检查 cancel_check；progress：`10 + 已完成音频秒/总秒 * 88`，消息含 速度/ETA（沿用现有文案风格）
+4. **逐片上传**：httpx multipart POST（file + model），超时 180s/片（硅基流动 SenseVoice 排队式推理，90s 常 ReadTimeout，冒烟实测放宽后显著减少重试；env `ASR_CLOUD_TIMEOUT` 可调）；429/5xx 指数退避重试 ≤3；片间检查 cancel_check；progress：`10 + 已完成音频秒/总秒 * 88`，消息含 速度/ETA（沿用现有文案风格）
 5. **清洗**：去 `<|HAPPY|>`/`<|BGM|>` 等富文本标签（防御性，SiliconFlow 通常已清洗）；空文本分片丢弃（纯音乐/静音段）
-6. **落盘**：SRT（区间即字幕时间轴）+ TXT（`[MM:SS - MM:SS] 文本`，与现有格式一致）
+6. **分片时长对账**：`export_chunks` 顺带写 `-segment_list csv`，SRT 时间轴按 ffmpeg 实测分片时长累计（探测时长与实际音/视频存在毫秒级偏差，曾致「4 片 vs 计划 3 片」），根治分片数与计划不一致
+7. **落盘**：SRT（区间即字幕时间轴）+ TXT（`[MM:SS - MM:SS] 文本`，与现有格式一致）
+
+### 分片级韧性（长视频数百片，单片抖动不应整体回退）
+- 单片 Unavailable（429/5xx/网络重试耗尽）→ 跳过该段记 error 日志（含区间），其余分片照常转录，进度条显示「N 片失败」
+- 全部分片失败 → 抛 CloudASRUnavailableError，调用方整体回退本地 Whisper
+- 部分失败 → 返回部分结果 + 日志/进度告警失败区间（比整条回退本地精度更好）
+- CloudASRConfigError（401/403/404）→ 立即抛出整体回退（重试无意义）
 
 ### 失败语义（错误必须可见可行动）
 - 401/403 → 「ASR 密钥无效或无权限」；404 → 「模型不存在」；均回退本地并在日志给出修复指引

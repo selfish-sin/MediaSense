@@ -4,6 +4,7 @@
 不触网：_do_request / detect_silences / export_chunks / transcribe_file 均可注入替身。
 export_chunks 用项目自带 ffmpeg 生成真实音频验证（毫秒级，不触网）。
 """
+import shutil
 import subprocess
 
 import httpx
@@ -227,7 +228,7 @@ class TestTranscribeFile:
 
 class TestExportChunksReal:
     """冒烟实测教训：收尾切点传给 segment_times 会在 EOF 前多切微型尾片（4 vs 3）。
-    修复后只传内部切点，分片数必须等于计划切点数。"""
+    修复后只传内部切点；分片实测时长（-segment_list）随结果一并返回，供时间轴对账。"""
 
     @pytest.fixture
     def sine_wav(self, tmp_path):
@@ -243,31 +244,46 @@ class TestExportChunksReal:
 
     def test_trailing_cut_not_passed_to_segment_times(self, sine_wav, tmp_path):
         # cuts 含收尾切点 3.0：只应按内部切点 1.5 切，产出 2 片而非 3 片
-        chunks = cloud_asr.export_chunks(sine_wav, [1.5, 3.0])
+        chunks, durations = cloud_asr.export_chunks(sine_wav, [1.5, 3.0])
         assert len(chunks) == 2
         for c in chunks:
             assert Path(c).stat().st_size > 0
+        # 实测时长与计划一致（1.5 + 1.5 ≈ 3s，容差毫秒级帧对齐）
+        assert durations is not None and len(durations) == 2
+        assert sum(durations) == pytest.approx(3.0, abs=0.1)
 
     def test_single_chunk_direct_transcode(self, sine_wav, tmp_path):
-        # 无内部切点（cuts 只有收尾）→ 整段 1 片
-        chunks = cloud_asr.export_chunks(sine_wav, [3.0])
+        # 无内部切点（cuts 只有收尾）→ 整段 1 片；无 segment_list，durations=None
+        chunks, durations = cloud_asr.export_chunks(sine_wav, [3.0])
         assert len(chunks) == 1
+        assert durations is None
         assert Path(chunks[0]).stat().st_size > 0
         assert Path(chunks[0]).name.endswith('_cloud_000.mp3')
 
     def test_chunks_are_mp3_16k_mono(self, sine_wav, tmp_path):
-        chunks = cloud_asr.export_chunks(sine_wav, [1.0, 2.0, 3.0])
+        chunks, _ = cloud_asr.export_chunks(sine_wav, [1.0, 2.0, 3.0])
         assert len(chunks) == 3
-        # 分片可被 ffprobe 识别为 mp3（16k 单声道）
-        ffprobe = str(Path(cloud_asr._ffmpeg_bin()).with_name('ffprobe.exe'))
-        if not Path(ffprobe).exists():
-            ffprobe = 'ffprobe'  # PATH 兜底
+        # 分片后缀可被 ffprobe 识别为 mp3（16k 单声道 48kbps）
+        # which('ffmpeg') 可能返回大写的 ffmpeg.EXE，后缀替换要大小写不敏感
+        ffprobe = shutil.which('ffprobe') or str(
+            Path(cloud_asr._ffmpeg_bin()).with_name('ffprobe.exe'))
         r = subprocess.run(
-            [ffprobe, '-v', 'quiet', '-show_entries', 'stream=codec_name,sample_rate,channels',
+            [ffprobe,
+             '-v', 'quiet', '-show_entries', 'stream=codec_name,sample_rate,channels',
              '-of', 'csv=p=0', chunks[0]],
             capture_output=True, text=True, timeout=15,
         )
-        assert 'mp3,16000,1' in r.stdout
+        assert 'mp3,16000,1' in r.stdout, f'ffprobe 输出异常: rc={r.returncode} stderr={r.stderr[:200]}'
+
+    def test_stale_chunks_cleaned_before_export(self, sine_wav, tmp_path):
+        # 上次转录残留的高编号分片（本次不会重写）不混入新导出结果
+        stale = tmp_path / 'sine_cloud_009.mp3'
+        stale.write_bytes(b'stale')
+        chunks, durations = cloud_asr.export_chunks(sine_wav, [1.5, 3.0])
+        assert len(chunks) == 2
+        assert not stale.exists()
+        assert 'sine_cloud_009.mp3' not in [Path(c).name for c in chunks]
+        assert durations is not None and len(durations) == 2
 
 
 # ============ transcribe_audio_cloud（编排，全 mock） ============
@@ -294,7 +310,7 @@ def _setup_orchestration(monkeypatch, tmp_path, duration=100.0, texts=None, sile
         cp = tmp_path / f'fake_audio_cloud_{i:03d}.mp3'
         cp.write_bytes(b'\x00' * 8)
         chunk_paths.append(str(cp))
-    monkeypatch.setattr(cloud_asr, 'export_chunks', lambda ap, c: list(chunk_paths))
+    monkeypatch.setattr(cloud_asr, 'export_chunks', lambda ap, c: (list(chunk_paths), None))
 
     calls = []
     def fake_transcribe(path, **kwargs):
@@ -384,6 +400,50 @@ class TestTranscribeAudioCloud:
             transcribe_audio_cloud(fake_audio)
         for cp in chunk_paths:
             assert not Path(cp).exists()
+
+    def test_timeline_from_actual_chunk_durations(self, monkeypatch, tmp_path, fake_audio):
+        """时间轴按 ffmpeg 实测分片时长累计（而非计划切点），根治 4vs3 类偏差。"""
+        monkeypatch.setattr(cloud_asr, '_get_audio_duration_seconds', lambda p: 100.0)
+        monkeypatch.setattr(cloud_asr, 'detect_silences', lambda p, d: [])
+        monkeypatch.setattr(cloud_asr, '_concurrency', lambda: 1)
+        chunks = []
+        for name in ['fake_audio_cloud_000.mp3', 'fake_audio_cloud_001.mp3']:
+            cp = tmp_path / name
+            cp.write_bytes(b'\x00' * 8)
+            chunks.append(str(cp))
+        # 探测 100s，但实际只有 2 片（10s + 90s）——SRT 时间轴必须按实测累计
+        monkeypatch.setattr(cloud_asr, 'export_chunks', lambda ap, c: (chunks, [10.0, 90.0]))
+        texts = iter(['第一段', '第二段'])
+        monkeypatch.setattr(cloud_asr, 'transcribe_file', lambda p, **kw: next(texts))
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        assert seg_count == 2
+        lines = Path(srt).read_text(encoding='utf-8').splitlines()
+        assert lines[1].startswith('00:00:00,000 --> 00:00:10,000')
+        assert lines[5].startswith('00:00:10,000 --> 00:01:40,000')
+
+    def test_single_shard_failure_returns_partial(self, monkeypatch, tmp_path, fake_audio):
+        """单片 Unavailable 重试耗尽 → 跳过该段记日志，其余照常返回部分结果。"""
+        _setup_orchestration(monkeypatch, tmp_path)
+        def flaky(path, **kw):
+            if Path(path).name == 'fake_audio_cloud_002.mp3':
+                raise CloudASRUnavailableError('重试耗尽: ReadTimeout')
+            return f'OK-{Path(path).name}'
+        monkeypatch.setattr(cloud_asr, 'transcribe_file', flaky)
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        assert seg_count == 4
+        srt_text = Path(srt).read_text(encoding='utf-8')
+        assert 'OK-fake_audio_cloud_000.mp3' in srt_text
+        assert 'OK-fake_audio_cloud_004.mp3' in srt_text
+        assert 'OK-fake_audio_cloud_002.mp3' not in srt_text
+
+    def test_all_shards_fail_raises_unavailable(self, monkeypatch, tmp_path, fake_audio):
+        """全部分片失败 → 抛 UnavailableError，由调用方整体回退本地 Whisper。"""
+        _setup_orchestration(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            cloud_asr, 'transcribe_file',
+            lambda p, **kw: (_ for _ in ()).throw(CloudASRUnavailableError('HTTP 500')))
+        with pytest.raises(CloudASRUnavailableError, match='全部分片失败'):
+            transcribe_audio_cloud(fake_audio)
 
     def test_no_duration_raises(self, monkeypatch, tmp_path, fake_audio):
         monkeypatch.setattr(cloud_asr, '_get_audio_duration_seconds', lambda p: None)

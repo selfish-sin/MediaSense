@@ -8,8 +8,12 @@ SiliconFlow /v1/audio/transcriptions 只返回纯文本（无时间戳），
 契约与本地 Whisper 引擎一致：返回 (srt_path, txt_path, seg_count)。
 
 错误语义（必须可见可行动，禁止静默吞错）：
-- CloudASRConfigError：401/403/404 配置类错误，不重试，调用方回退本地并给修复指引
-- CloudASRUnavailableError：429/5xx/网络错误退避重试耗尽，调用方回退本地
+- CloudASRConfigError：401/403/404 配置类错误，不重试，立即抛给调用方回退本地并给修复指引
+- CloudASRUnavailableError：429/5xx/网络错误退避重试耗尽
+分片级韧性（长视频数百片，单片抖动不应整体回退本地）：
+- 单片 Unavailable 失败 → 跳过该段记日志，其余分片照常转录
+- 全部分片失败 → 抛 CloudASRUnavailableError，调用方整体回退本地 Whisper
+- 部分失败 → 返回部分结果并在日志/进度条告警失败区间
 """
 import logging
 import math
@@ -44,7 +48,9 @@ _SILENCE_NOISE_DB = -35  # 静音判定阈值
 _SILENCE_MIN_D = 0.5     # 静音最短时长
 
 # API 调用
-_TIMEOUT_PER_CALL = 90.0
+# SiliconFlow SenseVoice 是排队式推理，常态延迟常 >90s（冒烟实测 90s 单次超时屡发
+# ReadTimeout，重试后多数即返回 200）：单次超时放宽到 180s，env ASR_CLOUD_TIMEOUT 可调
+_TIMEOUT_PER_CALL = 180.0
 _MAX_RETRIES = 3
 _BACKOFF_CAP = 8.0
 # 有界并发：SiliconFlow 限流为账号级 RPM/TPM（L0 免费档 RPM 1000），
@@ -92,6 +98,16 @@ def _concurrency() -> int:
         return max(1, min(int(raw), 8))
     except (TypeError, ValueError):
         return _DEFAULT_CONCURRENCY
+
+
+def _call_timeout() -> float:
+    """单次云端调用超时秒数（env ASR_CLOUD_TIMEOUT 可调）。"""
+    raw = os.getenv('ASR_CLOUD_TIMEOUT')
+    try:
+        value = float(raw)
+        return value if value > 0 else _TIMEOUT_PER_CALL
+    except (TypeError, ValueError):
+        return _TIMEOUT_PER_CALL
 
 
 def strip_rich_tags(text: str) -> str:
@@ -172,19 +188,46 @@ def detect_silences(audio_path: str, total_duration: Optional[float]) -> List[Tu
         return []
 
 
-def export_chunks(audio_path: str, cuts: List[float]) -> List[str]:
-    """按切点导出 16k 单声道 mp3 分片，返回分片路径列表（有序）。
+def _parse_segment_list(list_file: Path) -> Optional[List[float]]:
+    """解析 ffmpeg -segment_list csv 输出（每行 "<路径>,<起始秒>,<结束秒>"），返回每片时长。
+
+    时长 = 结束 - 起始（部分构建会带第 4 列 duration，取末两列之差等价）。
+    解析失败返回 None，调用方退化为计划切点区间。
+    """
+    try:
+        rows: List[float] = []
+        for line in list_file.read_text(encoding='utf-8', errors='ignore').splitlines():
+            fields = line.strip().split(',')
+            if len(fields) >= 3:
+                rows.append(float(fields[-1]) - float(fields[-2]))
+        return rows or None
+    except Exception as e:
+        logger.warning(f'解析分片时长列表失败（{list_file.name}），按等分处理: {e}')
+        return None
+
+
+def export_chunks(audio_path: str, cuts: List[float]) -> Tuple[List[str], Optional[List[float]]]:
+    """按切点导出 16k 单声道 mp3 分片，返回 (分片路径有序列表, 每片实际时长秒列表)。
 
     cuts 含收尾切点（=总时长），但 segment_times 只传内部切点：
     ffprobe 时长与实际音频存在毫秒级偏差，把收尾切点传给 ffmpeg 会在
     EOF 前多切出一个微型尾片（冒烟实测 4 片 vs 计划 3 片）。最后一片
     由 ffmpeg 自动延伸到实际 EOF。单片场景（无内部切点）直接整段转码。
     每片 ≤30s → ≤200KB，远小于 API 单次 ≤50MB 限制。
+
+    第二返回值取 ffmpeg -segment_list 实测的每片时长（帧对齐真实值），
+    时间轴以它为准，根治「分片数与计划不一致」；单片/解析失败时为 None。
     """
     src = Path(audio_path)
     out_dir = src.parent
     prefix = src.stem
     pattern = str(out_dir / f'{prefix}_cloud_%03d.mp3')
+    list_file = out_dir / f'{prefix}_cloud_list.txt'
+    # 清残留：同名音频重复转录时，上次残留分片会被 glob 混入
+    for old in out_dir.glob(f'{prefix}_cloud_*.mp3'):
+        old.unlink(missing_ok=True)
+    list_file.unlink(missing_ok=True)
+
     internal_cuts = cuts[:-1] if len(cuts) > 1 else []
     if internal_cuts:
         times = ','.join(f'{t:.3f}' for t in internal_cuts)
@@ -192,6 +235,7 @@ def export_chunks(audio_path: str, cuts: List[float]) -> List[str]:
             _ffmpeg_bin(), '-y', '-v', 'error',
             '-i', audio_path,
             '-f', 'segment', '-segment_times', times,
+            '-segment_list', str(list_file), '-segment_list_type', 'csv',
             '-ac', '1', '-ar', '16000',
             '-c:a', 'libmp3lame', '-b:a', '48k',
             pattern,
@@ -210,7 +254,13 @@ def export_chunks(audio_path: str, cuts: List[float]) -> List[str]:
         raise CloudASRUnavailableError(
             f'ffmpeg 分片导出失败（音频: {src.name}），无法继续云端转录'
         )
-    return [str(c) for c in chunks]
+    durations = _parse_segment_list(list_file) if internal_cuts else None
+    if durations is not None and len(durations) != len(chunks):
+        logger.warning(
+            f'分片时长列表与分片数不一致（{len(durations)} vs {len(chunks)}），忽略列表按等分'
+        )
+        durations = None
+    return [str(c) for c in chunks], durations
 
 
 def _do_request(cfg: dict, path: str, timeout: float) -> httpx.Response:
@@ -249,7 +299,7 @@ def extract_sample(audio_path: str, max_seconds: float = 90.0) -> str:
     return str(out)
 
 
-def transcribe_file(path: str, timeout: float = _TIMEOUT_PER_CALL, max_retries: int = _MAX_RETRIES) -> str:
+def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int = _MAX_RETRIES) -> str:
     """单文件一次云端转写，返回清洗后的纯文本。
 
     401/403/404 配置类错误立即抛 CloudASRConfigError（重试无意义）；
@@ -259,6 +309,8 @@ def transcribe_file(path: str, timeout: float = _TIMEOUT_PER_CALL, max_retries: 
     cfg = _asr_cfg()
     if not cloud_asr_configured():
         raise CloudASRConfigError('云端 ASR 未配置（config.py 缺 endpoint/api_key 或未启用）')
+    if timeout is None:
+        timeout = _call_timeout()
 
     last_reason = ''
     for attempt in range(max_retries):
@@ -326,26 +378,35 @@ def transcribe_audio_cloud(
         seg_count_est = len(cuts)
         progress_callback(4, f'静音探测完成：{len(silences)} 处静音 → {seg_count_est} 个分片，导出中...')
 
-    chunk_paths = export_chunks(audio_path, cuts)
-    # 分片区间：[0, c1), [c1, c2), ..., [cN-1, total]（切点数 = 分片数）
-    boundaries = [0.0] + cuts
-    segments: List[Tuple[float, float]] = list(zip(boundaries[:-1], boundaries[1:]))
-    if len(chunk_paths) != len(segments):
-        planned = len(segments)
-        if len(chunk_paths) > planned:
-            # 实际分片多于计划（探测时长偏差导致尾部多切）：前段区间保持，
-            # 从计划的最后一段起点起全部并入尾段直到总时长
-            head = segments[:len(chunk_paths) - 1]
-            last_start = head[-1][1] if head else 0.0
-            segments = head + [(last_start, duration)]
-            logger.warning(f'分片数多于计划（{len(chunk_paths)} vs {planned}），多余分片已并入尾段')
-        else:
-            # 分片少于计划（探测时长高估，末尾内部切点越过 EOF）：退化为等分
-            logger.warning(
-                f'分片数少于计划（{len(chunk_paths)} vs {len(segments)}），按等分时长处理'
-            )
-            step = duration / len(chunk_paths) if len(chunk_paths) else 0.0
-            segments = [(i * step, (i + 1) * step) for i in range(len(chunk_paths))]
+    chunk_paths, chunk_durations = export_chunks(audio_path, cuts)
+    if chunk_durations:
+        # 时间轴以 ffmpeg 实测分片时长为准（帧对齐真实时长，分片数==分段数恒成立）
+        segments: List[Tuple[float, float]] = []
+        acc = 0.0
+        for d in chunk_durations:
+            segments.append((round(acc, 3), round(acc + d, 3)))
+            acc += d
+    else:
+        # 单片（无内部切点）或列表解析失败：退回计划切点区间
+        # 分片区间：[0, c1), [c1, c2), ..., [cN-1, total]（切点数 = 分片数）
+        boundaries = [0.0] + cuts
+        segments = list(zip(boundaries[:-1], boundaries[1:]))
+        if len(chunk_paths) != len(segments):
+            planned = len(segments)
+            if len(chunk_paths) > planned:
+                # 实际分片多于计划（探测时长偏差导致尾部多切）：前段区间保持，
+                # 从计划的最后一段起点起全部并入尾段直到总时长
+                head = segments[:len(chunk_paths) - 1]
+                last_start = head[-1][1] if head else 0.0
+                segments = head + [(last_start, duration)]
+                logger.warning(f'分片数多于计划（{len(chunk_paths)} vs {planned}），多余分片已并入尾段')
+            else:
+                # 分片少于计划（探测时长高估，末尾内部切点越过 EOF）：退化为等分
+                logger.warning(
+                    f'分片数少于计划（{len(chunk_paths)} vs {len(segments)}），按等分时长处理'
+                )
+                step = duration / len(chunk_paths) if len(chunk_paths) else 0.0
+                segments = [(i * step, (i + 1) * step) for i in range(len(chunk_paths))]
 
     if progress_callback:
         progress_callback(8, f'开始云端转录：{len(chunk_paths)} 个分片，{_concurrency()} 路并发上传识别...')
@@ -363,28 +424,52 @@ def transcribe_audio_cloud(
             for i, (cp, (seg_start, seg_end)) in enumerate(zip(chunk_paths, segments))
         }
         completed = 0
-        for future in as_completed(futures):
-            if cancel_check and cancel_check():
-                raise TranscriptionCancelledError('用户取消，转录中止')
-            _i, seg_start, seg_end, _cp = futures[future]
-            text = future.result()  # 异常（配置/重试耗尽）原样向上抛，由调用方回退本地
-            completed += 1
-            completed_audio += seg_end - seg_start
-            if text:
-                results.append((seg_start, seg_end, text))
+        succeeded = 0
+        failures = 0
+        failed_ranges: List[str] = []
 
+        def _report() -> None:
             elapsed = time.time() - transcribe_start
             ratio = (completed_audio / duration) if duration > 0 else completed / total
             pct = int(10 + min(ratio, 1.0) * 88)
             speed_x = (completed_audio / elapsed) if elapsed > 0.5 and completed_audio > 0 else 0.0
-            msg = (
-                f'云端转录 {pct}% | 分片 {completed}/{total} 完成 | '
-                f'已用 {_format_duration(elapsed)}'
-            )
+            msg = f'云端转录 {pct}% | 分片 {completed}/{total} 完成'
+            if failures:
+                msg += f' | {failures} 片失败'
+            msg += f' | 已用 {_format_duration(elapsed)}'
             if speed_x > 0:
                 msg += f' | 速度 {speed_x:.1f}x'
             if progress_callback:
                 progress_callback(pct, msg)
+
+        for future in as_completed(futures):
+            if cancel_check and cancel_check():
+                raise TranscriptionCancelledError('用户取消，转录中止')
+            _i, seg_start, seg_end, _cp = futures[future]
+            try:
+                text = future.result()
+            except TranscriptionCancelledError:
+                raise
+            except CloudASRConfigError:
+                raise  # 401/403/404：配置必错，立即整体回退本地并展示修复指引
+            except Exception as e:
+                # 单片 Unavailable（429/5xx/网络重试耗尽）：跳过该段，其余分片照常
+                # 转录——长视频几百片里单片抖动不应把整条转录拖回本地 Whisper
+                failures += 1
+                failed_ranges.append(f'{_format_mmss(seg_start)}-{_format_mmss(seg_end)}')
+                logger.error(
+                    f'云端分片转录失败已跳过（{Path(_cp).name}: {type(e).__name__}: {e}）'
+                )
+                completed += 1
+                completed_audio += seg_end - seg_start
+                _report()
+                continue
+            completed += 1
+            completed_audio += seg_end - seg_start
+            succeeded += 1
+            if text:
+                results.append((seg_start, seg_end, text))
+            _report()
     finally:
         # 取消/失败也要停掉排队任务并清理临时分片，不留垃圾占下载目录
         executor.shutdown(wait=False, cancel_futures=True)
@@ -393,6 +478,19 @@ def transcribe_audio_cloud(
                 Path(cp).unlink(missing_ok=True)
             except OSError:
                 pass
+
+    # 全部成功但文本全空（纯音乐/静音）时 seg_count=0 但不算失败；
+    # 只有「分片全失败」才整体回退本地（succeeded 统计请求成功的分片）。
+    if succeeded == 0:
+        raise CloudASRUnavailableError(
+            '云端转录全部分片失败（网络/429/5xx 重试耗尽），回退本地 Whisper')
+    if failures:
+        shown = '、'.join(failed_ranges[:10])
+        more = f'…共 {len(failed_ranges)} 段' if len(failed_ranges) > 10 else ''
+        logger.error(
+            f'云端转录完成但 {failures}/{total} 分片失败已跳过（区间: {shown}{more}），'
+            f'输出为部分结果，可手动补齐或重试'
+        )
 
     srt_path = str(src.with_suffix('.srt'))
     txt_path = str(src.with_suffix('.txt'))
@@ -412,6 +510,8 @@ def transcribe_audio_cloud(
             f'云端转录完成，共 {len(results)} 段 | 音频 {_format_duration(duration)} | '
             f'耗时 {_format_duration(elapsed)}'
         )
+        if failures:
+            done_msg += f' | {failures} 段失败已跳过'
         if speed_x > 0:
             done_msg += f' | 均速 {speed_x:.1f}x'
         progress_callback(99, done_msg)
