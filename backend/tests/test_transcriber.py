@@ -10,7 +10,8 @@ from unittest.mock import patch, MagicMock
 from services.transcriber import (
     _model_complete, _select_model, _format_srt_time, _format_mmss,
     _format_duration, _is_cuda_runtime_missing, _get_audio_duration_seconds,
-    _resolve_device,
+    _resolve_device, _transcribe_sync,
+    TranscriptionCancelledError,
 )
 
 
@@ -208,3 +209,80 @@ class TestResolveDevice:
         finally:
             self._clear_ct2()
         assert device == "cuda"
+
+
+class TestEngineRouting:
+    """_transcribe_sync 引擎路由：cloud 优先 / 失败回退本地 / local 直达"""
+
+    def _patch_cloud(self, monkeypatch, configured=True, cloud_result=None, cloud_exc=None):
+        """注入云端替身：返回 cloud_asr.transcribe_audio_cloud 的 mock。"""
+        import services.cloud_asr as ca
+        monkeypatch.setattr(ca, 'cloud_asr_configured', lambda: configured)
+        m = MagicMock()
+        if cloud_exc is not None:
+            m.side_effect = cloud_exc
+        else:
+            m.return_value = cloud_result or ('fake.srt', 'fake.txt', 3)
+        monkeypatch.setattr(ca, 'transcribe_audio_cloud', m)
+        return m
+
+    def test_cloud_success_short_circuits_whisper(self, monkeypatch):
+        m = self._patch_cloud(monkeypatch, configured=True,
+                              cloud_result=('out.srt', 'out.txt', 5))
+        with patch('services.transcriber._transcribe_sync_single') as w:
+            result = _transcribe_sync('a.wav', engine='cloud')
+        assert result == ('out.srt', 'out.txt', 5)
+        m.assert_called_once()
+        w.assert_not_called()
+
+    def test_auto_uses_cloud_when_configured(self, monkeypatch):
+        m = self._patch_cloud(monkeypatch, configured=True)
+        _transcribe_sync('a.wav', engine='auto')
+        m.assert_called_once()
+
+    def test_local_never_touches_cloud(self, monkeypatch):
+        m = self._patch_cloud(monkeypatch, configured=True)
+        with patch('services.transcriber._get_audio_duration_seconds', return_value=None), \
+             patch('services.transcriber._transcribe_sync_single', return_value=('l.srt', 'l.txt', 1)) as w:
+            result = _transcribe_sync('a.wav', engine='local')
+        m.assert_not_called()
+        w.assert_called_once()
+        assert result == ('l.srt', 'l.txt', 1)
+
+    def test_cloud_failure_falls_back_to_whisper(self, monkeypatch):
+        self._patch_cloud(monkeypatch, configured=True,
+                          cloud_exc=Exception('云端 ASR 重试 3 次后仍失败: HTTP 503'))
+        progress = []
+        with patch('services.transcriber._get_audio_duration_seconds', return_value=None), \
+             patch('services.transcriber._transcribe_sync_single', return_value=('l.srt', 'l.txt', 2)) as w:
+            result = _transcribe_sync(
+                'a.wav', engine='cloud',
+                progress_callback=lambda pct, msg: progress.append((pct, msg)))
+        w.assert_called_once()
+        assert result == ('l.srt', 'l.txt', 2)
+        # 回退原因在进度里可见（错误必须可行动）
+        assert any('云端转录失败' in msg and '503' in msg for _pct, msg in progress)
+
+    def test_cloud_not_configured_warns_and_uses_local(self, monkeypatch):
+        self._patch_cloud(monkeypatch, configured=False)
+        progress = []
+        with patch('services.transcriber._get_audio_duration_seconds', return_value=None), \
+             patch('services.transcriber._transcribe_sync_single', return_value=('l.srt', 'l.txt', 1)) as w:
+            _transcribe_sync('a.wav', engine='cloud',
+                             progress_callback=lambda pct, msg: progress.append((pct, msg)))
+        w.assert_called_once()
+        assert any('未配置' in msg for _pct, msg in progress)
+
+    def test_cancel_not_swallowed_by_fallback(self, monkeypatch):
+        # 用户取消必须向上传播，不能被「回退本地」吃掉
+        self._patch_cloud(monkeypatch, configured=True,
+                          cloud_exc=TranscriptionCancelledError('用户取消，转录中止'))
+        with patch('services.transcriber._transcribe_sync_single') as w:
+            with pytest.raises(TranscriptionCancelledError):
+                _transcribe_sync('a.wav', engine='cloud')
+        w.assert_not_called()
+
+    def test_invalid_engine_treated_as_auto(self, monkeypatch):
+        m = self._patch_cloud(monkeypatch, configured=True)
+        _transcribe_sync('a.wav', engine='bogus')
+        m.assert_called_once()

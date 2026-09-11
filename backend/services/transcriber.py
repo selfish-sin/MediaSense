@@ -603,12 +603,42 @@ def _transcribe_sync(
     progress_callback=None,
     cancel_check=None,
     device: str = 'auto',
+    engine: str = 'auto',
 ) -> Tuple[str, str, int]:
-    """同步转录入口（自动检测长音频并分片）
+    """同步转录入口（引擎路由 + 自动检测长音频并分片）
 
+    engine: 'auto' | 'cloud' | 'local'（非法值按 auto：非 'local' 一律走云端优先路径）
+    - cloud/auto 且云端已配置 → 云端 SenseVoice 优先，失败自动回退本地（原因可见）
+    - local 或云端未配置 → faster-whisper 本地路径
     时长 > 20 分钟 → 分片转录（每段 5 分钟，模型只加载一次）
     时长 ≤ 20 分钟 → 单次转录（原逻辑）
     """
+    if engine != 'local':
+        # 惰性导入避免循环依赖（cloud_asr 模块级 import 本模块）
+        from services import cloud_asr
+        if cloud_asr.cloud_asr_configured():
+            try:
+                return cloud_asr.transcribe_audio_cloud(
+                    audio_path,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                    language=language,
+                    speaker_diarization=speaker_diarization,
+                )
+            except TranscriptionCancelledError:
+                raise  # 用户主动取消不是故障，不回退
+            except Exception as e:
+                reason = f'云端转录失败（{type(e).__name__}: {e}），自动回退本地 Whisper'
+                logger.warning(reason)
+                if progress_callback:
+                    progress_callback(2, f'⚠ {reason}')
+                # 落到本地 Whisper 路径
+        elif engine == 'cloud':
+            reason = '云端 ASR 未配置（config.py 缺 ASR_CLOUD_* 配置），使用本地 Whisper'
+            logger.warning(reason)
+            if progress_callback:
+                progress_callback(2, f'⚠ {reason}')
+
     duration = _get_audio_duration_seconds(audio_path)
     if duration and duration > 1200:
         logger.info(f'检测到长音频 {_format_duration(duration)}，启用分片转录')
@@ -777,16 +807,18 @@ async def transcribe_audio(
     job_id: str = '',
     cancel_check=None,
     device: str = 'auto',
+    engine: str = 'auto',
 ) -> Tuple[str, str, int]:
     """
-    异步转录音频（在线程池中运行同步的faster-whisper）
+    异步转录音频（在线程池中运行同步引擎，云端/本地由 engine 路由）
     使用 asyncio.Queue 跨线程桥接进度回调
     返回：(srt_path, txt_path, segment_count)
     """
     if sio:
         from socket_handlers import emit_progress, emit_log
-        await emit_progress(sio, job_id, 'transcribe', 0, f'正在初始化转录（模型: {model_size}, 语言: {language or "自动检测"}）...')
-        await emit_log(sio, job_id, f'🎬 开始转录 | 音频: {Path(audio_path).name} | 模型: {model_size} | 语言: {language or "自动检测"}')
+        engine_label = {'cloud': '云端 SenseVoice', 'local': '本地 Whisper'}.get(engine, '自动（云端优先）')
+        await emit_progress(sio, job_id, 'transcribe', 0, f'正在初始化转录（引擎: {engine_label}, 模型: {model_size}, 语言: {language or "自动检测"}）...')
+        await emit_log(sio, job_id, f'🎬 开始转录 | 音频: {Path(audio_path).name} | 引擎: {engine_label} | 模型: {model_size} | 语言: {language or "自动检测"}')
 
     # 跨线程进度桥接：线程 → Queue → async emit
     # 队列容量放大，避免密集进度回调丢消息
@@ -861,6 +893,7 @@ async def transcribe_audio(
             progress_callback=progress_callback,
             cancel_check=cancel_check,
             device=device,
+            engine=engine,
         )
     finally:
         # 通知 reader 排空后退出；超时则 cancel 兜底
