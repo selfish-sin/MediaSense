@@ -1,0 +1,350 @@
+"""
+云端 ASR（SiliconFlow SenseVoice）纯逻辑与编排测试
+
+不触网：_do_request / detect_silences / export_chunks / transcribe_file 均可注入替身。
+"""
+import httpx
+import pytest
+import time
+from pathlib import Path
+from unittest.mock import MagicMock
+
+from services import cloud_asr
+from services.cloud_asr import (
+    CloudASRConfigError,
+    CloudASRUnavailableError,
+    cloud_asr_configured,
+    parse_silences,
+    plan_cuts,
+    strip_rich_tags,
+    transcribe_file,
+    transcribe_audio_cloud,
+)
+from services.transcriber import TranscriptionCancelledError
+
+
+@pytest.fixture
+def asr_enabled(monkeypatch):
+    """把 config 当作已配置云端 ASR（不依赖真实 config.py 的属性存在）。"""
+    monkeypatch.setattr('config.ASR_CLOUD_ENABLED', True, raising=False)
+    monkeypatch.setattr(
+        'config.ASR_CLOUD_ENDPOINT',
+        'https://api.siliconflow.cn/v1/audio/transcriptions', raising=False)
+    monkeypatch.setattr('config.ASR_CLOUD_API_KEY', 'sk-test-fake-key', raising=False)
+    monkeypatch.setattr('config.ASR_CLOUD_MODEL', 'FunAudioLLM/SenseVoiceSmall', raising=False)
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    monkeypatch.setattr(cloud_asr.time, 'sleep', lambda *_: None)
+
+
+# ============ parse_silences ============
+
+class TestParseSilences:
+    def test_normal_pairs(self):
+        text = "[silencedetect @ 0x1] silence_start: 10.0\nsilence_end: 10.6 | silence_duration: 0.6"
+        assert parse_silences(text) == [(10.0, 10.6)]
+
+    def test_trailing_silence_without_end(self):
+        text = "silence_start: 50.0"
+        assert parse_silences(text, total_duration=100.0) == [(50.0, 100.0)]
+
+    def test_empty(self):
+        assert parse_silences('', 100.0) == []
+        assert parse_silences(None, 100.0) == []
+
+    def test_multiple(self):
+        text = ("silence_start: 1.0\nsilence_end: 1.5\n"
+                "silence_start: 9.2\nsilence_end: 10.0\n")
+        assert parse_silences(text) == [(1.0, 1.5), (9.2, 10.0)]
+
+
+# ============ plan_cuts ============
+
+class TestPlanCuts:
+    def test_zero_duration(self):
+        assert plan_cuts(0, [1, 2]) == []
+
+    def test_short_audio_single_chunk(self):
+        # 25s 且无静音 → 只有收尾切点
+        assert plan_cuts(25.0, []) == [25.0]
+
+    def test_normal_silences(self):
+        # 100s，静音中点 10.3/25.25 → 最后一段 74.75s 超上限强制等分成 3 段
+        cuts = plan_cuts(100.0, [10.3, 25.25])
+        assert cuts[0] == pytest.approx(10.3)
+        assert cuts[1] == pytest.approx(25.25)
+        # 强制等分：ceil(74.75/30)=3 → 两个内部切点 + 收尾（切点保留 3 位小数）
+        assert cuts[2] == pytest.approx(25.25 + 74.75 / 3, abs=0.01)
+        assert cuts[3] == pytest.approx(25.25 + 74.75 * 2 / 3, abs=0.01)
+        assert cuts[-1] == pytest.approx(100.0)
+        # 所有相邻切点间距 ≥ 3 且 ≤ 30
+        prev = 0.0
+        for c in cuts:
+            assert c - prev <= 30.0 + 1e-6
+            assert c > prev  # 单调递增
+            prev = c
+
+    def test_close_silences_merged(self):
+        # 相距 < 3s 的切点只保留第一个
+        cuts = plan_cuts(30.0, [10.0, 11.0, 12.0])
+        assert 11.0 not in cuts and 12.0 not in cuts
+        assert 10.0 in cuts
+
+    def test_no_silence_long_audio_forced_equal_split(self):
+        cuts = plan_cuts(90.0, [])
+        # ceil(90/30)=3 段 → 切点 30/60/90
+        assert cuts == pytest.approx([30.0, 60.0, 90.0])
+
+    def test_cut_points_inside_duration(self):
+        # 越界候选（-5/60）被丢弃；末尾切点按设计 = 总时长
+        cuts = plan_cuts(50.0, [-5.0, 25.0, 60.0])
+        assert all(0 < c <= 50 for c in cuts)
+        assert cuts[-1] == 50.0
+        assert 25.0 in cuts
+        assert -5.0 not in cuts and 60.0 not in cuts
+
+    def test_leading_silence_near_start_skipped(self):
+        # 距开头 < 3s 的切点丢弃
+        cuts = plan_cuts(20.0, [2.0, 15.0])
+        assert 2.0 not in cuts
+        assert 15.0 in cuts
+
+
+# ============ strip_rich_tags ============
+
+class TestStripRichTags:
+    def test_plain_text_untouched(self):
+        assert strip_rich_tags('你好世界') == '你好世界'
+
+    def test_tags_removed(self):
+        raw = '<|HAPPY|>你好啊！<|LAUGHTER|>今天真开心<|BGM|>'
+        assert strip_rich_tags(raw) == '你好啊！ 今天真开心'
+
+    def test_empty_and_none(self):
+        assert strip_rich_tags('') == ''
+        assert strip_rich_tags(None) == ''
+
+    def test_whitespace_normalized(self):
+        assert strip_rich_tags('a\n\n b   c') == 'a b c'
+
+
+# ============ cloud_asr_configured ============
+
+class TestConfigured:
+    def test_not_configured_by_default(self, monkeypatch):
+        monkeypatch.setattr('config.ASR_CLOUD_ENABLED', False, raising=False)
+        monkeypatch.setattr('config.ASR_CLOUD_API_KEY', '', raising=False)
+        assert cloud_asr_configured() is False
+
+    def test_configured(self, asr_enabled):
+        assert cloud_asr_configured() is True
+
+    def test_enabled_but_no_key(self, monkeypatch):
+        monkeypatch.setattr('config.ASR_CLOUD_ENABLED', True, raising=False)
+        monkeypatch.setattr('config.ASR_CLOUD_API_KEY', '', raising=False)
+        assert cloud_asr_configured() is False
+
+
+# ============ transcribe_file（mock _do_request） ============
+
+def _resp(status, text='', json_body=None):
+    r = MagicMock()
+    r.status_code = status
+    r.text = text
+    if json_body is not None:
+        r.json = lambda: json_body
+    return r
+
+
+class TestTranscribeFile:
+    def test_not_configured_raises_config_error(self, monkeypatch):
+        monkeypatch.setattr('config.ASR_CLOUD_ENABLED', False, raising=False)
+        monkeypatch.setattr('config.ASR_CLOUD_API_KEY', '', raising=False)
+        with pytest.raises(CloudASRConfigError, match='未配置'):
+            transcribe_file('whatever.mp3')
+
+    def test_success(self, asr_enabled, monkeypatch):
+        called = []
+        monkeypatch.setattr(cloud_asr, '_do_request',
+                            lambda cfg, p, t: (called.append(p), _resp(200, json_body={'text': ' 识别结果 '}))[1])
+        assert transcribe_file('a.mp3') == '识别结果'
+        assert called == ['a.mp3']
+
+    def test_rich_tags_stripped(self, asr_enabled, monkeypatch):
+        monkeypatch.setattr(cloud_asr, '_do_request',
+                            lambda cfg, p, t: _resp(200, json_body={'text': '<|HAPPY|>开心<|BGM|>'}))
+        assert transcribe_file('a.mp3') == '开心'
+
+    def test_401_no_retry(self, asr_enabled, monkeypatch):
+        calls = []
+        def fake(cfg, p, t):
+            calls.append(1)
+            return _resp(401, 'Invalid token')
+        monkeypatch.setattr(cloud_asr, '_do_request', fake)
+        with pytest.raises(CloudASRConfigError, match='密钥'):
+            transcribe_file('a.mp3')
+        assert len(calls) == 1  # 配置类错误不重试
+
+    def test_404_model_hint(self, asr_enabled, monkeypatch):
+        monkeypatch.setattr(cloud_asr, '_do_request',
+                            lambda cfg, p, t: _resp(404, 'not found'))
+        with pytest.raises(CloudASRConfigError, match='模型不存在'):
+            transcribe_file('a.mp3')
+
+    def test_429_then_success(self, asr_enabled, monkeypatch, no_sleep):
+        responses = [_resp(429, 'rate limited'), _resp(429, 'rate limited'),
+                     _resp(200, json_body={'text': 'ok'})]
+        monkeypatch.setattr(cloud_asr, '_do_request', lambda cfg, p, t: responses.pop(0))
+        assert transcribe_file('a.mp3') == 'ok'
+
+    def test_retries_exhausted(self, asr_enabled, monkeypatch, no_sleep):
+        monkeypatch.setattr(cloud_asr, '_do_request',
+                            lambda cfg, p, t: _resp(503, 'overloaded'))
+        with pytest.raises(CloudASRUnavailableError, match='503'):
+            transcribe_file('a.mp3', max_retries=3)
+
+    def test_network_error_retry_then_fail(self, asr_enabled, monkeypatch, no_sleep):
+        def fake(cfg, p, t):
+            raise httpx.ConnectError('boom')
+        monkeypatch.setattr(cloud_asr, '_do_request', fake)
+        with pytest.raises(CloudASRUnavailableError, match='ConnectError'):
+            transcribe_file('a.mp3')
+
+    def test_bad_json_body(self, asr_enabled, monkeypatch):
+        r = _resp(200, 'not json at all')
+        r.json = lambda: (_ for _ in ()).throw(ValueError('bad json'))
+        monkeypatch.setattr(cloud_asr, '_do_request', lambda cfg, p, t: r)
+        with pytest.raises(CloudASRUnavailableError):
+            transcribe_file('a.mp3')
+
+
+# ============ transcribe_audio_cloud（编排，全 mock） ============
+
+@pytest.fixture
+def fake_audio(tmp_path):
+    p = tmp_path / 'fake_audio.wav'
+    p.write_bytes(b'\x00' * 16)
+    return str(p)
+
+
+def _setup_orchestration(monkeypatch, tmp_path, duration=100.0, texts=None, silences=None):
+    """mock 探测/导出/上传，返回 (chunk_paths, transcribe_calls)。"""
+    silences = silences if silences is not None else [(10.0, 10.6), (25.0, 25.5)]
+    texts = texts if texts is not None else ['文本一', '文本二', '文本三', '文本四', '文本五']
+
+    monkeypatch.setattr(cloud_asr, '_get_audio_duration_seconds', lambda p: duration)
+    monkeypatch.setattr(cloud_asr, 'detect_silences', lambda p, d: silences)
+
+    cuts = plan_cuts(duration, [(s + e) / 2 for s, e in silences])
+    n = len(cuts)
+    chunk_paths = []
+    for i in range(n):
+        cp = tmp_path / f'fake_audio_cloud_{i:03d}.mp3'
+        cp.write_bytes(b'\x00' * 8)
+        chunk_paths.append(str(cp))
+    monkeypatch.setattr(cloud_asr, 'export_chunks', lambda ap, c: list(chunk_paths))
+
+    calls = []
+    def fake_transcribe(path, **kwargs):
+        calls.append(path)
+        return texts[len(calls) - 1] if len(calls) <= len(texts) else '溢出'
+    monkeypatch.setattr(cloud_asr, 'transcribe_file', fake_transcribe)
+    return chunk_paths, calls
+
+
+class TestTranscribeAudioCloud:
+    def test_full_flow_srt_txt(self, monkeypatch, tmp_path, fake_audio):
+        chunk_paths, calls = _setup_orchestration(monkeypatch, tmp_path)
+        progress = []
+        srt, txt, seg_count = transcribe_audio_cloud(
+            fake_audio, progress_callback=lambda pct, msg: progress.append((pct, msg)))
+
+        assert Path(srt).exists() and Path(txt).exists()
+        assert seg_count == len(calls)
+        srt_text = Path(srt).read_text(encoding='utf-8')
+        txt_text = Path(txt).read_text(encoding='utf-8')
+        # SRT 结构：序号 + 时间轴 + 文本；时间轴必须单调（并发完成顺序不定）
+        assert '1\n00:00:00,000 --> ' in srt_text
+        assert '文本一' in srt_text and '文本五' in srt_text
+        assert '[00:00 - ' in txt_text and '文本一' in txt_text
+        # 进度：开头/结尾都有推送
+        assert progress[0][0] == 2
+        assert progress[-1][0] == 100
+        # 临时分片已清理
+        for cp in chunk_paths:
+            assert not Path(cp).exists()
+
+    def test_srt_timeline_monotonic_even_with_reversed_completion(self, monkeypatch, tmp_path, fake_audio):
+        """并发乱序完成（倒序返回）时 SRT 时间轴仍单调递增。"""
+        monkeypatch.setattr(cloud_asr, '_concurrency', lambda: 1)
+        _, calls = _setup_orchestration(monkeypatch, tmp_path)
+
+        texts = ['文本一', '文本二', '文本三', '文本四', '文本五']
+        state = {'n': 0}
+
+        def reversed_transcribe(path, **kw):
+            # 与提交顺序无关，永远返回队尾文本 → 强制乱序完成效果
+            idx = len(texts) - 1 - (state['n'] % len(texts))
+            state['n'] += 1
+            return texts[idx]
+
+        monkeypatch.setattr(cloud_asr, 'transcribe_file', reversed_transcribe)
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        assert seg_count == 5
+        lines = [l for l in Path(srt).read_text(encoding='utf-8').splitlines()
+                 if '-->' in l]
+        starts = [l.split(' --> ')[0] for l in lines]
+        assert starts == sorted(starts)
+
+    def test_empty_chunk_dropped(self, monkeypatch, tmp_path, fake_audio):
+        texts = ['文本一', '', '文本三', '文本四', '文本五']
+        _setup_orchestration(monkeypatch, tmp_path, texts=texts)
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        assert seg_count == 4
+        assert '文本一' in Path(srt).read_text(encoding='utf-8')
+
+    def test_all_empty_returns_zero_segments(self, monkeypatch, tmp_path, fake_audio):
+        _setup_orchestration(monkeypatch, tmp_path, texts=[''] * 5)
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        assert seg_count == 0
+        assert Path(srt).read_text(encoding='utf-8') == ''
+
+    def test_cancel_between_chunks(self, monkeypatch, tmp_path, fake_audio):
+        chunk_paths, _ = _setup_orchestration(monkeypatch, tmp_path)
+        monkeypatch.setattr(cloud_asr, '_concurrency', lambda: 1)
+        # 串行 + 每片 10ms 真实延迟：取消发生在中途而非全部跑完
+        def slow_transcribe(path, **kw):
+            time.sleep(0.01)
+            return '文本'
+        monkeypatch.setattr(cloud_asr, 'transcribe_file', slow_transcribe)
+        cancel = MagicMock(side_effect=[False, True])
+        with pytest.raises(TranscriptionCancelledError):
+            transcribe_audio_cloud(fake_audio, cancel_check=cancel)
+        # 取消也要清理分片
+        for cp in chunk_paths:
+            assert not Path(cp).exists()
+
+    def test_cloud_failure_propagates_for_fallback(self, monkeypatch, tmp_path, fake_audio):
+        chunk_paths, _ = _setup_orchestration(monkeypatch, tmp_path)
+        monkeypatch.setattr(cloud_asr, 'transcribe_file',
+                            lambda p, **kw: (_ for _ in ()).throw(CloudASRConfigError('云端 ASR 401: 密钥无效')))
+        with pytest.raises(CloudASRConfigError, match='401'):
+            transcribe_audio_cloud(fake_audio)
+        for cp in chunk_paths:
+            assert not Path(cp).exists()
+
+    def test_no_duration_raises(self, monkeypatch, tmp_path, fake_audio):
+        monkeypatch.setattr(cloud_asr, '_get_audio_duration_seconds', lambda p: None)
+        with pytest.raises(CloudASRUnavailableError, match='时长'):
+            transcribe_audio_cloud(fake_audio)
+
+    def test_concurrency_from_config(self, monkeypatch):
+        monkeypatch.delenv('ASR_CLOUD_CONCURRENCY', raising=False)
+        monkeypatch.setattr('config.ASR_CLOUD_CONCURRENCY', 6, raising=False)
+        assert cloud_asr._concurrency() == 6
+        monkeypatch.setattr('config.ASR_CLOUD_CONCURRENCY', 99, raising=False)
+        assert cloud_asr._concurrency() == 8  # 钳制上限
+        monkeypatch.setattr('config.ASR_CLOUD_CONCURRENCY', 'bad', raising=False)
+        assert cloud_asr._concurrency() == cloud_asr._DEFAULT_CONCURRENCY

@@ -36,6 +36,14 @@ LOCAL_MODEL_DIRS = {
 }
 DEFAULT_WHISPER_MODEL = "base"
 
+# ============ 云端 ASR（SiliconFlow SenseVoice，主力转录引擎） ============
+# 密钥只写在 config.py（gitignored），绝不入库/不入文档。
+# 分片粒度/并发等参数见 services/cloud_asr.py（ASR_CLOUD_CONCURRENCY 环境变量可调）。
+ASR_CLOUD_ENABLED = True
+ASR_CLOUD_ENDPOINT = "https://api.siliconflow.cn/v1/audio/transcriptions"
+ASR_CLOUD_API_KEY = ""  # 填你的 SiliconFlow API Key（https://cloud.siliconflow.cn/account/ak）
+ASR_CLOUD_MODEL = "FunAudioLLM/SenseVoiceSmall"
+
 # ============ 服务端口 ============
 SERVER_PORT = 7001
 SERVER_HOST = "0.0.0.0"
