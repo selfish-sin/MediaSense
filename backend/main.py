@@ -194,6 +194,7 @@ from routers.jobs import router as jobs_router
 from routers.jobs_ai import router as jobs_ai_router
 from routers.jobs_batch import router as jobs_batch_router
 from routers.models import router as models_router
+from routers.asr import router as asr_router
 from routers.summary import router as summary_router
 from routers.export import router as export_router
 from routers.translate import router as translate_router
@@ -211,6 +212,7 @@ app.include_router(jobs_router,   prefix="/api/jobs",      tags=["jobs"])
 app.include_router(jobs_ai_router, prefix="/api/jobs",     tags=["jobs-ai"])
 app.include_router(jobs_batch_router, prefix="/api/jobs",  tags=["jobs-batch"])
 app.include_router(models_router,  prefix="/api/models",    tags=["models"])
+app.include_router(asr_router,    prefix="/api/asr",       tags=["asr"])
 app.include_router(summary_router, prefix="/api/summary",   tags=["summary"])
 app.include_router(export_router,  prefix="/api/export",    tags=["export"])
 app.include_router(translate_router, prefix="/api/translate", tags=["translate"])

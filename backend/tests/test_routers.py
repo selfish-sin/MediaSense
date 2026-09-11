@@ -17,6 +17,7 @@ def app():
     from routers.jobs_ai import router as jobs_ai_router
     from routers.jobs_batch import router as jobs_batch_router
     from routers.models import router as models_router
+    from routers.asr import router as asr_router
     from routers.summary import router as summary_router
     from routers.export import router as export_router
     from routers.translate import router as translate_router
@@ -30,6 +31,7 @@ def app():
     app.include_router(jobs_ai_router, prefix="/api/jobs")
     app.include_router(jobs_batch_router, prefix="/api/jobs")
     app.include_router(models_router, prefix="/api/models")
+    app.include_router(asr_router, prefix="/api/asr")
     app.include_router(summary_router, prefix="/api/summary")
     app.include_router(export_router, prefix="/api/export")
     app.include_router(translate_router, prefix="/api/translate")
@@ -884,3 +886,29 @@ class TestChatRouter:
         mock_conn.return_value.execute.return_value.fetchall.return_value = []
         resp = client.get("/api/jobs/j1/chat/history")
         assert resp.status_code == 200
+
+
+# ── ASR 状态 ──
+class TestAsrStatusRouter:
+    def test_status_configured(self, client, monkeypatch):
+        monkeypatch.setattr('config.ASR_CLOUD_ENABLED', True, raising=False)
+        monkeypatch.setattr(
+            'config.ASR_CLOUD_ENDPOINT',
+            'https://api.siliconflow.cn/v1/audio/transcriptions', raising=False)
+        monkeypatch.setattr('config.ASR_CLOUD_API_KEY', 'sk-x', raising=False)
+        monkeypatch.setattr('config.ASR_CLOUD_MODEL', 'FunAudioLLM/SenseVoiceSmall', raising=False)
+        resp = client.get("/api/asr/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["cloud_configured"] is True
+        assert data["model"] == "FunAudioLLM/SenseVoiceSmall"
+        assert data["provider_host"] == "api.siliconflow.cn"
+        # 契约：绝不回密钥
+        assert "sk-" not in json.dumps(data)
+
+    def test_status_not_configured(self, client, monkeypatch):
+        monkeypatch.setattr('config.ASR_CLOUD_ENABLED', False, raising=False)
+        monkeypatch.setattr('config.ASR_CLOUD_API_KEY', '', raising=False)
+        resp = client.get("/api/asr/status")
+        assert resp.status_code == 200
+        assert resp.json()["cloud_configured"] is False
