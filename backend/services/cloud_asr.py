@@ -62,6 +62,8 @@ _RICH_TAG_RE = re.compile(r'<\|[A-Za-z_]+\|>')
 # silencedetect 输出解析
 _SILENCE_START_RE = re.compile(r'silence_start:\s*([\d.]+)')
 _SILENCE_END_RE = re.compile(r'silence_end:\s*([\d.]+)')
+# 分片补录用 Whisper 提示词（与字幕抽查同语义：锁简体防中文幻觉英文）
+_ZH_RESCUE_PROMPT = '以下是简体中文。'
 
 # 句级字幕切分：云端 API 只回纯文本、无时间戳，若把整个分片文本塞进一条字幕，
 # SRT 会退化成「一片一行」（3~30s 一坨），与本地 Whisper 的句级体验明显退化。
@@ -468,6 +470,55 @@ def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int
     raise CloudASRUnavailableError(f'云端 ASR 重试 {max_retries} 次后仍失败: {last_reason}')
 
 
+def _rescue_chunks_locally(
+    failed_chunks: List[Tuple[str, float, float]],
+    language: Optional[str],
+    progress_callback: Optional[Callable] = None,
+    cancel_check: Optional[Callable] = None,
+) -> Tuple[str, List[Tuple[float, float, str]]]:
+    """递归路由的分片级应用：云端失败的单片当场换本地引擎补录，不留空洞。
+
+    firered 模型就绪则优先（快且准，不触发下载）；否则 Whisper base（固定 CPU，
+    与字幕抽查同路径，中文带简体提示词防幻觉英文）。单片补录失败不拖垮整体
+    （该段留空 + 日志可见）。返回 (引擎标签, [(seg_start, seg_end, text)])。
+    """
+    from services import local_asr
+    from services.transcriber import transcribe_audio_sample
+
+    use_firered = local_asr.firered_model_ready()
+    engine_label = 'FireRedASR' if use_firered else 'Whisper(base)'
+    if progress_callback:
+        progress_callback(
+            90, f'{len(failed_chunks)} 片云端失败，改用本地引擎（{engine_label}）补录...')
+
+    lang = language or 'zh'
+    zh_prompt = _ZH_RESCUE_PROMPT if lang == 'zh' else None
+    out: List[Tuple[float, float, str]] = []
+    for cp, seg_start, seg_end in failed_chunks:
+        if cancel_check and cancel_check():
+            raise TranscriptionCancelledError('用户取消，转录中止')
+        text = None
+        if use_firered:
+            try:
+                text = local_asr.transcribe_chunk_text(
+                    cp, language=lang if lang in ('zh', 'en') else None)
+            except Exception as e:
+                logger.warning(
+                    f'本地 FireRedASR 补录失败（{Path(cp).name}: {type(e).__name__}: {e}），改用 Whisper base')
+                text = None
+        if not text:
+            try:
+                text = transcribe_audio_sample(
+                    cp, max_seconds=90.0, language=lang, initial_prompt=zh_prompt)
+            except Exception as e:
+                logger.error(
+                    f'本地 Whisper 补录失败（{Path(cp).name}: {type(e).__name__}: {e}），该段留空')
+                continue
+        if text:
+            out.append((seg_start, seg_end, text.strip()))
+    return engine_label, out
+
+
 def transcribe_audio_cloud(
     audio_path: str,
     progress_callback: Optional[Callable] = None,
@@ -537,6 +588,8 @@ def transcribe_audio_cloud(
     transcribe_start = time.time()
     total = len(chunk_paths)
     completed_audio = 0.0  # 已完成分片覆盖的音频秒数（进度/速度用）
+    chunk_latencies: List[float] = []  # 每片墙钟耗时（含重试），用于延迟画像
+    submit_epoch = transcribe_start
 
     executor = ThreadPoolExecutor(max_workers=_concurrency(),
                                   thread_name_prefix='cloud-asr')
@@ -549,6 +602,7 @@ def transcribe_audio_cloud(
         succeeded = 0
         failures = 0
         failed_ranges: List[str] = []
+        failed_chunks: List[Tuple[str, float, float]] = []  # (分片文件, seg_start, seg_end)
 
         def _report() -> None:
             elapsed = time.time() - transcribe_start
@@ -568,6 +622,7 @@ def transcribe_audio_cloud(
             if cancel_check and cancel_check():
                 raise TranscriptionCancelledError('用户取消，转录中止')
             _i, seg_start, seg_end, _cp = futures[future]
+            chunk_latencies.append(time.time() - submit_epoch)
             try:
                 text = future.result()
             except TranscriptionCancelledError:
@@ -575,10 +630,11 @@ def transcribe_audio_cloud(
             except CloudASRConfigError:
                 raise  # 401/403/404：配置必错，立即整体回退本地并展示修复指引
             except Exception as e:
-                # 单片 Unavailable（429/5xx/网络重试耗尽）：跳过该段，其余分片照常
+                # 单片 Unavailable（429/5xx/网络重试耗尽）：记录待补录，其余分片照常
                 # 转录——长视频几百片里单片抖动不应把整条转录拖回本地 Whisper
                 failures += 1
                 failed_ranges.append(f'{_format_mmss(seg_start)}-{_format_mmss(seg_end)}')
+                failed_chunks.append((_cp, seg_start, seg_end))
                 logger.error(
                     f'云端分片转录失败已跳过（{Path(_cp).name}: {type(e).__name__}: {e}）'
                 )
@@ -592,6 +648,16 @@ def transcribe_audio_cloud(
             if text:
                 results.append((seg_start, seg_end, text))
             _report()
+
+        # ── 分片级递归补救：云端失败的片当场换本地引擎补录（必须发生在
+        # finally 清理分片文件之前），失败的片不再是空洞 ──
+        rescued = 0
+        rescue_engine = ''
+        if failed_chunks:
+            rescue_engine, rescued_texts = _rescue_chunks_locally(
+                failed_chunks, language, progress_callback, cancel_check)
+            results.extend(rescued_texts)
+            rescued = len(rescued_texts)
     finally:
         # 取消/失败也要停掉排队任务并清理临时分片，不留垃圾占下载目录
         executor.shutdown(wait=False, cancel_futures=True)
@@ -601,18 +667,33 @@ def transcribe_audio_cloud(
             except OSError:
                 pass
 
+    # 延迟画像：SenseVoice 是排队式推理，单片延迟波动大（实测 6s~300s+），
+    # 中位/p90 直接决定整条转录快慢；日志留档便于诊断"云端突然变慢"
+    if chunk_latencies:
+        lat_sorted = sorted(chunk_latencies)
+        n = len(lat_sorted)
+        logger.info(
+            f'云端分片延迟画像: n={n} min={lat_sorted[0]:.1f}s 中位={lat_sorted[n // 2]:.1f}s '
+            f'p90={lat_sorted[min(int(n * 0.9), n - 1)]:.1f}s max={lat_sorted[-1]:.1f}s '
+            f'（并发 {_concurrency()}，总耗时 {time.time() - transcribe_start:.1f}s）'
+        )
+
     # 全部成功但文本全空（纯音乐/静音）时 seg_count=0 但不算失败；
-    # 只有「分片全失败」才整体回退本地（succeeded 统计请求成功的分片）。
-    if succeeded == 0:
+    # 只有「分片全失败且补录也无收获」才整体回退本地（succeeded 统计请求成功的分片）。
+    if succeeded == 0 and rescued == 0:
         raise CloudASRUnavailableError(
             '云端转录全部分片失败（网络/429/5xx 重试耗尽），回退本地 Whisper')
     if failures:
-        shown = '、'.join(failed_ranges[:10])
-        more = f'…共 {len(failed_ranges)} 段' if len(failed_ranges) > 10 else ''
-        logger.error(
-            f'云端转录完成但 {failures}/{total} 分片失败已跳过（区间: {shown}{more}），'
-            f'输出为部分结果，可手动补齐或重试'
-        )
+        still_failed = failures - rescued
+        if still_failed > 0:
+            shown = '、'.join(failed_ranges[:10])
+            more = f'…共 {len(failed_ranges)} 段' if len(failed_ranges) > 10 else ''
+            logger.error(
+                f'云端转录完成但 {still_failed}/{total} 分片失败且补录未恢复（区间: {shown}{more}），'
+                f'输出为部分结果'
+            )
+        else:
+            logger.info(f'云端 {failures}/{total} 分片失败，已全部由本地引擎（{rescue_engine}）补录')
 
     srt_path = str(src.with_suffix('.srt'))
     txt_path = str(src.with_suffix('.txt'))
@@ -631,14 +712,18 @@ def transcribe_audio_cloud(
 
     elapsed = time.time() - transcribe_start
     speed_x = (duration / elapsed) if elapsed > 0 and duration > 0 else 0.0
-    logger.info(f'云端转录完成: {len(segments_out)} 段（{total} 分片）, 耗时 {_format_duration(elapsed)}')
+    logger.info(f'云端转录完成: {len(segments_out)} 段（{total} 分片，其中 {rescued} 片本地补录）, '
+                f'耗时 {_format_duration(elapsed)}')
     if progress_callback:
         done_msg = (
             f'云端转录完成，共 {len(segments_out)} 段 | 音频 {_format_duration(duration)} | '
             f'耗时 {_format_duration(elapsed)}'
         )
-        if failures:
-            done_msg += f' | {failures} 段失败已跳过'
+        if rescued:
+            done_msg += f' | {rescued} 片由本地引擎（{rescue_engine}）补录'
+        still_failed = failures - rescued
+        if still_failed:
+            done_msg += f' | {still_failed} 段失败未恢复'
         if speed_x > 0:
             done_msg += f' | 均速 {speed_x:.1f}x'
         progress_callback(99, done_msg)

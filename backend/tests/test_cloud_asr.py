@@ -323,6 +323,15 @@ def _setup_orchestration(monkeypatch, tmp_path, duration=100.0, texts=None, sile
 
 
 class TestTranscribeAudioCloud:
+    @staticmethod
+    def _disable_rescue(monkeypatch):
+        """禁用本地补录路径（编排测试不触碰真实本地模型）。"""
+        import services.local_asr as la
+        monkeypatch.setattr(la, 'firered_model_ready', lambda: False)
+        monkeypatch.setattr(
+            'services.transcriber.transcribe_audio_sample',
+            lambda *a, **kw: (_ for _ in ()).throw(Exception('rescue disabled')))
+
     def test_full_flow_srt_txt(self, monkeypatch, tmp_path, fake_audio):
         chunk_paths, calls = _setup_orchestration(monkeypatch, tmp_path)
         progress = []
@@ -424,8 +433,10 @@ class TestTranscribeAudioCloud:
         assert lines[5].startswith('00:00:10,000 --> 00:01:40,000')
 
     def test_single_shard_failure_returns_partial(self, monkeypatch, tmp_path, fake_audio):
-        """单片 Unavailable 重试耗尽 → 跳过该段记日志，其余照常返回部分结果。"""
+        """单片 Unavailable 重试耗尽 → 补录被禁用时跳过该段，其余照常返回部分结果。"""
         _setup_orchestration(monkeypatch, tmp_path)
+        self._disable_rescue(monkeypatch)
+
         def flaky(path, **kw):
             if Path(path).name == 'fake_audio_cloud_002.mp3':
                 raise CloudASRUnavailableError('重试耗尽: ReadTimeout')
@@ -438,9 +449,71 @@ class TestTranscribeAudioCloud:
         assert 'OK-fake_audio_cloud_004.mp3' in srt_text
         assert 'OK-fake_audio_cloud_002.mp3' not in srt_text
 
-    def test_all_shards_fail_raises_unavailable(self, monkeypatch, tmp_path, fake_audio):
-        """全部分片失败 → 抛 UnavailableError，由调用方整体回退本地 Whisper。"""
+    def test_failed_shard_rescued_by_firered(self, monkeypatch, tmp_path, fake_audio):
+        """分片级递归补救：云端单片失败 → firered 补录恢复，不产出空洞。"""
         _setup_orchestration(monkeypatch, tmp_path)
+        import services.local_asr as la
+        monkeypatch.setattr(la, 'firered_model_ready', lambda: True)
+        monkeypatch.setattr(la, 'transcribe_chunk_text',
+                            lambda p, language=None: '本地补录内容。')
+
+        def flaky(path, **kw):
+            if Path(path).name == 'fake_audio_cloud_002.mp3':
+                raise CloudASRUnavailableError('重试耗尽: ReadTimeout')
+            return f'OK-{Path(path).name}'
+        monkeypatch.setattr(cloud_asr, 'transcribe_file', flaky)
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        assert seg_count == 5  # 4 片云端成功 + 1 片补录
+        srt_text = Path(srt).read_text(encoding='utf-8')
+        assert '本地补录内容。' in srt_text
+
+    def test_rescue_falls_back_to_whisper_when_firered_unavailable(self, monkeypatch, tmp_path, fake_audio):
+        """firered 模型未就绪 → 补录走 Whisper base。"""
+        _setup_orchestration(monkeypatch, tmp_path)
+        import services.local_asr as la
+        monkeypatch.setattr(la, 'firered_model_ready', lambda: False)
+        monkeypatch.setattr('services.transcriber.transcribe_audio_sample',
+                            lambda *a, **kw: 'Whisper补录内容。')
+
+        def flaky(path, **kw):
+            if Path(path).name == 'fake_audio_cloud_002.mp3':
+                raise CloudASRUnavailableError('重试耗尽: ReadTimeout')
+            return f'OK-{Path(path).name}'
+        monkeypatch.setattr(cloud_asr, 'transcribe_file', flaky)
+        _srt, _txt, seg_count = transcribe_audio_cloud(fake_audio)
+        assert seg_count == 5
+        assert 'Whisper补录内容。' in Path(_srt).read_text(encoding='utf-8')
+
+    def test_rescue_failure_keeps_partial_without_raise(self, monkeypatch, tmp_path, fake_audio):
+        """补录也失败 → 该段留空但不抛错（部分结果仍交付，日志可见）。"""
+        _setup_orchestration(monkeypatch, tmp_path)
+        self._disable_rescue(monkeypatch)
+
+        def flaky(path, **kw):
+            if Path(path).name == 'fake_audio_cloud_002.mp3':
+                raise CloudASRUnavailableError('重试耗尽: ReadTimeout')
+            return f'OK-{Path(path).name}'
+        monkeypatch.setattr(cloud_asr, 'transcribe_file', flaky)
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        assert seg_count == 4
+
+    def test_all_fail_but_rescue_recovers_returns_result(self, monkeypatch, tmp_path, fake_audio):
+        """云端全失败但本地补录全部恢复 → 不抛 Unavailable，直接交付补录结果。"""
+        _setup_orchestration(monkeypatch, tmp_path)
+        import services.local_asr as la
+        monkeypatch.setattr(la, 'firered_model_ready', lambda: True)
+        monkeypatch.setattr(la, 'transcribe_chunk_text',
+                            lambda p, language=None: '补录。')
+        monkeypatch.setattr(
+            cloud_asr, 'transcribe_file',
+            lambda p, **kw: (_ for _ in ()).throw(CloudASRUnavailableError('HTTP 500')))
+        _srt, _txt, seg_count = transcribe_audio_cloud(fake_audio)
+        assert seg_count == 5  # 5 片全部补录恢复
+
+    def test_all_shards_fail_raises_unavailable(self, monkeypatch, tmp_path, fake_audio):
+        """全部分片失败（补录被禁用）→ 抛 UnavailableError，由调用方整体回退本地 Whisper。"""
+        _setup_orchestration(monkeypatch, tmp_path)
+        self._disable_rescue(monkeypatch)
         monkeypatch.setattr(
             cloud_asr, 'transcribe_file',
             lambda p, **kw: (_ for _ in ()).throw(CloudASRUnavailableError('HTTP 500')))

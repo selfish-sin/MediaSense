@@ -330,6 +330,39 @@ def _write_outputs(audio_path: str,
     return srt_path, txt_path, len(segments_out)
 
 
+def transcribe_chunk_text(audio_path: str, language: Optional[str] = None) -> str:
+    """单个短音频片段（3~30s）→ 纯文本（云端分片失败补录用，不写 SRT/TXT）。
+
+    与完整转录同一管线（ffmpeg→VAD→识别→标点），模型每次重建（加载 ~5s，
+    补录是低频路径，不值得为此常驻 1.3GB 内存）。
+    失败上抛，由调用方决定是否放弃该分片。
+    """
+    sherpa = _load_sherpa()
+    recognizer = _create_recognizer(sherpa)
+    vad = _create_vad(sherpa)
+    punct = _create_punct(sherpa)
+
+    wav_tmp = _to_wav_16k_mono(audio_path)
+    try:
+        samples, sr = _read_wav_samples(wav_tmp)
+        if len(samples) == 0:
+            return ''
+        raw = _detect_speech_segments(vad, samples, sr)
+        speech_ranges = _pad_vad_boundaries(raw, len(samples), sr)
+        parts: List[str] = []
+        for seg_start, seg_end in speech_ranges:
+            seg_samples = samples[int(seg_start * sr):int(seg_end * sr)]
+            stream = recognizer.create_stream()
+            stream.accept_waveform(sr, seg_samples)
+            recognizer.decode_stream(stream)
+            text = (stream.result.text or '').strip()
+            if text:
+                parts.append(punct.add_punctuation(text))
+        return ''.join(parts)
+    finally:
+        Path(wav_tmp).unlink(missing_ok=True)
+
+
 def transcribe_audio_firered(
     audio_path: str,
     progress_callback: Optional[Callable] = None,

@@ -594,6 +594,81 @@ def _transcribe_chunked(
     return srt_path, txt_path, total
 
 
+# 引擎回退链（路由递归的静态视图）：用户选的引擎失败后按序降级，链尾 Whisper 兜底。
+# - 'local'（Whisper）语义不变：历史 job options 已存 'local'
+# - firered 只在模型就绪时参与回退（兜底绝不触发 1.1GB 下载，见 _fallback_chain）
+_FALLBACK_CHAINS = {
+    'cloud': ('cloud', 'firered', 'local'),
+    'firered': ('firered', 'local'),
+    'local': ('local',),
+}
+
+_ENGINE_LABELS = {
+    'cloud': '云端 SenseVoice',
+    'firered': '本地 FireRedASR',
+    'local': '本地 Whisper',
+}
+
+
+def _fallback_chain(engine: str) -> Tuple[str, ...]:
+    """用户选择的引擎 → 实际回退链。firered 模型未就绪时从链中剔除（下载只发生在
+    用户显式选 firered 的首次使用，不作为兜底的隐性副作用）。"""
+    chain = _FALLBACK_CHAINS.get(engine, _FALLBACK_CHAINS['cloud'])
+    if engine != 'firered':
+        from services.local_asr import firered_model_ready
+        chain = tuple(e for e in chain if e != 'firered' or firered_model_ready())
+    return chain
+
+
+def _transcribe_by_engine(
+    engine: str,
+    audio_path: str,
+    model_size: str,
+    platform: str,
+    speaker_diarization: bool,
+    language: Optional[str],
+    progress_callback,
+    cancel_check,
+    device: str,
+) -> Tuple[str, str, int]:
+    """单引擎尝试（不处理回退）。未知引擎一律按 cloud。"""
+    if engine == 'firered':
+        # 惰性导入避免循环依赖（local_asr → cloud_asr → 本模块）
+        from services import local_asr
+        return local_asr.transcribe_audio_firered(
+            audio_path,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            language=language,
+            speaker_diarization=speaker_diarization,
+        )
+    if engine == 'local':
+        duration = _get_audio_duration_seconds(audio_path)
+        if duration and duration > 1200:
+            logger.info(f'检测到长音频 {_format_duration(duration)}，启用分片转录')
+            if progress_callback:
+                progress_callback(1, f'检测到长音频（{_format_duration(duration)}），启用分片转录（每段5分钟）...')
+            return _transcribe_chunked(
+                audio_path, model_size, platform, speaker_diarization, language, progress_callback,
+                cancel_check=cancel_check, device=device,
+            )
+        return _transcribe_sync_single(
+            audio_path, model_size, platform, speaker_diarization, language, progress_callback,
+            cancel_check=cancel_check, device=device,
+        )
+    # cloud（默认）：未配置视为该引擎失败，交给回退链
+    from services import cloud_asr
+    if not cloud_asr.cloud_asr_configured():
+        raise Exception('云端 ASR 未配置（config.py 缺 ASR_CLOUD_* 配置）')
+    return cloud_asr.transcribe_audio_cloud(
+        audio_path,
+        progress_callback=progress_callback,
+        cancel_check=cancel_check,
+        language=language,
+        speaker_diarization=speaker_diarization,
+    )
+
+
 def _transcribe_sync(
     audio_path: str,
     model_size: str = DEFAULT_WHISPER_MODEL,
@@ -605,75 +680,33 @@ def _transcribe_sync(
     device: str = 'auto',
     engine: str = 'cloud',
 ) -> Tuple[str, str, int]:
-    """同步转录入口（引擎路由 + 自动检测长音频并分片）
+    """同步转录入口（引擎路由递归回退 + Whisper 长音频分片）
 
-    engine: 'cloud' | 'firered' | 'local'（非法值按 cloud：非 'local'/'firered' 一律走云端优先路径）
-    - cloud 且云端已配置 → 云端 SenseVoice 优先，失败自动回退本地（原因可见）
-    - cloud 但云端未配置 → 告警后走本地（不静默回落，原因对用户可见）
-    - firered → 本地 FireRedASR2-AED（sherpa-onnx/CPU），失败自动回退 Whisper（取消不回退）
-    - local → faster-whisper 本地路径
-    时长 > 20 分钟 → 分片转录（每段 5 分钟，模型只加载一次）——仅 Whisper 路径；
-    cloud/firered 引擎自带分片/VAD，不受此限制
+    engine: 'cloud' | 'firered' | 'local'（非法值按 cloud）
+    回退链：cloud → firered(模型就绪时) → local；firered → local；local 无回退。
+    每次回退原因经 progress_callback 可见；用户取消在任何一环都直接上抛不回退。
     """
-    if engine == 'firered':
-        # 惰性导入避免循环依赖（local_asr → cloud_asr → 本模块）
-        from services import local_asr
+    chain = _fallback_chain(engine)
+    for i, eng in enumerate(chain):
         try:
-            return local_asr.transcribe_audio_firered(
-                audio_path,
-                progress_callback=progress_callback,
-                cancel_check=cancel_check,
-                language=language,
-                speaker_diarization=speaker_diarization,
+            return _transcribe_by_engine(
+                eng, audio_path,
+                model_size=model_size, platform=platform,
+                speaker_diarization=speaker_diarization, language=language,
+                progress_callback=progress_callback, cancel_check=cancel_check,
+                device=device,
             )
         except TranscriptionCancelledError:
             raise  # 用户主动取消不是故障，不回退
         except Exception as e:
-            reason = f'本地 FireRedASR 转录失败（{type(e).__name__}: {e}），自动回退本地 Whisper'
+            label = _ENGINE_LABELS.get(eng, eng)
+            remaining = chain[i + 1:]
+            if not remaining:
+                raise  # 链尾（Whisper）失败：无路可退，上抛给调用方
+            reason = f'{label} 转录失败（{type(e).__name__}: {e}），自动回退 {_ENGINE_LABELS[remaining[0]]}'
             logger.warning(reason)
             if progress_callback:
                 progress_callback(2, f'⚠ {reason}')
-            # 落到本地 Whisper 路径
-
-    elif engine != 'local':
-        # 惰性导入避免循环依赖（cloud_asr 模块级 import 本模块）
-        from services import cloud_asr
-        if cloud_asr.cloud_asr_configured():
-            try:
-                return cloud_asr.transcribe_audio_cloud(
-                    audio_path,
-                    progress_callback=progress_callback,
-                    cancel_check=cancel_check,
-                    language=language,
-                    speaker_diarization=speaker_diarization,
-                )
-            except TranscriptionCancelledError:
-                raise  # 用户主动取消不是故障，不回退
-            except Exception as e:
-                reason = f'云端转录失败（{type(e).__name__}: {e}），自动回退本地 Whisper'
-                logger.warning(reason)
-                if progress_callback:
-                    progress_callback(2, f'⚠ {reason}')
-                # 落到本地 Whisper 路径
-        else:
-            reason = '云端 ASR 未配置（config.py 缺 ASR_CLOUD_* 配置），使用本地 Whisper'
-            logger.warning(reason)
-            if progress_callback:
-                progress_callback(2, f'⚠ {reason}')
-
-    duration = _get_audio_duration_seconds(audio_path)
-    if duration and duration > 1200:
-        logger.info(f'检测到长音频 {_format_duration(duration)}，启用分片转录')
-        if progress_callback:
-            progress_callback(1, f'检测到长音频（{_format_duration(duration)}），启用分片转录（每段5分钟）...')
-        return _transcribe_chunked(
-            audio_path, model_size, platform, speaker_diarization, language, progress_callback,
-            cancel_check=cancel_check, device=device,
-        )
-    return _transcribe_sync_single(
-        audio_path, model_size, platform, speaker_diarization, language, progress_callback,
-        cancel_check=cancel_check, device=device,
-    )
 
 
 def _transcribe_sync_single(
