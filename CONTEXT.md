@@ -1,6 +1,6 @@
 # youtube_tool_v2 CONTEXT
 
-> 最近核对：2026-09-06 | FastAPI + Socket.IO | 默认端口：7001
+> 最近核对：2026-09-12 | FastAPI + Socket.IO | 默认端口：7001
 
 ## 一分钟速览
 
@@ -10,7 +10,7 @@
 
 - 后端：FastAPI + Socket.IO（ASGI 组合）、SQLite（job/token/model 持久化）、yt-dlp（下载）、faster-whisper（字幕缺失时转录）、python-socketio。
 - 前端：Vue 3 + Element Plus + Pinia + Vue Router + Vite（构建产物输出到 `backend/static/`，同源 SPA）。
-- 模型：Whisper `base`（本地，目录在项目同级 `models/`）；摘要/翻译走可配置的外部 LLM（`backend/config.py` 配 API Key，不入库）。
+- 模型：Whisper `base`（本地，目录在项目同级 `models/`）；本地 FireRedASR2-AED（sherpa-onnx int8，模型 ~1.5GB 同级 `models/` 下，缺失自动下载）；摘要/翻译走可配置的外部 LLM（`backend/config.py` 配 API Key，不入库）。
 - 任务流治理：Trellis（`.trellis/` 任务/规范）+ CodeGraph（`.codegraph/` 代码索引，不入库）。
 - 打包：PyInstaller（`MediaSense.spec`）+ Inno Setup（`installer.iss`）。
 
@@ -28,7 +28,9 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `backend/config.py` | 数据目录、7001、Whisper 模型和清理 TTL | 改路径、端口或默认值 |
 | `backend/db/` | SQLite 初始化、job、模型、token 用量仓储 | 改持久化或任务状态 |
 | `backend/services/downloader.py` | yt-dlp 下载/媒体准备 | 改 URL 下载和代理 |
-| `backend/services/transcriber.py` | 字幕读取、Whisper 转录、语言/模型/设备（auto/cuda/cpu） | 改转录回退或设备选择 |
+| `backend/services/transcriber.py` | 字幕读取、Whisper 转录、语言/模型/设备（auto/cuda/cpu）、`_transcribe_sync` 引擎路由单点（cloud/firered/local，失败回退 Whisper） | 改转录回退、引擎路由或设备选择 |
+| `backend/services/cloud_asr.py` | 云端 SenseVoice 转录（静音切分→并发分片→句级化写盘）；`split_sentences`/`distribute_times` 被本地引擎复用 | 改云端引擎或句级切分 |
+| `backend/services/local_asr.py` | 本地 FireRedASR2-AED（sherpa-onnx int8/CPU）：模型按需下载→VAD 分段（+padding）→段间并行解码→标点恢复→句级写盘 | 改本地 FireRed 引擎、模型下载或 VAD/标点参数 |
 | `backend/services/` | 分段、摘要、翻译、导出、搜索等处理 | 改具体媒体流程 |
 | `backend/routers/jobs.py` | 任务核心域：上传/提交/列表/删除/清理/取消/重试/编辑结果 + 共享的 `normalize_url`/`extract_urls` | 改任务生命周期 API |
 | `backend/routers/jobs_ai.py` | AI 域：重新总结/总结历史/标签/思维导图 | 改 AI 重跑相关端点 |
@@ -85,3 +87,5 @@ python main.py
 - 裸域名端点获取模型修复（2026-09-08，pytest 432 全绿）：用户手填端点常不带路径（如 `https://xxx.top`），此前 fetch 直接 `replace('/chat/completions','/models')` 推导，路径缺失时去请求域名根目录拿到网站首页 HTML（200 非 JSON）。改为 fetch 前先 `_normalize_endpoint` 补全为 `/v1/chat/completions` 再推导 `/v1/models`（与保存时同逻辑，幂等）；响应为 HTML 时提示「端点返回的是网页而不是 API，请填写完整端点如 https://主机/v1/chat/completions」。实测两个 new-api 中转 `/v1/models` 均返回标准 JSON（4xx 报错含令牌原因）。
 - 模型获取链路打通 + 选用回填（2026-09-09，pytest 439 全绿，5 提交）：①`main.py` 新增 `merge_no_proxy`/`apply_proxy_bypass_hosts`——本地 `config.py`（gitignored）的 `PROXY_BYPASS_HOSTS` 启动时合并进 `NO_PROXY` 环境变量，httpx 全客户端（fetch/测试/AI/chat）对该域名直连（场景：Clash 代理隧道对中转域名 ConnectError 空消息、直连正常；当前配置 redumbrellacloudlink.himscp.top）；②fetch 失败的空消息 ConnectError 给出可行动提示（代理放行/直连排查）；③前端获取结果列表每行加「选用」——点选（或点行）把模型ID回填表单（名称空缺自动带出），确认后「添加/保存」落库，「添加」仍为直接存新模型；④**fetch 支持第三种姿势 `key+endpoint`（编辑表单获取）：端点用表单值，api_key 留空回退 DB 原密钥**（编辑态不回填密钥，空密钥直发必 401）；前端编辑态获取自动带 key；⑤gpt-5-6-luna 中转已用有效令牌打通，model_id 修正为 gemini-3.1-pro（该令牌分组仅 gemini 系），测试连接 200。浏览器 E2E：添加/编辑两种表单获取→列表→选用回填→取消均通过。
 - 转录设备自选（2026-09-09，task 09-09-whisper-device-selector 已归档，pytest 447 / vitest 51 / build 全绿）：工作台「语音转录」新增「转录设备」下拉（自动/CUDA/CPU，默认自动）。`options.whisper_device` 存于任务 options（提交/批量/重跑整包透传，无 schema 变更、无新端点），`transcriber._resolve_device` 单点解析贯穿单段/分片转录；显式 CUDA 本机不可用（无 GPU/缺 cublas/cudnn DLL）→ 进度回调可见告警并回退 CPU 保流程跑通；显式 CPU → 跳过 CUDA 探测；`WHISPER_FORCE_CPU` 环境变量仍最高优先级；B站字幕抽查 `transcribe_audio_sample` 固定 CPU 不受影响。新增 `_resolve_device` 9 个单测。
+- 云端 ASR 句级切分 + 引擎三态（2026-09-11/12，task 09-11-asr-chain-quality-fix，pytest 545 / vitest 55 / build 全绿）：①云端 SRT 写盘前句级化（`split_sentences`/`distribute_times` 纯函数，18 单测）；②删 `auto` 死语义（cloud/local 两态）；③新增第三引擎 `firered`（本地 FireRedASR2-AED，sherpa-onnx int8 CPU，`services/local_asr.py`）：模型 ~1.5GB 缺失时 GitHub release 按需下载（手动放置 `models/` 兜底，路径常量在 config.example.py），silero VAD 分段（首尾 +0.15s padding 防吞字）→ 段间并行解码（threads=3 + 6 workers，RTF≈0.21，`FIRERED_NUM_THREADS`/`FIRERED_DECODE_WORKERS` 可调）→ 标点模型恢复 → 复用云端句级切分写盘；模块级锁串行化（峰值内存 ~1.7GB×并发 2 会翻倍）；失败回退 Whisper（取消不回退）；`/api/asr/status` 加 `firered_ready`；前端引擎下拉三选项。实测（BV1bH4y1r75q 前 10 分钟，报告在 task 目录 compare-report.md）：本地 168.8s（3.6x 实时）vs 云端 848.4s（0.71x），本地快 5 倍；质量本地更优（多 100 字、云端 8 处日文假名幻觉、本地 0）。
+- FireRedASR 坑点（勿回退）：silero VAD 必须**分块喂** `VoiceActivityDetector.accept_waveform`（512 样本/块，一次喂整段只报尾部一段）；`vad.window_size`/`front` 是属性/方法易混；`VadModel.create(config)` 不能直接构造；Windows 下 `tempfile.mkstemp` 句柄须先 close 再 unlink；GitHub 下载 httpx 必须 `follow_redirects=True`，tar 解包 `filter='data'`。
