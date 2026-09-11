@@ -31,6 +31,7 @@ import tempfile
 import threading
 import time
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -65,8 +66,11 @@ _URL_PUNCT = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuati
 _URL_VAD = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
             "silero_vad.onnx")
 
-# 识别参数（实测：3 线程 RTF 0.271，272s 音频识别耗时 73.7s）
-_NUM_THREADS = 3
+# 识别参数（60s 样本实测扫参：threads=3 + 6 路并行解码 RTF≈0.21，
+# 比串行（RTF≈0.40）快 ~1.9x，文本逐字一致；threads 抬高反而劣化（16 线程 RTF 0.82）。
+# env FIRERED_NUM_THREADS / FIRERED_DECODE_WORKERS 可调）
+_NUM_THREADS = int(os.getenv('FIRERED_NUM_THREADS', '3'))
+_DECODE_WORKERS = int(os.getenv('FIRERED_DECODE_WORKERS', '6'))
 # VAD 参数：threshold/min_silence/min_speech 为实测可用组合；
 # max_speech_duration=20 保证单段 ≤20s（超长语音 VAD 内部强制切分）
 _VAD_THRESHOLD = 0.5
@@ -377,31 +381,43 @@ def transcribe_audio_firered(
 
             transcribe_start = time.time()
             total_speech = sum(e - s for s, e in speech_ranges)
-            results: List[Tuple[float, float, str]] = []
-            processed = 0.0
-            for i, (seg_start, seg_end) in enumerate(speech_ranges):
-                if cancel_check and cancel_check():
-                    raise TranscriptionCancelledError('用户取消，转录中止')
+
+            def _decode_segment(seg_start: float, seg_end: float) -> str:
                 seg_samples = samples[int(seg_start * sr):int(seg_end * sr)]
                 stream = recognizer.create_stream()
                 stream.accept_waveform(sr, seg_samples)
                 recognizer.decode_stream(stream)
-                text = (stream.result.text or '').strip()
-                if text:
-                    text = punct.add_punctuation(text)
-                results.append((seg_start, seg_end, text))
-                processed += seg_end - seg_start
+                return (stream.result.text or '').strip()
 
-                ratio = (processed / total_speech) if total_speech > 0 else (i + 1) / max(len(speech_ranges), 1)
-                pct = int(_PROGRESS_RECOG_BASE + min(ratio, 1.0) * 88)
-                elapsed = time.time() - transcribe_start
-                speed_x = (processed / elapsed) if elapsed > 0.5 and processed > 0 else 0.0
-                msg = (f'本地转录 {pct}% | 语音段 {i + 1}/{len(speech_ranges)} | '
-                       f'已用 {_format_duration(elapsed)}')
-                if speed_x > 0:
-                    msg += f' | 速度 {speed_x:.1f}x'
-                if (i + 1) % 5 == 0 or i == 0 or i == len(speech_ranges) - 1:
-                    _report(pct, msg)
+            # 段间并行解码（ORT Run 释放 GIL，实测近线性）；标点在主线程串行补
+            # （0.01s/段可忽略，且不确认 OfflinePunctuation 的并发安全性）
+            results: List[Tuple[float, float, str]] = []
+            processed = 0.0
+            executor = ThreadPoolExecutor(max_workers=max(_DECODE_WORKERS, 1),
+                                          thread_name_prefix='firered-decode')
+            try:
+                futures = [executor.submit(_decode_segment, s, e) for s, e in speech_ranges]
+                for i, (seg_start, seg_end) in enumerate(speech_ranges):
+                    if cancel_check and cancel_check():
+                        raise TranscriptionCancelledError('用户取消，转录中止')
+                    text = futures[i].result()
+                    if text:
+                        text = punct.add_punctuation(text)
+                    results.append((seg_start, seg_end, text))
+                    processed += seg_end - seg_start
+
+                    ratio = (processed / total_speech) if total_speech > 0 else (i + 1) / max(len(speech_ranges), 1)
+                    pct = int(_PROGRESS_RECOG_BASE + min(ratio, 1.0) * 88)
+                    elapsed = time.time() - transcribe_start
+                    speed_x = (processed / elapsed) if elapsed > 0.5 and processed > 0 else 0.0
+                    msg = (f'本地转录 {pct}% | 语音段 {i + 1}/{len(speech_ranges)} | '
+                           f'已用 {_format_duration(elapsed)}')
+                    if speed_x > 0:
+                        msg += f' | 速度 {speed_x:.1f}x'
+                    if (i + 1) % 5 == 0 or i == 0 or i == len(speech_ranges) - 1:
+                        _report(pct, msg)
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
         finally:
             Path(wav_tmp).unlink(missing_ok=True)
 
