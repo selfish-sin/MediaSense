@@ -92,7 +92,7 @@ ALLOWED_UPLOAD_EXTS = {
     '.mp4', '.mkv', '.webm', '.avi', '.mov', '.wmv', '.flv',
     '.txt', '.md', '.srt', '.vtt',
 }
-MAX_UPLOAD_SIZE = 2 * 1024**3  # 2GB 上传上限
+MAX_UPLOAD_SIZE = 8 * 1024**3  # 8GB 上传上限（流式落盘，覆盖长视频；前端 uploadRules.js 同步）
 STAGED_UPLOAD_PATTERN = re.compile(r'^[0-9a-f]{8}_.+')
 REPARSE_POINT = 0x400
 ACTIVE_JOB_STATUSES = {'pending', 'downloading', 'transcribing', 'preview', 'summarizing'}
