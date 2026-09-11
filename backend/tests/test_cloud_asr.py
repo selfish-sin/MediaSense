@@ -455,6 +455,8 @@ class TestTranscribeAudioCloud:
         monkeypatch.setattr('config.ASR_CLOUD_CONCURRENCY', 6, raising=False)
         assert cloud_asr._concurrency() == 6
         monkeypatch.setattr('config.ASR_CLOUD_CONCURRENCY', 99, raising=False)
-        assert cloud_asr._concurrency() == 8  # 钳制上限
+        assert cloud_asr._concurrency() == 16  # 钳制上限
+        monkeypatch.setattr('config.ASR_CLOUD_CONCURRENCY', 0, raising=False)
+        assert cloud_asr._concurrency() == 1  # 下限
         monkeypatch.setattr('config.ASR_CLOUD_CONCURRENCY', 'bad', raising=False)
         assert cloud_asr._concurrency() == cloud_asr._DEFAULT_CONCURRENCY

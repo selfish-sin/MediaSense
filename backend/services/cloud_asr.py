@@ -54,8 +54,8 @@ _TIMEOUT_PER_CALL = 180.0
 _MAX_RETRIES = 3
 _BACKOFF_CAP = 8.0
 # 有界并发：SiliconFlow 限流为账号级 RPM/TPM（L0 免费档 RPM 1000），
-# 4 路并发 + 429 退避重试自适应兜底；env 可调
-_DEFAULT_CONCURRENCY = 4
+# 8 路并发 + 429 退避重试自适应兜底；env ASR_CLOUD_CONCURRENCY 可调（上限 16）
+_DEFAULT_CONCURRENCY = 8
 
 # SenseVoice 富文本标签（<|HAPPY|> / <|BGM|> / <|zh|> 等），防御性清洗
 _RICH_TAG_RE = re.compile(r'<\|[A-Za-z_]+\|>')
@@ -91,11 +91,16 @@ def cloud_asr_configured() -> bool:
 
 
 def _concurrency() -> int:
-    """并发上传路数（config/env 可调，钳制 1~8）。"""
+    """并发上传路数（config/env 可调，钳制 1~16）。
+
+    实测：硅基流动免费档单次请求排队延迟抖动大（同一段音频 3 片分别 2s/26s/90s），
+    而账号级 RPM 上限（L0 免费 1000/min）远高于本默认值——长视频提高并发能让
+    总耗时贴近「最慢单片」而非分片累加，故上限放宽到 16。
+    """
     import config as _config
     raw = os.getenv('ASR_CLOUD_CONCURRENCY') or getattr(_config, 'ASR_CLOUD_CONCURRENCY', None)
     try:
-        return max(1, min(int(raw), 8))
+        return max(1, min(int(raw), 16))
     except (TypeError, ValueError):
         return _DEFAULT_CONCURRENCY
 

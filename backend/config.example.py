@@ -38,11 +38,15 @@ DEFAULT_WHISPER_MODEL = "base"
 
 # ============ 云端 ASR（SiliconFlow SenseVoice，主力转录引擎） ============
 # 密钥只写在 config.py（gitignored），绝不入库/不入文档。
-# 分片粒度/并发等参数见 services/cloud_asr.py（ASR_CLOUD_CONCURRENCY 环境变量可调）。
+# 分片粒度/并发等参数见 services/cloud_asr.py：
+#   ASR_CLOUD_CONCURRENCY：并发上传路数（默认 8，上限 16；免费档排队延迟抖动大，
+#                          长视频提高并发可让总耗时贴近「最慢单片」而非累加）
+#   ASR_CLOUD_TIMEOUT：单次调用超时秒数（默认 180）
 ASR_CLOUD_ENABLED = True
 ASR_CLOUD_ENDPOINT = "https://api.siliconflow.cn/v1/audio/transcriptions"
 ASR_CLOUD_API_KEY = ""  # 填你的 SiliconFlow API Key（https://cloud.siliconflow.cn/account/ak）
 ASR_CLOUD_MODEL = "FunAudioLLM/SenseVoiceSmall"
+ASR_CLOUD_CONCURRENCY = 8
 
 # ============ 服务端口 ============
 SERVER_PORT = 7001
