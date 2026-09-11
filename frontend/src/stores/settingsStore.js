@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { summaryApi } from '../utils/api'
+import { summaryApi, asrApi } from '../utils/api'
 
 export const useSettingsStore = defineStore('settings', () => {
   // ============ 模块化提示词系统（8 维度） ============
@@ -68,7 +68,9 @@ export const useSettingsStore = defineStore('settings', () => {
     purpose: '学习笔记',
     speaker_diarization: false,
     model_size: 'medium',
-    // ★ 转录设备：auto=自动探测（有GPU用GPU）/ cuda=强制CUDA(不可用回退CPU) / cpu=强制CPU
+    // ★ 转录引擎：cloud=云端 SenseVoice（默认，推荐）/ local=本地 Whisper / auto=云端优先
+    transcribe_engine: 'cloud',
+    // ★ 转录设备：auto=自动探测（有GPU用GPU）/ cuda=强制CUDA(不可用回退CPU) / cpu=强制CPU（仅本地引擎）
     whisper_device: 'auto',
     // ★ 默认中文：Whisper自动识别会把中文误判成英文，强制中文避免误识别
     transcribe_language: 'zh',
@@ -76,6 +78,9 @@ export const useSettingsStore = defineStore('settings', () => {
     ai_correct: false,
     ai_correct_model: '',
   })
+  // 云端 ASR 可用性（/api/asr/status 同步；未配置时云端选项禁用并回落 local）
+  const cloudAsrAvailable = ref(false)
+  const cloudAsrModel = ref('')
 
   // 功能开关
   const doSummary = ref(true)
@@ -104,7 +109,25 @@ export const useSettingsStore = defineStore('settings', () => {
 
   // 兼容旧的 init 函数（被 HomeView onMounted 调用）
   async function init() {
-    await loadDeepConfig()
+    await Promise.all([loadDeepConfig(), loadCloudAsrStatus()])
+  }
+
+  // 拉取云端 ASR 配置状态：未配置时引擎回落 local（云端选项禁用）
+  async function loadCloudAsrStatus() {
+    try {
+      const res = await asrApi.status()
+      cloudAsrAvailable.value = !!res.cloud_configured
+      cloudAsrModel.value = res.model || ''
+      if (!cloudAsrAvailable.value && advancedOptions.value.transcribe_engine === 'cloud') {
+        advancedOptions.value.transcribe_engine = 'local'
+      }
+    } catch (err) {
+      console.error('加载云端 ASR 状态失败:', err)
+      cloudAsrAvailable.value = false
+      if (advancedOptions.value.transcribe_engine === 'cloud') {
+        advancedOptions.value.transcribe_engine = 'local'
+      }
+    }
   }
 
   // 更新某个维度的选择（key 是维度名，value 是模块 key）
@@ -222,12 +245,15 @@ export const useSettingsStore = defineStore('settings', () => {
     recommendModel,
     selectedSummaryType,
     advancedOptions,
+    cloudAsrAvailable,
+    cloudAsrModel,
     doSummary,
     doTranslate,
     doSubtitle,
     previewBeforeSummary,
     // actions
     loadDeepConfig,
+    loadCloudAsrStatus,
     init,
     loadSummaryTypes,
     loadSummaryOptions,

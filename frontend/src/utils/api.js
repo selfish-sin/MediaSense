@@ -78,6 +78,11 @@ export const storageCleanupApi = {
   audit: (limit = 100) => api.get('/storage-cleanup/audit', { params: { limit } }),
 }
 
+// ============ 云端 ASR API ============
+export const asrApi = {
+  status: () => api.get('/asr/status'),
+}
+
 // ============ 模型管理 API ============
 export const modelsApi = {
   list: () => api.get('/models'),

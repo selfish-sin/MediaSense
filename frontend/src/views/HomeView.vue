@@ -998,23 +998,35 @@ function formatTokenTime(t) {
           <div class="adv-section-title">语音转录</div>
           <div class="adv-field-grid">
             <div class="adv-field">
-              <div class="adv-field-label">Whisper 模型</div>
-              <el-select v-model="settings.advancedOptions.model_size" class="adv-field-control">
-                <el-option label="tiny · 最快 / 精度低" value="tiny" />
-                <el-option label="base · 快速 / 中文尚可" value="base" />
-                <el-option label="small · 平衡" value="small" />
-                <el-option label="medium · 高质量（默认）" value="medium" />
+              <div class="adv-field-label">转录引擎</div>
+              <el-select v-model="settings.advancedOptions.transcribe_engine" class="adv-field-control">
+                <el-option label="云端 SenseVoice（推荐）" value="cloud" :disabled="!settings.cloudAsrAvailable" />
+                <el-option label="本地 Whisper" value="local" />
               </el-select>
+              <p class="adv-field-hint">
+                {{ settings.cloudAsrAvailable ? '云端中文更准更快，失败自动回退本地' : '云端未配置（config.py 缺 ASR_CLOUD_API_KEY）' }}
+              </p>
             </div>
-            <div class="adv-field">
-              <div class="adv-field-label">转录设备</div>
-              <el-select v-model="settings.advancedOptions.whisper_device" class="adv-field-control">
-                <el-option label="自动（推荐）" value="auto" />
-                <el-option label="CUDA GPU" value="cuda" />
-                <el-option label="CPU" value="cpu" />
-              </el-select>
-              <p class="adv-field-hint">选 CUDA 不可用时自动回退 CPU</p>
-            </div>
+            <template v-if="settings.advancedOptions.transcribe_engine !== 'cloud'">
+              <div class="adv-field">
+                <div class="adv-field-label">Whisper 模型</div>
+                <el-select v-model="settings.advancedOptions.model_size" class="adv-field-control">
+                  <el-option label="tiny · 最快 / 精度低" value="tiny" />
+                  <el-option label="base · 快速 / 中文尚可" value="base" />
+                  <el-option label="small · 平衡" value="small" />
+                  <el-option label="medium · 高质量（默认）" value="medium" />
+                </el-select>
+              </div>
+              <div class="adv-field">
+                <div class="adv-field-label">转录设备</div>
+                <el-select v-model="settings.advancedOptions.whisper_device" class="adv-field-control">
+                  <el-option label="自动（推荐）" value="auto" />
+                  <el-option label="CUDA GPU" value="cuda" />
+                  <el-option label="CPU" value="cpu" />
+                </el-select>
+                <p class="adv-field-hint">选 CUDA 不可用时自动回退 CPU</p>
+              </div>
+            </template>
             <div class="adv-field">
               <div class="adv-field-label">转录语言</div>
               <el-select v-model="settings.advancedOptions.transcribe_language" class="adv-field-control">
