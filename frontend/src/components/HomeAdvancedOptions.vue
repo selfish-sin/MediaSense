@@ -122,12 +122,13 @@ const transcribeLanguageHint = computed(() => {
               <span class="adv-switch-desc">跳过视频字幕，直接转录音频</span>
             </span>
           </label>
-          <!-- ★ AI 校正：对所有文本来源生效（B站/平台字幕、云端/本地转录、文本输入） -->
+          <!-- ★ AI 校正：对所有文本来源生效（B站/平台字幕、云端/本地转录、文本输入）；
+               文案明示代价——校正=全文逐字重新生成，慢且费 token，避免用户误以为"秒级小修" -->
           <label class="adv-switch-tile" :class="{ on: settings.advancedOptions.ai_correct }">
             <el-switch v-model="settings.advancedOptions.ai_correct" size="small" />
             <span class="adv-switch-meta">
               <span class="adv-switch-name">AI 校正</span>
-              <span class="adv-switch-desc">字幕/转录文本均适用，纠同音字/专名/标点</span>
+              <span class="adv-switch-desc">代价大：全文重新生成，耗时数分钟、token 消耗多；字幕/转录均适用</span>
             </span>
           </label>
         </div>
