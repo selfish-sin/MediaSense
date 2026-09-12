@@ -254,6 +254,41 @@ class TestCorrectTranscript:
         assert stats['integrity_warnings'] == 1
         assert any('完整性' in w for w in stats['warnings'])
 
+    async def test_changed_lines_captured(self):
+        """逐句改动明细：只记录内容变化的行，含时间戳与前后文本。"""
+        orig = "[00:05] 终南山说道\n[00:10] 第二句不变"
+        corrected = "[00:05] 钟南山说道\n[00:10] 第二句不变"
+        _, _, _, stats = await self._run(orig, [(corrected, 10, 10)])
+        assert stats['changed_count'] == 1
+        assert stats['changed_lines'] == [
+            {'ts': '[00:05]', 'before': '终南山说道', 'after': '钟南山说道'}
+        ]
+        assert stats['changed_truncated'] is False
+
+    async def test_zero_changes_reports_none(self):
+        """原文无错 → 校对零改动（好文本不被乱改的直接证据）。"""
+        orig = "[00:05] 完全正确的一句\n[00:10] 第二句"
+        _, _, _, stats = await self._run(orig, [(orig, 10, 10)])
+        assert stats['changed_count'] == 0
+        assert stats['changed_lines'] == []
+
+    async def test_reverted_batch_not_counted_as_change(self):
+        """标记丢失回退原文的批次不进改动明细（由完整性告警负责）。"""
+        orig = "[00:05] 第一句\n[00:10] 第二句"
+        lost = "[00:05] 第一句\n第二句"
+        _, _, _, stats = await self._run(orig, [(lost, 10, 8)])
+        assert stats['changed_count'] == 0
+        assert stats['integrity_warnings'] == 1
+
+    async def test_changed_lines_capped_at_100(self):
+        """改动超过 100 条截断存储并打标，防 stats JSON 膨胀。"""
+        orig = '\n'.join(f'[{i // 60:02d}:{i % 60:02d}] 第{i}句原文内容' for i in range(120))
+        corrected = '\n'.join(f'[{i // 60:02d}:{i % 60:02d}] 第{i}句被改过的内容' for i in range(120))
+        _, _, _, stats = await self._run(orig, [(corrected, 10, 10)])
+        assert stats['changed_count'] == 120
+        assert len(stats['changed_lines']) == 100
+        assert stats['changed_truncated'] is True
+
     async def test_length_anomaly_warns_but_keeps(self):
         # 标记完整但长度暴增 >30% → 告警但不回退
         orig = "短"

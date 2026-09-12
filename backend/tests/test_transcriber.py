@@ -422,3 +422,34 @@ class TestEngineRouting:
             with pytest.raises(TranscriptionCancelledError):
                 _transcribe_sync('a.wav', engine='firered')
         w.assert_not_called()
+
+
+class TestWriteCleanText:
+    """纯净文本生成：剥时间戳前缀与说话人标记，空行丢弃，行序保留。"""
+
+    def test_strips_timestamps_and_speakers(self, tmp_path):
+        from services.transcriber import write_clean_text
+        txt = tmp_path / 'a.txt'
+        txt.write_text(
+            '[00:00 - 00:06] 大家好，今天讲经络。\n'
+            '[00:06 - 00:17] 从银马尔可夫到深度学习。[说话人1]\n'
+            '\n'
+            '[01:02:03 - 01:02:10] 长音频小时级时间戳。\n',
+            encoding='utf-8')
+        clean_path = write_clean_text(str(txt))
+        assert clean_path is not None
+        assert Path(clean_path).read_text(encoding='utf-8') == (
+            '大家好，今天讲经络。\n'
+            '从银马尔可夫到深度学习。\n'
+            '长音频小时级时间戳。\n'
+        )
+
+    def test_missing_file_returns_none(self, tmp_path):
+        from services.transcriber import write_clean_text
+        assert write_clean_text(str(tmp_path / 'nope.txt')) is None
+
+    def test_empty_content_returns_none(self, tmp_path):
+        from services.transcriber import write_clean_text
+        txt = tmp_path / 'b.txt'
+        txt.write_text('[00:00 - 00:06] [说话人1]\n', encoding='utf-8')
+        assert write_clean_text(str(txt)) is None

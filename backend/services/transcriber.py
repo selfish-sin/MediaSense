@@ -594,6 +594,33 @@ def _transcribe_chunked(
     return srt_path, txt_path, total
 
 
+# 纯净文本行清洗：剥掉行首 [MM:SS - MM:SS] 前缀与行内 [说话人X] 标签
+_CLEAN_TS_RE = re.compile(r'^\s*\[\d{1,2}:\d{2}(?::\d{2})?\s*(?:-\s*\d{1,2}:\d{2}(?::\d{2})?)?\]\s*')
+_CLEAN_SPEAKER_RE = re.compile(r'\s*\[(?:说话人|Speaker| speaker)\s*\w+\]', re.IGNORECASE)
+
+
+def write_clean_text(txt_path: str) -> Optional[str]:
+    """从转录 txt 生成纯净阅读版（无时间戳/说话人标记），返回 clean 文件路径。
+
+    行格式约定见本模块写盘处：`[MM:SS - MM:SS] 文本[说话人X]`。空行丢弃、行序保留；
+    校对开启时应在校正写回后调用，使纯净版反映最终文本。读不到或无有效内容返回 None。
+    """
+    src = Path(txt_path)
+    if not src.exists():
+        return None
+    out_lines = []
+    for line in src.read_text(encoding='utf-8').splitlines():
+        t = _CLEAN_TS_RE.sub('', line)
+        t = _CLEAN_SPEAKER_RE.sub('', t).strip()
+        if t:
+            out_lines.append(t)
+    if not out_lines:
+        return None
+    clean_path = src.with_suffix('.clean.txt')
+    clean_path.write_text('\n'.join(out_lines) + '\n', encoding='utf-8')
+    return str(clean_path)
+
+
 # 引擎回退链（路由递归的静态视图）：用户选的引擎失败后按序降级，链尾 Whisper 兜底。
 # - 'local'（Whisper）语义不变：历史 job options 已存 'local'
 # - 'cloud'=MiMo（付费主力），'cloud_free'=XingChen Ultra（免费档，简单视频）

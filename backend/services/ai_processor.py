@@ -540,6 +540,32 @@ def _split_by_boundary(text: str, max_chars: int) -> list:
     return chunks
 
 
+def _diff_lines(orig: str, corrected: str) -> list:
+    """逐行对比校正前后文本（按时间戳标记出现顺序对齐），返回内容变化的行。
+
+    每项 {'ts', 'before', 'after'}；行数不一致（模型合并/拆行了）时返回空列表——
+    该批次已被标记完整性告警覆盖，细粒度 diff 无法可靠对齐。
+    """
+    def _parse(text):
+        out = []
+        for line in text.split('\n'):
+            m = _TS_RE.search(line)
+            if m:
+                out.append((m.group(0), line[m.end():].strip()))
+            else:
+                out.append(('', line.strip()))
+        return out
+
+    lo, lc = _parse(orig), _parse(corrected)
+    if len(lo) != len(lc):
+        return []
+    changed = []
+    for (ts_a, c_a), (ts_b, c_b) in zip(lo, lc):
+        if c_a != c_b:
+            changed.append({'ts': ts_a or ts_b, 'before': c_a, 'after': c_b})
+    return changed
+
+
 async def correct_transcript(
     text: str,
     model: str = DEFAULT_MODEL,
@@ -591,6 +617,7 @@ async def correct_transcript(
         await emit_log(sio, job_id, f'转录文本较长（{len(text)}字符），分 {len(chunks)} 批校正（按行边界）')
 
     corrected_parts = []
+    all_changed = []
     total_in = 0
     total_out = 0
 
@@ -655,19 +682,37 @@ async def correct_transcript(
                         from socket_handlers import emit_log
                         await emit_log(sio, job_id, f'⚠ {warn}')
 
+        # ④ 逐句改动明细：按时间戳对齐 diff，供结果页「改动明细」与日志复核
+        #   （回退原文的批次 used==chunk，diff 自然为空，不会被记成改动）
+        all_changed.extend(_diff_lines(chunk, used))
         corrected_parts.append(used)
         total_in += in_tok
         total_out += out_tok
 
     full_corrected = '\n'.join(corrected_parts)
 
+    # 改动明细入 stats（持久化到 jobs 表；超量截断防 JSON 膨胀）
+    stats['changed_count'] = len(all_changed)
+    stats['changed_lines'] = all_changed[:100]
+    stats['changed_truncated'] = len(all_changed) > 100
+
     if sio:
         from socket_handlers import emit_progress, emit_log
         await emit_progress(sio, job_id, 'correct', 100, 'AI 校正完成')
-        summary = f'✅ 校正完成 | 原文 {len(text)} 字符 → 校正后 {len(full_corrected)} 字符 | token in={total_in} out={total_out}'
+        summary = f'✅ 校正完成 | 原文 {len(text)} 字符 → 校正后 {len(full_corrected)} 字符 | 改动 {stats["changed_count"]} 处 | token in={total_in} out={total_out}'
         if stats['failed_chunks'] or stats['integrity_warnings'] or stats['length_warnings']:
             summary += f' | ⚠ 失败{stats["failed_chunks"]}/完整性{stats["integrity_warnings"]}/长度{stats["length_warnings"]} 批次需复核'
         await emit_log(sio, job_id, summary)
+        # 改动摘要直接进日志，语义级替换从静默变可见
+        if stats['changed_count'] == 0:
+            await emit_log(sio, job_id, '✅ 校对零改动：原文没有需要修正的内容')
+        else:
+            for d in stats['changed_lines'][:15]:
+                b = d['before'][:60] + ('…' if len(d['before']) > 60 else '')
+                a = d['after'][:60] + ('…' if len(d['after']) > 60 else '')
+                await emit_log(sio, job_id, f"✏️ {d['ts']} 「{b}」→「{a}」")
+            if stats['changed_count'] > 15:
+                await emit_log(sio, job_id, f'…共 {stats["changed_count"]} 处改动，完整明细见结果页「转录文本」tab')
 
     _record_token_usage(model, total_in, total_out, job_id)
     return full_corrected, total_in, total_out, stats

@@ -881,6 +881,17 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             except Exception as e:
                 logger.warning(f'AI 校正失败（不影响主流程）: {e}')
                 await emit_log(sio, job_id, f'⚠ AI 校正失败: {e}（继续用原转录文本）')
+
+        # ===== Step 1.6: 纯净文本（无时间戳/说话人标记的阅读版；校对开启时基于校正后文本） =====
+        if txt_path and Path(txt_path).exists():
+            try:
+                from services.transcriber import write_clean_text
+                clean_path = write_clean_text(txt_path)
+                if clean_path:
+                    result['files']['txt_clean'] = clean_path
+                    update_job(job_id, files=result['files'])
+            except Exception as e:
+                logger.warning(f'纯净文本生成失败（不影响主流程）: {e}')
         # ===== Step 2: 转录后预览 =====
         if do_summary and preview_before_summary and srt_path:
             preview_text = await _read_text(txt_path)
