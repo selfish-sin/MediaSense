@@ -9,6 +9,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Windows 控制台默认 GBK：结尾的 ✓/✗ 会让 print 抛 UnicodeEncodeError（验证通过也"崩"）
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(errors='replace')
+
 ROOT = Path(__file__).parent
 VENV_PY = ROOT / "backend" / "venv" / "Scripts" / "python.exe"
 
