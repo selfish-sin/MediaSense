@@ -651,9 +651,10 @@ async def correct_transcript(
         await emit_log(sio, job_id, f'🔧 开始 AI 校正（模型: {model}，领域: {_CORRECTION_DOMAIN_LABELS.get(domain, domain)}）')
 
     # ★ 按行/标记边界分块，避免在时间戳标记中间硬切。
-    #   块不宜过大：实测 glm-5.2 对 ~5 万字单块流式校正会挂满 600s 总超时（长视频必挂），
-    #   2 万字/块既保证单块分钟级完成，也让进度推送更细
-    max_chars = 20000
+    #   块必须小：实测商汤系模型流式 ~18-40 token/s，600s 单轮总超时下
+    #   2 万字块（≈2.5 万输出 token）必超时，8 千字块（≈1 万 token）可在超时内完成；
+    #   顺带让进度推送更细、单块失败重试代价更小
+    max_chars = 8000
     chunks = _split_by_boundary(text, max_chars)
     stats['total_chunks'] = len(chunks)
     if len(chunks) > 1 and sio:
@@ -784,9 +785,12 @@ async def correct_transcript_with_fallback(
     last_error: Optional[Exception] = None
 
     for idx, cand in enumerate(candidates):
-        if idx > 0 and sio:
-            from socket_handlers import emit_log
-            await emit_log(sio, job_id, f'🔄 自动换模型重试（候选 {idx + 1}/{len(candidates)}）：{cand}')
+        if idx > 0:
+            # 换模型决策同时落盘（logger）与推送（socket）：纯 socket 日志服务端排障时不可见
+            logger.info(f'[{job_id}] 校正换模型重试（候选 {idx + 1}/{len(candidates)}）：{cand}')
+            if sio:
+                from socket_handlers import emit_log
+                await emit_log(sio, job_id, f'🔄 自动换模型重试（候选 {idx + 1}/{len(candidates)}）：{cand}')
         try:
             corrected, in_tok, out_tok, stats = await correct_transcript(
                 text, model=cand, sio=sio, job_id=job_id, domain=domain,
@@ -795,6 +799,7 @@ async def correct_transcript_with_fallback(
             raise
         except Exception as e:
             last_error = e
+            logger.warning(f'[{job_id}] 校正模型 {cand} 抛异常：{e}')
             if sio:
                 from socket_handlers import emit_log
                 await emit_log(sio, job_id, f'⚠ 模型 {cand} 校正失败：{e}')
@@ -804,6 +809,7 @@ async def correct_transcript_with_fallback(
         dead = stats.get('failed_chunks', 0) + stats.get('integrity_warnings', 0)
         if total > 0 and dead >= total:
             last_error = Exception(f'模型 {cand} 全部批次校正无效（失败 {stats.get("failed_chunks", 0)}/完整性 {stats.get("integrity_warnings", 0)}/共 {total} 批）')
+            logger.warning(f'[{job_id}] {last_error}，视为该模型不可用')
             if sio:
                 from socket_handlers import emit_log
                 await emit_log(sio, job_id, f'⚠ {last_error}，视为该模型不可用')
