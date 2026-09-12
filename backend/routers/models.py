@@ -10,7 +10,7 @@ import httpx
 from fastapi import APIRouter, HTTPException
 
 from models.schemas import ModelConfigCreate, ModelConfigResponse, ModelTestRequest, ModelTestResponse
-from db.model_repo import get_all_models, get_model_by_key, add_model, update_model, delete_model, get_default_model_key, set_default_model
+from db.model_repo import get_all_models, get_model_by_key, add_model, update_model, delete_model, get_default_model_key, set_default_model, get_default_correct_model_key, set_default_correct_model
 from services.httpx_errors import describe_http_response
 
 logger = logging.getLogger(__name__)
@@ -76,18 +76,28 @@ async def list_models():
         m['key_broken'] = bool(raw_key) and '****' in raw_key
         if raw_key and len(raw_key) > 8:
             m['api_key'] = raw_key[:4] + '****' + raw_key[-4:]
-    return {"models": models, "default": get_default_model_key()}
+    return {"models": models, "default": get_default_model_key(),
+            "correct_default": get_default_correct_model_key()}
 
 
 @router.post("/default")
 async def set_default_model_api(body: dict):
-    """设置默认模型（校验模型存在）"""
-    key = (body or {}).get('key', '')
+    """设置默认模型（校验模型存在）。
+
+    body.scope 缺省/'summary' = 总结主模型默认；'correct' = AI 校正默认。
+    """
+    body = body or {}
+    key = body.get('key', '')
+    scope = body.get('scope', 'summary')
     if not key:
         raise HTTPException(status_code=400, detail="缺少 key 参数")
+    if scope == 'correct':
+        if not set_default_correct_model(key):
+            raise HTTPException(status_code=404, detail=f"模型 {key} 不存在")
+        return {"success": True, "scope": scope, "default": key, "message": f"校正默认模型已设为 {key}"}
     if not set_default_model(key):
         raise HTTPException(status_code=404, detail=f"模型 {key} 不存在")
-    return {"success": True, "default": key, "message": f"默认模型已设为 {key}"}
+    return {"success": True, "scope": "summary", "default": key, "message": f"默认模型已设为 {key}"}
 
 
 @router.post("")

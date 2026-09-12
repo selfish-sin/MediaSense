@@ -751,6 +751,68 @@ async def correct_transcript(
     return full_corrected, total_in, total_out, stats
 
 
+# 校正失败自动换模型：最多再试 max_fallbacks 个备选，防大量失效模型无限拖长任务
+CORRECTION_MAX_FALLBACKS = 3
+
+
+async def correct_transcript_with_fallback(
+    text: str,
+    model: str,
+    sio=None,
+    job_id: str = '',
+    domain: str = 'default',
+    fallback_models: Optional[List[str]] = None,
+    max_fallbacks: int = CORRECTION_MAX_FALLBACKS,
+) -> Tuple[str, int, int, dict, str]:
+    """correct_transcript 的多模型兜底包装：所选模型不可用时自动换下一个候选。
+
+    模型"不可用"判定（满足其一即换模型重试）：
+    - 调用抛异常（端点/密钥/模型不存在等）；
+    - 整批无效：failed_chunks + integrity_warnings == total_chunks > 0，
+      即没有任何批次产出可用校正文本（流式不可用的模型每批都拿不到内容）。
+    部分批次失败不算不可用——那些批次已逐批回退原文，整体结果仍可用，stats 会告警。
+    用户取消（TaskCancelledError）直接上抛，绝不换模型重试。
+
+    返回 (校正后文本, input_tokens, output_tokens, stats, 实际使用的模型 key)。
+    所有候选都不可用时抛出异常（由调用方按"校正失败不影响主流程"兜底）。
+    """
+    candidates = [model] + [k for k in (fallback_models or []) if k != model][:max_fallbacks]
+    last_error: Optional[Exception] = None
+
+    for idx, cand in enumerate(candidates):
+        if idx > 0 and sio:
+            from socket_handlers import emit_log
+            await emit_log(sio, job_id, f'🔄 自动换模型重试（候选 {idx + 1}/{len(candidates)}）：{cand}')
+        try:
+            corrected, in_tok, out_tok, stats = await correct_transcript(
+                text, model=cand, sio=sio, job_id=job_id, domain=domain,
+            )
+        except TaskCancelledError:
+            raise
+        except Exception as e:
+            last_error = e
+            if sio:
+                from socket_handlers import emit_log
+                await emit_log(sio, job_id, f'⚠ 模型 {cand} 校正失败：{e}')
+            continue
+
+        total = stats.get('total_chunks', 0)
+        dead = stats.get('failed_chunks', 0) + stats.get('integrity_warnings', 0)
+        if total > 0 and dead >= total:
+            last_error = Exception(f'模型 {cand} 全部批次校正无效（失败 {stats.get("failed_chunks", 0)}/完整性 {stats.get("integrity_warnings", 0)}/共 {total} 批）')
+            if sio:
+                from socket_handlers import emit_log
+                await emit_log(sio, job_id, f'⚠ {last_error}，视为该模型不可用')
+            continue
+
+        if idx > 0 and sio:
+            from socket_handlers import emit_log
+            await emit_log(sio, job_id, f'✅ 已自动切换到模型 {cand} 完成校正')
+        return corrected, in_tok, out_tok, stats, cand
+
+    raise Exception(f'所有候选模型均无法完成校正（尝试: {"、".join(candidates)}）；最后原因: {last_error}')
+
+
 # ============ 思维导图 ============
 
 async def generate_mindmap(

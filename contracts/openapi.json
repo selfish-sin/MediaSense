@@ -1187,7 +1187,7 @@
           "models"
         ],
         "summary": "Set Default Model Api",
-        "description": "设置默认模型（校验模型存在）",
+        "description": "设置默认模型（校验模型存在）。\n\nbody.scope 缺省/'summary' = 总结主模型默认；'correct' = AI 校正默认。",
         "operationId": "set_default_model_api_api_models_default_post",
         "requestBody": {
           "content": {

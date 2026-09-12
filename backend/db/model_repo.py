@@ -10,6 +10,8 @@ from config import DEFAULT_MODEL
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_SETTING_KEY = 'default_model'
+# AI 校正默认模型（校正模型选择器留空时使用；独立于总结主模型默认）
+DEFAULT_CORRECT_MODEL_SETTING_KEY = 'default_correct_model'
 
 
 def get_default_model_key() -> str:
@@ -45,6 +47,44 @@ def set_default_model(key: str) -> bool:
         return True
     except Exception as e:
         logger.error(f"设置默认模型失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_default_correct_model_key() -> str:
+    """获取 AI 校正默认模型 key；未设置或模型已删除时返回空串（由调用方回退主模型）"""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?", (DEFAULT_CORRECT_MODEL_SETTING_KEY,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row and row['value']:
+        key = row['value']
+        # 模型可能已被删除，视为未设置
+        if get_model_by_key(key):
+            return key
+    return ''
+
+
+def set_default_correct_model(key: str) -> bool:
+    """设置 AI 校正默认模型；模型必须存在，成功返回 True"""
+    if not get_model_by_key(key):
+        return False
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+            (DEFAULT_CORRECT_MODEL_SETTING_KEY, key),
+        )
+        conn.commit()
+        logger.info(f"设置校正默认模型: {key}")
+        return True
+    except Exception as e:
+        logger.error(f"设置校正默认模型失败: {e}")
         return False
     finally:
         conn.close()

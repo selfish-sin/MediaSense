@@ -9,6 +9,7 @@ from db.model_repo import (
     get_all_models, get_model_by_key, add_model,
     update_model, delete_model,
     get_default_model_key, set_default_model,
+    get_default_correct_model_key, set_default_correct_model,
 )
 
 
@@ -150,3 +151,32 @@ class TestDefaultModel:
         set_default_model("a")
         set_default_model("b")
         assert get_default_model_key() == "b"
+
+
+class TestDefaultCorrectModel:
+    def test_unset_returns_empty(self):
+        """校正默认未设置时返回空串（调用方回退总结主模型），不借用 config.DEFAULT_MODEL。"""
+        assert get_default_correct_model_key() == ""
+
+    def test_set_and_get(self):
+        add_model("glm-5-2", "glm-5.2", "https://api.example.com")
+        assert set_default_correct_model("glm-5-2")
+        assert get_default_correct_model_key() == "glm-5-2"
+
+    def test_set_nonexistent_model(self):
+        assert set_default_correct_model("ghost") is False
+
+    def test_falls_back_when_model_deleted(self):
+        add_model("m1", "Model 1", "https://api.example.com")
+        set_default_correct_model("m1")
+        delete_model("m1")
+        assert get_default_correct_model_key() == ""
+
+    def test_independent_from_summary_default(self):
+        """校正默认与总结主模型默认互不干扰。"""
+        add_model("a", "A", "https://a.com")
+        add_model("b", "B", "https://b.com")
+        set_default_model("a")
+        set_default_correct_model("b")
+        assert get_default_model_key() == "a"
+        assert get_default_correct_model_key() == "b"

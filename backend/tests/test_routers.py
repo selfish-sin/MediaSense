@@ -448,6 +448,22 @@ class TestModelsRouter:
         assert resp.status_code == 200
         assert resp.json()["default"] == "m1"
 
+    @patch("routers.models.set_default_correct_model", return_value=True)
+    def test_set_default_model_scope_correct(self, mock_set, client):
+        """scope='correct' 设置校正默认模型，不影响总结主模型默认。"""
+        resp = client.post("/api/models/default", json={"key": "glm-5-2", "scope": "correct"})
+        assert resp.status_code == 200
+        mock_set.assert_called_once_with("glm-5-2")
+        assert resp.json()["scope"] == "correct"
+
+    @patch("routers.models.get_default_model_key", return_value="m1")
+    @patch("routers.models.get_default_correct_model_key", return_value="glm-5-2")
+    @patch("routers.models.get_all_models", return_value=[])
+    def test_list_models_returns_correct_default(self, mock_all, mock_correct, mock_default, client):
+        resp = client.get("/api/models")
+        assert resp.status_code == 200
+        assert resp.json()["correct_default"] == "glm-5-2"
+
     @patch("routers.models.add_model", return_value=True)
     def test_add_model_normalizes_endpoint(self, mock_add, client):
         resp = client.post("/api/models", json={

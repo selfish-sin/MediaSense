@@ -14,6 +14,7 @@ from services.ai_processor import (
     generate_tags,
     generate_mindmap,
     correct_transcript,
+    correct_transcript_with_fallback,
     _count_markers,
     _split_by_boundary,
 )
@@ -344,6 +345,110 @@ class TestCorrectTranscript:
         assert stats['total_chunks'] == 2
         assert stats['failed_chunks'] == 0
         assert chunk1 in out and chunk2 in out
+
+
+# ── correct_transcript_with_fallback 多模型兜底 ──
+@pytest.mark.asyncio
+class TestCorrectTranscriptFallback:
+    """所选校正模型不可用（异常/整批无效）时自动换下一个候选；
+    部分批次失败不算不可用；用户取消绝不重试。"""
+
+    async def _run(self, text, behaviors, model="glm-5-2",
+                   fallback_models=("deepseek-v4-flash", "longcat-2-0"),
+                   calls=None, **kw):
+        """behaviors: dict model -> 行为。值为 (content, in, out) 元组 = 成功返回；
+        Exception 实例 = 抛出；'all_dead' = 模拟整批哨兵失败；
+        'partial_dead' = 两批一批失败一批成功。
+        calls: 可选外部列表，记录实际尝试的模型顺序。"""
+        calls = calls if calls is not None else []
+
+        async def fake_correct(text, model="", sio=None, job_id='', domain='default', **kw2):
+            calls.append(model)
+            b = behaviors[model]
+            if isinstance(b, Exception):
+                raise b
+            if b == 'all_dead':
+                return text, 1, 1, {'total_chunks': 1, 'failed_chunks': 1,
+                                    'integrity_warnings': 0, 'length_warnings': 0, 'warnings': []}
+            if b == 'all_integrity_dead':
+                return text, 1, 1, {'total_chunks': 2, 'failed_chunks': 0,
+                                    'integrity_warnings': 2, 'length_warnings': 0, 'warnings': []}
+            if b == 'partial_dead':
+                return text, 1, 1, {'total_chunks': 2, 'failed_chunks': 1,
+                                    'integrity_warnings': 0, 'length_warnings': 0, 'warnings': ['x']}
+            return (b[0], b[1], b[2],
+                    {'total_chunks': 1, 'failed_chunks': 0, 'integrity_warnings': 0,
+                     'length_warnings': 0, 'warnings': []})
+
+        with patch("services.ai_processor.correct_transcript", side_effect=fake_correct):
+            out = await correct_transcript_with_fallback(
+                text, model=model, fallback_models=list(fallback_models), **kw)
+        return out, calls
+
+    async def test_first_model_success_no_fallback(self):
+        (text, _, _, stats, used), calls = await self._run(
+            "[00:05] 文本", {"glm-5-2": ("[00:05] 校正后", 3, 3)})
+        assert used == "glm-5-2"
+        assert calls == ["glm-5-2"]
+        assert text == "[00:05] 校正后"
+
+    async def test_exception_switches_to_next_model(self):
+        (text, _, _, _, used), calls = await self._run(
+            "[00:05] 文本",
+            {"glm-5-2": Exception("401 无效密钥"),
+             "deepseek-v4-flash": ("[00:05] 备选校正", 3, 3)})
+        assert used == "deepseek-v4-flash"
+        assert calls == ["glm-5-2", "deepseek-v4-flash"]
+        assert text == "[00:05] 备选校正"
+
+    async def test_all_chunks_dead_switches_model(self):
+        (text, _, _, stats, used), calls = await self._run(
+            "[00:05] 文本",
+            {"glm-5-2": "all_dead",
+             "deepseek-v4-flash": ("[00:05] 备选校正", 3, 3)})
+        assert used == "deepseek-v4-flash"
+        assert stats['failed_chunks'] == 0
+
+    async def test_all_integrity_dead_switches_model(self):
+        """整批完整性异常（模型老丢时间戳）同样视为不可用。"""
+        (_, _, _, _, used), calls = await self._run(
+            "[00:05] 文本",
+            {"glm-5-2": "all_integrity_dead",
+             "deepseek-v4-flash": ("[00:05] 备选校正", 3, 3)})
+        assert used == "deepseek-v4-flash"
+        assert calls == ["glm-5-2", "deepseek-v4-flash"]
+
+    async def test_partial_failure_keeps_model(self):
+        """部分批次失败：结果仍可用（失败批已回退原文），不换模型。"""
+        (_, _, _, stats, used), calls = await self._run(
+            "[00:05] 文本", {"glm-5-2": "partial_dead"})
+        assert used == "glm-5-2"
+        assert calls == ["glm-5-2"]
+        assert stats['failed_chunks'] == 1
+
+    async def test_cancel_propagates_without_retry(self):
+        """用户取消直接上抛，不换模型重试。"""
+        with pytest.raises(TaskCancelledError):
+            await self._run("[00:05] 文本", {"glm-5-2": TaskCancelledError("用户取消")})
+
+    async def test_all_candidates_fail_raises(self):
+        with pytest.raises(Exception) as ei:
+            await self._run(
+                "[00:05] 文本",
+                {"glm-5-2": Exception("x"), "deepseek-v4-flash": Exception("y"),
+                 "longcat-2-0": Exception("z")})
+        assert "glm-5-2" in str(ei.value) and "longcat-2-0" in str(ei.value)
+
+    async def test_max_fallbacks_caps_candidates(self):
+        """max_fallbacks 限制备选数量，超出部分不尝试。"""
+        tried = []
+        with pytest.raises(Exception) as ei:
+            await self._run(
+                "[00:05] 文本",
+                {k: Exception(k) for k in ("glm-5-2", "deepseek-v4-flash", "longcat-2-0")},
+                calls=tried, max_fallbacks=1)
+        assert tried == ["glm-5-2", "deepseek-v4-flash"]
+        assert "longcat-2-0" not in str(ei.value)
 
 
 # ── 流式 chunk 容错（回归：choices 空数组导致 list index out of range）──

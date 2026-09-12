@@ -870,15 +870,24 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
         update_job(job_id, files=result['files'])
 
         # ===== Step 1.5: AI 校正转录文本（可选） =====
-        # ★ 用云端模型校正语音转写常见错误（同音字、专有名词、标点）
+        # ★ 用云端模型校正文本常见错误（同音字、专有名词、标点）——
+        #   适用所有文本来源：B站/平台字幕、云端/本地转录、文本输入均可校正。
         #   校正后原 txt 备份为 .raw.txt，srt 不动（字数变化会破坏时间戳对齐）
         ai_correct = options.get('ai_correct', False)
         if ai_correct and txt_path and Path(txt_path).exists():
-            from services.ai_processor import correct_transcript
-            # 校正模型：优先用 ai_correct_model，否则用主模型
-            correct_model = options.get('ai_correct_model') or model
+            from services.ai_processor import correct_transcript_with_fallback, CORRECTION_MAX_FALLBACKS
+            from db.model_repo import get_all_models, get_default_correct_model_key
+            # 校正模型解析链：任务选项指定 → DB 校正默认（商汤 glm-5.2）→ 总结主模型
+            correct_model = options.get('ai_correct_model') or get_default_correct_model_key() or model
             # 校正领域模板：default=通用 / tcm=中医（未知值由 correct_transcript 回退 default）
             correct_domain = options.get('ai_correct_domain') or 'default'
+            # 自动换模型候选：其余已配置模型（剔除密钥缺失/被星号污染的），按创建顺序
+            fallback_models = [
+                m['key'] for m in get_all_models()
+                if m['key'] != correct_model
+                and (m.get('api_key') or '').strip()
+                and '****' not in (m.get('api_key') or '')
+            ]
             try:
                 raw_text = await _read_text(txt_path)
                 if raw_text.strip():
@@ -888,9 +897,10 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                         f.write(raw_text)
                     result['files']['txt_raw'] = raw_backup
 
-                    corrected, c_in, c_out, corr_stats = await correct_transcript(
+                    corrected, c_in, c_out, corr_stats, used_model = await correct_transcript_with_fallback(
                         raw_text, model=correct_model, sio=sio, job_id=job_id,
-                        domain=correct_domain
+                        domain=correct_domain, fallback_models=fallback_models,
+                        max_fallbacks=CORRECTION_MAX_FALLBACKS,
                     )
                     # 写回 txt（校正后）
                     with open(txt_path, 'w', encoding='utf-8') as f:
@@ -902,12 +912,13 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                                    corr_stats['integrity_warnings'] or
                                    corr_stats['length_warnings'])
                     review_hint = '（⚠ 有批次需人工复核）' if need_review else ''
-                    await emit_log(sio, job_id, f'📝 已用 {correct_model} 校正转录文本{review_hint}（原文备份: {Path(raw_backup).name}）')
+                    switched_hint = '' if used_model == correct_model else f'（{correct_model} 不可用已自动切换）'
+                    await emit_log(sio, job_id, f'📝 已用 {used_model} 校正文本（字幕/转录均适用）{switched_hint}{review_hint}（原文备份: {Path(raw_backup).name}）')
             except TaskCancelledError:
                 raise  # ★ 用户取消不能被"校正失败不影响主流程"的兜底吞掉
             except Exception as e:
                 logger.warning(f'AI 校正失败（不影响主流程）: {e}')
-                await emit_log(sio, job_id, f'⚠ AI 校正失败: {e}（继续用原转录文本）')
+                await emit_log(sio, job_id, f'⚠ AI 校正失败: {e}（继续用原文本）')
 
         # ===== Step 1.6: 纯净文本（无时间戳/说话人标记的阅读版；校对开启时基于校正后文本） =====
         if txt_path and Path(txt_path).exists():
