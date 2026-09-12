@@ -40,6 +40,7 @@ export const useSettingsStore = defineStore('settings', () => {
     depth: 'standard',
     tone: '学术严谨',
     word_count: '3000',
+    language: '简体中文',      // ★ 第 9 维度：输出语言（外文素材默认翻译成中文呈现）
   })
   // ★ 维度级自定义文本（dimKey → 自定义文本，作为追加指引）
   const customDimensions = ref({})
@@ -185,8 +186,9 @@ export const useSettingsStore = defineStore('settings', () => {
   // 应用预设配方
   function applyRecipe(recipe) {
     if (recipe?.dimensions) {
-      selectedDimensions.value = { ...recipe.dimensions }
-      advancedOptions.value.dimensions = { ...recipe.dimensions }
+      // ★ merge 而非整体替换：内置配方只定义 8 个维度，保留 language 等配方外维度的当前值
+      selectedDimensions.value = { ...selectedDimensions.value, ...recipe.dimensions }
+      advancedOptions.value.dimensions = { ...selectedDimensions.value }
       advancedOptions.value.word_count = recipe.dimensions.word_count || '3000'
       advancedOptions.value.tone = recipe.dimensions.tone || '学术严谨'
     }
