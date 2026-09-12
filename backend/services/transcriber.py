@@ -597,9 +597,11 @@ def _transcribe_chunked(
 # 引擎回退链（路由递归的静态视图）：用户选的引擎失败后按序降级，链尾 Whisper 兜底。
 # - 'local'（Whisper）语义不变：历史 job options 已存 'local'
 # - 'cloud'=MiMo（付费主力），'cloud_free'=XingChen Ultra（免费档，简单视频）
+# - cloud（付费）失败先落 cloud_free（免费）：云端之间互为梯队且成本只降不升；
+#   反向不成立——用户选免费档失败绝不转付费引擎
 # - firered 只在模型就绪时参与回退（兜底绝不触发 1.1GB 下载，见 _fallback_chain）
 _FALLBACK_CHAINS = {
-    'cloud': ('cloud', 'firered', 'local'),
+    'cloud': ('cloud', 'cloud_free', 'firered', 'local'),
     'cloud_free': ('cloud_free', 'firered', 'local'),
     'firered': ('firered', 'local'),
     'local': ('local',),
@@ -687,8 +689,9 @@ def _transcribe_sync(
 ) -> Tuple[str, str, int]:
     """同步转录入口（引擎路由递归回退 + Whisper 长音频分片）
 
-    engine: 'cloud' | 'firered' | 'local'（非法值按 cloud）
-    回退链：cloud → firered(模型就绪时) → local；firered → local；local 无回退。
+    engine: 'cloud' | 'cloud_free' | 'firered' | 'local'（非法值按 cloud）
+    回退链：cloud → cloud_free → firered(模型就绪时) → local；cloud_free → firered → local；
+    firered → local；local 无回退。
     每次回退原因经 progress_callback 可见；用户取消在任何一环都直接上抛不回退。
     """
     chain = _fallback_chain(engine)

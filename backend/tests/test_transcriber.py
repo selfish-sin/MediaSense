@@ -212,17 +212,31 @@ class TestResolveDevice:
 
 
 class TestEngineRouting:
-    """_transcribe_sync 引擎路由（回退链）：cloud→firered→local / 取消不回退 / local 直达"""
+    """_transcribe_sync 引擎路由（回退链）：cloud→cloud_free→firered→local / 取消不回退 / local 直达"""
 
-    def _patch_cloud(self, monkeypatch, configured=True, cloud_result=None, cloud_exc=None):
-        """注入云端替身：返回 cloud_asr.transcribe_audio_cloud 的 mock。"""
+    def _patch_cloud(self, monkeypatch, configured=True, cloud_result=None, cloud_exc=None,
+                     free_result=None, free_exc=None):
+        """注入云端替身：返回 cloud_asr.transcribe_audio_cloud 的 mock。
+
+        configured: bool（所有 provider 同值）或 {'mimo': bool, 'xingchen': bool}；
+        cloud_* / free_* 分别控制 mimo / xingchen 的返回或异常。"""
         import services.cloud_asr as ca
-        monkeypatch.setattr(ca, 'cloud_asr_configured', lambda provider='mimo': configured)
-        m = MagicMock()
-        if cloud_exc is not None:
-            m.side_effect = cloud_exc
+        if isinstance(configured, dict):
+            monkeypatch.setattr(ca, 'cloud_asr_configured',
+                                lambda provider='mimo': configured.get(provider, False))
         else:
-            m.return_value = cloud_result or ('fake.srt', 'fake.txt', 3)
+            monkeypatch.setattr(ca, 'cloud_asr_configured', lambda provider='mimo': configured)
+
+        def _dispatch(audio_path, provider='mimo', **kwargs):
+            if provider == 'xingchen':
+                if free_exc is not None:
+                    raise free_exc
+                return free_result or ('free.srt', 'free.txt', 3)
+            if cloud_exc is not None:
+                raise cloud_exc
+            return cloud_result or ('fake.srt', 'fake.txt', 3)
+
+        m = MagicMock(side_effect=_dispatch)
         monkeypatch.setattr(ca, 'transcribe_audio_cloud', m)
         return m
 
@@ -259,8 +273,8 @@ class TestEngineRouting:
         assert result == ('l.srt', 'l.txt', 1)
 
     def test_cloud_failure_falls_back_to_whisper(self, monkeypatch):
-        """firered 未就绪时，cloud 失败直接回退 Whisper（不触发模型下载）。"""
-        self._patch_cloud(monkeypatch, configured=True,
+        """mimo 失败且免费档未配置、firered 未就绪时，直接回退 Whisper（不触发模型下载）。"""
+        self._patch_cloud(monkeypatch, configured={'mimo': True, 'xingchen': False},
                           cloud_exc=Exception('云端 ASR 重试 3 次后仍失败: HTTP 503'))
         self._patch_firered_ready(monkeypatch, ready=False)
         progress = []
@@ -275,10 +289,40 @@ class TestEngineRouting:
         assert any('云端 MiMo 转录失败' in msg and '503' in msg for _pct, msg in progress)
         assert any('回退 本地 Whisper' in msg for _pct, msg in progress)
 
+    def test_cloud_failure_falls_back_to_free_cloud(self, monkeypatch):
+        """mimo（付费）失败 → 先落免费档 XingChen，成功即短路，不碰本地。"""
+        m = self._patch_cloud(monkeypatch, configured={'mimo': True, 'xingchen': True},
+                              cloud_exc=Exception('HTTP 503'),
+                              free_result=('free.srt', 'free.txt', 3))
+        self._patch_firered_ready(monkeypatch, ready=False)
+        progress = []
+        with patch('services.transcriber._transcribe_sync_single') as w:
+            result = _transcribe_sync(
+                'a.wav', engine='cloud',
+                progress_callback=lambda pct, msg: progress.append((pct, msg)))
+        assert result == ('free.srt', 'free.txt', 3)
+        w.assert_not_called()
+        # 免费档是被主动回退到的（成本只降不升），且回退原因可见
+        assert any(call.kwargs.get('provider') == 'xingchen' for call in m.call_args_list)
+        assert any('云端 MiMo 转录失败' in msg for _pct, msg in progress)
+
+    def test_cloud_free_never_falls_back_to_paid(self, monkeypatch):
+        """用户选免费档失败 → firered(未就绪跳过) → Whisper；绝不转付费 MiMo。"""
+        m = self._patch_cloud(monkeypatch, configured={'mimo': True, 'xingchen': True},
+                              cloud_exc=Exception('HTTP 500'),
+                              free_exc=Exception('云端 ASR 重试 3 次后仍失败: HTTP 503'))
+        self._patch_firered_ready(monkeypatch, ready=False)
+        with patch('services.transcriber._get_audio_duration_seconds', return_value=None), \
+             patch('services.transcriber._transcribe_sync_single', return_value=('l.srt', 'l.txt', 1)) as w:
+            result = _transcribe_sync('a.wav', engine='cloud_free')
+        assert result == ('l.srt', 'l.txt', 1)
+        w.assert_called_once()
+        assert all(call.kwargs.get('provider') != 'mimo' for call in m.call_args_list)
+
     def test_cloud_failure_falls_back_to_firered_when_ready(self, monkeypatch):
-        """firered 模型就绪时，cloud 失败先进 firered；firered 成功即短路。"""
-        self._patch_cloud(monkeypatch, configured=True,
-                          cloud_exc=Exception('HTTP 503'))
+        """mimo 与免费档都失败、firered 模型就绪时，进 firered；成功即短路。"""
+        self._patch_cloud(monkeypatch, configured={'mimo': True, 'xingchen': True},
+                          cloud_exc=Exception('HTTP 503'), free_exc=Exception('HTTP 503'))
         f = self._patch_firered_ready(monkeypatch, ready=True)
         progress = []
         with patch('services.transcriber._transcribe_sync_single') as w:
@@ -288,13 +332,14 @@ class TestEngineRouting:
         assert result == ('f.srt', 'f.txt', 4)
         f.assert_called_once()  # firered 参与了回退并成功
         w.assert_not_called()
-        # 回退原因可见
-        assert any('云端 MiMo 转录失败' in msg and '回退 本地 FireRedASR' in msg
-                   for _pct, msg in progress)
+        # 每一级回退原因可见（MiMo→XingChen→FireRedASR）
+        assert any('云端 MiMo 转录失败' in msg for _pct, msg in progress)
+        assert any('回退 本地 FireRedASR' in msg for _pct, msg in progress)
 
     def test_firered_fallback_never_downloads_model(self, monkeypatch):
         """模型未就绪时回退链跳过 firered：绝不把 1.1GB 下载当兜底副作用。"""
-        self._patch_cloud(monkeypatch, configured=True, cloud_exc=Exception('503'))
+        self._patch_cloud(monkeypatch, configured={'mimo': True, 'xingchen': False},
+                          cloud_exc=Exception('503'))
         import services.local_asr as la
         m = self._patch_firered_ready(monkeypatch, ready=False)
         with patch('services.transcriber._get_audio_duration_seconds', return_value=None), \
