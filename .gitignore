@@ -42,8 +42,8 @@ bin/
 node_modules/
 frontend/node_modules/
 
-# Build output (由 Vite 生成)
-backend/static/dist/
+# Build output：Vite 产物输出到 backend/static/（同源 SPA），产物有意入库
+# （打包/直接运行依赖），不忽略 backend/static/；前端源码改动后须 rebuild 并提交产物。
 
 # IDE
 .vscode/
