@@ -9,7 +9,7 @@
  * 3. 顶部的「完全自定义提示词」总开关（开启后覆盖一切维度拼装）
  * 4. 已被 TemplatesView 编辑器覆盖的模块显示「已自定义」标记
  */
-import { computed, watch, ref, nextTick, onUnmounted } from 'vue'
+import { computed, watch, ref, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '../stores/settingsStore'
 import { summaryApi } from '../utils/api'
@@ -136,7 +136,7 @@ async function loadPreview() {
     if (customPrompt) payload.custom_prompt = customPrompt
     const res = await summaryApi.promptPreview(payload)
     promptPreview.value = res.prompt || ''
-  } catch (e) {
+  } catch {
     promptPreview.value = '预览加载失败'
   } finally {
     previewLoading.value = false

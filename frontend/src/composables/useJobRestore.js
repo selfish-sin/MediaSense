@@ -100,7 +100,7 @@ export function useJobRestore(deps) {
         } else {
           jobStore.isProcessing = false
         }
-      } catch (err) {
+      } catch {
         jobStore.reset()
       }
     }

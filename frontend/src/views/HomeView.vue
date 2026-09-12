@@ -52,7 +52,7 @@ function saveInputState() {
       batchUrls: batchUrls.value,
       batch_id: batchResult.value?.batch_id || null,
     }))
-  } catch (e) { /* ignore */ }
+  } catch { /* sessionStorage 不可用时静默降级 */ }
 }
 
 function loadInputState() {
@@ -69,7 +69,7 @@ function loadInputState() {
         refreshBatchStatus()
       }
     }
-  } catch (e) { /* ignore */ }
+  } catch { /* sessionStorage 不可用时静默降级 */ }
 }
 
 const inputType = ref('url')  // url / file / text / batch
@@ -136,7 +136,7 @@ const jobLogAutoScroll = ref(true)
 // 逻辑抽离到 composables/useBackendLogs（增量拉取+超界全量回退+生命周期自管理）
 const {
   showBackendLogs, backendLogs, autoScroll,
-  fetchLogs, loadAllHistory, clearLogs, scrollLogTop, refreshLogs,
+  loadAllHistory, clearLogs, scrollLogTop, refreshLogs,
 } = useBackendLogs()
 
 // ★ 批量任务结果与进度：Socket.IO batch_progress 实时推送为主；
@@ -726,7 +726,7 @@ async function saveEdit() {
     jobStore.resultText = editText.value
     editMode.value = false
     ElMessage.success('已保存')
-  } catch (err) {
+  } catch {
     // 即使后端保存失败，也更新前端状态
     jobStore.resultText = editText.value
     editMode.value = false

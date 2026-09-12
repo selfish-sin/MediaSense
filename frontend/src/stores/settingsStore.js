@@ -15,7 +15,7 @@ export const useSettingsStore = defineStore('settings', () => {
     } catch { return [] }
   }
   function persistUserRecipes() {
-    try { localStorage.setItem(USER_RECIPES_KEY, JSON.stringify(userRecipes.value)) } catch {}
+    try { localStorage.setItem(USER_RECIPES_KEY, JSON.stringify(userRecipes.value)) } catch { /* 忽略：隐私模式/quota 下降级为不持久化 */ }
   }
   const userRecipes = ref(loadUserRecipes())  // 前端自定义配方
   // 合并后的全部配方（供 DimensionSelector 应用条 / TemplatesView 编辑器使用）

@@ -66,7 +66,7 @@ export function bgAurora(accent = '#38BDF8') {
     { x: 800, w: 800, o: 0.12, dy: 60 },
     { x: 1100, w: 600, o: 0.16, dy: 200 },
   ]
-  const paths = bands.map((b, i) => {
+  const paths = bands.map((b) => {
     const y = 200 + b.dy
     return `<path d="M${b.x},${y} C${b.x + b.w * 0.3},${y - 160} ${b.x + b.w * 0.6},${y + 200} ${b.x + b.w},${y} L${b.x + b.w},900 L${b.x},900 Z" fill="${hexA(accent, b.o)}"/>`
   }).join('')

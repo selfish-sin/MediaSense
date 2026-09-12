@@ -3,7 +3,7 @@ import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import QRCode from 'qrcode'
 import { bilibiliApi } from '../utils/api'
 
-const props = defineProps({
+defineProps({
   collapsed: { type: Boolean, default: false },
 })
 

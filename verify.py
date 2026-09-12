@@ -1,9 +1,9 @@
 """
-MediaSense 一键验证：后端 pytest + 前端 vitest + 前端构建
+MediaSense 一键验证：后端 pytest + 前端 eslint + vitest + 构建
 Usage:
   python verify.py          # 全部
   python verify.py backend  # 仅后端 pytest
-  python verify.py frontend # 仅前端 vitest + build
+  python verify.py frontend # 仅前端 lint + vitest + build
 """
 import subprocess
 import sys
@@ -32,6 +32,8 @@ def main():
             failures.append("backend pytest")
 
     if target in ("frontend", "all"):
+        if run("npm run lint", ROOT / "frontend") != 0:
+            failures.append("frontend eslint")
         if run("npm test", ROOT / "frontend") != 0:
             failures.append("frontend vitest")
         if run("npx vite build", ROOT / "frontend") != 0:

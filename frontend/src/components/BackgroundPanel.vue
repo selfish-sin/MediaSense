@@ -6,12 +6,12 @@
  * - 遮罩浓度 / 模糊度调节
  * - 主色预设色板 + 自定义色
  */
-import { ref, computed, watch } from 'vue'
+import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Check, X, Upload, Sparkles, RotateCcw, ImageIcon, Palette } from 'lucide-vue-next'
 import { useThemeStore } from '../stores/themeStore'
 import { BUILTIN_BACKGROUNDS } from '../utils/backgrounds'
-import { extractPalette, deriveAccentPair } from '../utils/color'
+import { extractPalette } from '../utils/color'
 
 const theme = useThemeStore()
 

@@ -9,20 +9,20 @@ const STORAGE_KEY = 'yt_tool_job_state'
 function saveToStorage(state) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
-  } catch (e) { /* 忽略 quota 错误 */ }
+  } catch { /* 忽略 quota 错误 */ }
 }
 
 function loadFromStorage() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     return raw ? JSON.parse(raw) : null
-  } catch (e) {
+  } catch {
     return null
   }
 }
 
 function clearStorage() {
-  try { localStorage.removeItem(STORAGE_KEY) } catch (e) { /* ignore */ }
+  try { localStorage.removeItem(STORAGE_KEY) } catch { /* ignore */ }
 }
 
 // 日志按 jobId 分组持久化（避免日志太多撑爆 localStorage）
@@ -37,13 +37,13 @@ function saveLogsToStorage(jobId, logs) {
       delete all[keys[0]]
     }
     localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(all))
-  } catch (e) { /* 忽略 */ }
+  } catch { /* 忽略 */ }
 }
 function loadLogsFromStorage() {
   try {
     const raw = localStorage.getItem(LOG_STORAGE_KEY)
     return raw ? JSON.parse(raw) : {}
-  } catch (e) {
+  } catch {
     return {}
   }
 }
@@ -56,7 +56,7 @@ function clearLogsForJob(jobId) {
     const all = loadLogsFromStorage()
     delete all[jobId]
     localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(all))
-  } catch (e) { /* ignore */ }
+  } catch { /* ignore */ }
 }
 
 export const useJobStore = defineStore('job', () => {

@@ -201,23 +201,6 @@ async function handleTest(key) {
   }
 }
 
-async function handleFetchModels(key) {
-  fetchingModels.value = true
-  fetchingModelKey.value = key
-  fetchedModels.value = []
-  fetchError.value = ''
-  fetchDialogVisible.value = true
-  try {
-    const res = await modelsApi.fetch(key)
-    handleFetchResult(res)
-  } catch (err) {
-    fetchError.value = err.message
-    ElMessage.error(err.message)
-  } finally {
-    fetchingModels.value = false
-  }
-}
-
 async function fetchModelsFromForm() {
   // 从添加/编辑表单中直接调用（端点尚未保存时）
   if (!form.endpoint) {

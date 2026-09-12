@@ -3,7 +3,7 @@ import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, Search, Loader2, ExternalLink, FileText, Cpu, RefreshCcw } from 'lucide-vue-next'
-import { jobsApi, exportApi, chatApi } from '../utils/api'
+import { jobsApi, exportApi } from '../utils/api'
 import { useModelStore } from '../stores/modelStore'
 import { useRafMarkdown } from '../composables/useMarkdownRender'
 import { copyText } from '../utils/clipboard'
@@ -13,7 +13,7 @@ import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
 import ResummarizeControl from '../components/ResummarizeControl.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 import {
-  onProgress, onLog, onAiToken, onAiDone, onAiThinking,
+  onAiToken, onAiDone, onAiThinking,
 } from '../utils/socket'
 
 const route = useRoute()

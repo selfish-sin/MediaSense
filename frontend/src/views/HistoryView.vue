@@ -50,7 +50,7 @@ async function handleDelete(jobId) {
       } else {
         diskMsg = '\n\n（无磁盘文件）'
       }
-    } catch {}
+    } catch { /* 磁盘信息查询失败不阻断删除流程，diskMsg 保持默认 */ }
 
     await ElMessageBox.confirm(
       `确认删除此任务？` + diskMsg,
@@ -274,7 +274,7 @@ async function handleBatchDelete() {
   const ids = selectedJobs.value.map(j => j.id)
 
   // 1. 先 dry_run 获取磁盘信息
-  let diskInfo = null
+  let diskInfo
   try {
     diskInfo = await jobsApi.batchDiskInfo(ids)
   } catch (err) {

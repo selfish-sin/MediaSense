@@ -147,7 +147,7 @@ async function _downloadBlob(endpoint, body) {
     if (match && match[1]) {
       filename = match[1].replace(/['"]/g, '')
       // 处理URL编码的中文文件名
-      try { filename = decodeURIComponent(filename) } catch {}
+      try { filename = decodeURIComponent(filename) } catch { /* 非法编码保持原样 */ }
     }
   }
   // 创建下载链接
@@ -242,7 +242,7 @@ export const chatApi = {
     }).then(async (resp) => {
       if (!resp.ok) {
         let msg = `请求失败 (${resp.status})`
-        try { const j = await resp.json(); msg = j.detail || msg } catch {}
+        try { const j = await resp.json(); msg = j.detail || msg } catch { /* 响应非 JSON 时沿用默认错误文案 */ }
         throw new Error(msg)
       }
       const reader = resp.body.getReader()
@@ -260,7 +260,7 @@ export const chatApi = {
           if (!dataLine) continue
           const payload = dataLine.slice(5).trim()
           if (!payload) continue
-          try { onEvent && onEvent(JSON.parse(payload)) } catch {}
+          try { onEvent && onEvent(JSON.parse(payload)) } catch { /* 跳过无法解析的事件帧 */ }
         }
       }
       onEnd && onEnd(false)
