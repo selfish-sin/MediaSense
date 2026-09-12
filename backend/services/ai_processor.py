@@ -650,8 +650,10 @@ async def correct_transcript(
         await emit_progress(sio, job_id, 'correct', 0, f'AI 校正转录文本（{model}）...')
         await emit_log(sio, job_id, f'🔧 开始 AI 校正（模型: {model}，领域: {_CORRECTION_DOMAIN_LABELS.get(domain, domain)}）')
 
-    # ★ 按行/标记边界分块，避免在时间戳标记中间硬切
-    max_chars = 80000
+    # ★ 按行/标记边界分块，避免在时间戳标记中间硬切。
+    #   块不宜过大：实测 glm-5.2 对 ~5 万字单块流式校正会挂满 600s 总超时（长视频必挂），
+    #   2 万字/块既保证单块分钟级完成，也让进度推送更细
+    max_chars = 20000
     chunks = _split_by_boundary(text, max_chars)
     stats['total_chunks'] = len(chunks)
     if len(chunks) > 1 and sio:
