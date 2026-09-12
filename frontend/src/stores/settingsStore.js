@@ -78,6 +78,8 @@ export const useSettingsStore = defineStore('settings', () => {
     force_transcribe: false,
     ai_correct: false,
     ai_correct_model: '',
+    // ★ 校正领域提示词模板：default=通用 / tcm=中医（保护经典引文与用量观点不被改写）
+    ai_correct_domain: 'default',
   })
   // 云端 ASR 可用性（/api/asr/status 同步；未配置时云端选项禁用并回落 local）
   const cloudAsrAvailable = ref(false)

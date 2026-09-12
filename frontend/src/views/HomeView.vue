@@ -1072,6 +1072,17 @@ function formatTokenTime(t) {
                 <span class="adv-field-hint-inline">纠同音字 / 专名 / 标点</span>
               </div>
             </div>
+            <!-- ★ 校正领域：仅开启 AI 校正时显示；tcm 模板保护经典引文/用量/观点不被改写 -->
+            <div v-if="settings.advancedOptions.ai_correct" class="adv-field">
+              <div class="adv-field-label">校正领域</div>
+              <el-select
+                v-model="settings.advancedOptions.ai_correct_domain"
+                class="adv-field-control"
+              >
+                <el-option label="通用" value="default" />
+                <el-option label="中医 / 针灸" value="tcm" />
+              </el-select>
+            </div>
             <!-- ★ 校正模型选择器：仅开启 AI 校正时显示，留空则用主模型 -->
             <div v-if="settings.advancedOptions.ai_correct" class="adv-field">
               <div class="adv-field-label">校正模型</div>
