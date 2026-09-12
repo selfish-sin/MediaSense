@@ -58,7 +58,7 @@ class TestRecipes:
             assert "key" in r
             assert "name" in r
             assert "dimensions" in r
-            assert len(r["dimensions"]) == 8
+            assert len(r["dimensions"]) == 9
 
     def test_recipe_dimensions_valid(self):
         for r in RECIPES:
@@ -66,6 +66,22 @@ class TestRecipes:
                 assert dim_key in PROMPT_DIMENSIONS
                 valid_keys = [m["key"] for m in PROMPT_DIMENSIONS[dim_key]["modules"]]
                 assert val in valid_keys, f"Recipe {r['key']}: {dim_key}={val} not in {valid_keys}"
+
+    def test_recipes_pin_language_simplified_chinese(self):
+        """内置配方统一钉输出语言=简体中文：应用配方即回到默认简中"""
+        for r in RECIPES:
+            assert r["dimensions"].get("language") == "简体中文", r["key"]
+
+    def test_tcm_recipe_and_role_module(self):
+        """中医预设：专用角色模块 + 原貌保留型维度组合"""
+        r = next(x for x in RECIPES if x["key"] == "tcm_lecture")
+        assert r["dimensions"]["role"] == "tcm"
+        assert r["dimensions"]["content_type"] == "lecture"
+        role_mods = [m["key"] for m in PROMPT_DIMENSIONS["role"]["modules"]]
+        assert "tcm" in role_mods
+        tcm_tpl = _get_module_template("role", "tcm")
+        assert "术语原貌" in tcm_tpl
+        assert "剂量" in tcm_tpl
 
 
 class TestModuleTemplate:

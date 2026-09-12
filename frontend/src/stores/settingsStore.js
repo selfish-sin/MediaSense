@@ -184,7 +184,7 @@ export const useSettingsStore = defineStore('settings', () => {
   // 应用预设配方
   function applyRecipe(recipe) {
     if (recipe?.dimensions) {
-      // ★ merge 而非整体替换：内置配方只定义 8 个维度，保留 language 等配方外维度的当前值
+      // ★ merge 而非整体替换：配方未定义的维度保留当前值；内置配方已含 language=简体中文（应用即回默认简中）
       selectedDimensions.value = { ...selectedDimensions.value, ...recipe.dimensions }
       advancedOptions.value.dimensions = { ...selectedDimensions.value }
       advancedOptions.value.word_count = recipe.dimensions.word_count || '3000'

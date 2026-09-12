@@ -3,8 +3,7 @@
  */
 
 // 维度列表（带顺序：mode 放在 rules 之前；language 在 word_count 之后）
-// ★ 内置配方（后端 RECIPES）只定义前 8 个维度、不含 language——matchRecipeKey
-//   会跳过配方未定义的维度，避免新增维度后所有配方高亮失效
+// matchRecipeKey 只比较配方定义过的维度——配方未定义的维度不影响高亮，新增维度不会让已有配方失效
 export const DIMENSION_KEYS = ['role', 'mode', 'content_type', 'rules', 'depth', 'output', 'tone', 'word_count', 'language']
 
 /**

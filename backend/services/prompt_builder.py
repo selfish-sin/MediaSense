@@ -1,6 +1,6 @@
 """
 MediaSense - 模块化提示词构建引擎
-8 维度可组合：角色 + 认知模式 + 内容类型 + 认知规则 + 深度 + 输出格式 + 语气 + 字数
+9 维度可组合：角色 + 认知模式 + 内容类型 + 认知规则 + 深度 + 输出格式 + 语气 + 字数 + 输出语言
 支持 DB 覆盖（prompt_module_overrides 表）和完全自定义（full_override）
 """
 from typing import Dict, Any, List, Optional
@@ -44,6 +44,12 @@ PROMPT_DIMENSIONS = {
                 "name": "创意写手",
                 "desc": "生动有趣，善于捕捉亮点",
                 "template": "你是一位创意写手，善于捕捉视频中的精彩瞬间和有趣细节。你的表达生动有画面感，能还原对话的氛围和情绪。你会在保证信息准确的前提下，让总结读起来有吸引力。",
+            },
+            {
+                "key": "tcm",
+                "name": "中医整理顾问",
+                "desc": "中医内容整理，术语与经典原文原貌保留",
+                "template": "你是一位熟悉中医基础理论、中药方剂与经典文献的内容整理助手，长期整理中医讲座与科普视频。整理时严格保留专业术语原貌：穴位、经络、方剂、中药、证型等不做同义替换或现代化改写；经典条文与方歌逐字引用，不把异体字规范化（如“恬惔”不改“恬淡”）；剂量与单位（克、钱、两、贴、剂）原样保留，不换算；区分讲者的学术观点与教科书通说，只整理不评判，不补充讲者未提及的内容。",
             },
         ],
     },
@@ -397,13 +403,13 @@ PROMPT_DIMENSIONS = {
             {
                 "key": "research",
                 "name": "深度研究",
-                "desc": "提取主题→网页搜索→逐主题扩展→研究博文",
+                "desc": "提取主题→逐主题深度扩展→研究博文",
                 "template": """【深度要求】
-深度研究模式：基于视频内容做深度扩展研究，输出比原视频更饱满的研究博文。
-- 自动提取 3-8 个研究主题
-- 实时网页搜索补充资料
-- 每个主题 800-1500 字深度分析
+深度研究模式：基于视频内容做主题式深度扩展，输出结构化研究博文。
+- 从内容中提取 3-8 个值得展开的研究主题
+- 每个主题 800-1500 字深度分析，围绕视频给出的论据、案例展开
 - 包含背景脉络、不同观点、延伸思考
+- 扩展论述只能基于视频内容本身，不得虚构外部资料、数据来源或“搜索结果”
 - 适合需要深度学习的学术场景""",
             },
         ],
@@ -481,7 +487,9 @@ PROMPT_DIMENSIONS = {
 }
 
 
-# ============ 预设配方（一键填充所有维度） ============
+# ============ 预设配方（一键填充所有维度；统一钉 language=简体中文，应用即回默认简中） ============
+# 精简原则：维度模块（内容类型/输出格式等）保持全量可选，配方只保留高频组合；
+# 被裁组合的内容类型（学术整理/论述/事件/故事/娱乐/对比）仍可在维度选择器手动搭配。
 RECIPES = [
     {
         "key": "quick_watch",
@@ -496,21 +504,7 @@ RECIPES = [
             "depth": "quick",
             "tone": "口语化",
             "word_count": "500",
-        },
-    },
-    {
-        "key": "course_notes",
-        "name": "📝 课程笔记",
-        "desc": "学术讲座的深度学习笔记",
-        "dimensions": {
-            "role": "academic",
-            "mode": "social_science",
-            "rules": "deep",
-            "output": "chapters",
-            "content_type": "lecture",
-            "depth": "deep",
-            "tone": "学术严谨",
-            "word_count": "10000",
+            "language": "简体中文",
         },
     },
     {
@@ -526,6 +520,7 @@ RECIPES = [
             "depth": "standard",
             "tone": "新闻客观",
             "word_count": "3000",
+            "language": "简体中文",
         },
     },
     {
@@ -541,6 +536,7 @@ RECIPES = [
             "depth": "standard",
             "tone": "通俗科普",
             "word_count": "3000",
+            "language": "简体中文",
         },
     },
     {
@@ -556,21 +552,23 @@ RECIPES = [
             "depth": "standard",
             "tone": "口语化",
             "word_count": "3000",
+            "language": "简体中文",
         },
     },
     {
-        "key": "deep_research",
-        "name": "🧠 深度研究",
-        "desc": "批判性深度分析",
+        "key": "course_notes",
+        "name": "📝 课程笔记",
+        "desc": "学术讲座的深度学习笔记",
         "dimensions": {
             "role": "academic",
             "mode": "social_science",
-            "rules": "critical",
-            "output": "summary",
-            "content_type": "general",
+            "rules": "deep",
+            "output": "chapters",
+            "content_type": "lecture",
             "depth": "deep",
             "tone": "学术严谨",
             "word_count": "10000",
+            "language": "简体中文",
         },
     },
     {
@@ -586,126 +584,39 @@ RECIPES = [
             "depth": "textbook",
             "tone": "学术严谨",
             "word_count": "20000",
+            "language": "简体中文",
         },
     },
     {
-        "key": "deep_research_web",
-        "name": "🔬 深度研究（联网搜索）",
-        "desc": "提取主题→网页搜索→逐主题扩展→研究博文",
+        "key": "deep_research",
+        "name": "🧠 深度研究",
+        "desc": "批判性深度分析",
         "dimensions": {
             "role": "academic",
             "mode": "social_science",
             "rules": "critical",
             "output": "summary",
             "content_type": "general",
-            "depth": "research",
+            "depth": "deep",
             "tone": "学术严谨",
-            "word_count": "不限",
+            "word_count": "10000",
+            "language": "简体中文",
         },
     },
     {
-        "key": "fun_highlights",
-        "name": "🎮 精彩看点",
-        "desc": "娱乐视频的亮点速览",
+        "key": "tcm_lecture",
+        "name": "🌿 中医讲堂",
+        "desc": "中医讲座/科普深度整理：术语、方剂、经典引文原貌保留",
         "dimensions": {
-            "role": "creative",
+            "role": "tcm",
             "mode": "general",
             "rules": "standard",
-            "output": "timeline",
-            "content_type": "entertainment",
-            "depth": "quick",
-            "tone": "口语化",
-            "word_count": "500",
-        },
-    },
-    {
-        "key": "academic_study_organize",
-        "name": "🎓 学术深度研究",
-        "desc": "侧重学术整理：概念、文献、谱系、论证",
-        "dimensions": {
-            "role": "academic",
-            "mode": "social_science",
-            "rules": "deep",
             "output": "chapters",
-            "content_type": "academic_study",
+            "content_type": "lecture",
             "depth": "deep",
             "tone": "学术严谨",
             "word_count": "10000",
-        },
-    },
-    {
-        "key": "argument_organize",
-        "name": "⚖️ 论述整理",
-        "desc": "专注论述整理：论点、论据、论证结构",
-        "dimensions": {
-            "role": "academic",
-            "mode": "social_science",
-            "rules": "critical",
-            "output": "summary",
-            "content_type": "argument",
-            "depth": "deep",
-            "tone": "学术严谨",
-            "word_count": "10000",
-        },
-    },
-    {
-        "key": "event_organize",
-        "name": "📅 事件整理",
-        "desc": "侧重事件整理：经过、因果、影响",
-        "dimensions": {
-            "role": "journalist",
-            "mode": "general",
-            "rules": "standard",
-            "output": "timeline",
-            "content_type": "event",
-            "depth": "standard",
-            "tone": "新闻客观",
-            "word_count": "5000",
-        },
-    },
-    {
-        "key": "story_retelling",
-        "name": "🎬 故事脉络",
-        "desc": "还原叙事结构与人物弧光",
-        "dimensions": {
-            "role": "creative",
-            "mode": "general",
-            "rules": "standard",
-            "output": "timeline",
-            "content_type": "storytelling",
-            "depth": "standard",
-            "tone": "口语化",
-            "word_count": "3000",
-        },
-    },
-    {
-        "key": "debate_analysis",
-        "name": "🗣️ 观点交锋",
-        "desc": "多方观点对比与论证评估",
-        "dimensions": {
-            "role": "journalist",
-            "mode": "general",
-            "rules": "critical",
-            "output": "comparison",
-            "content_type": "interview",
-            "depth": "deep",
-            "tone": "新闻客观",
-            "word_count": "5000",
-        },
-    },
-    {
-        "key": "quotes_collection",
-        "name": "💬 金句摘录",
-        "desc": "提取原话金句与精彩表述",
-        "dimensions": {
-            "role": "general",
-            "mode": "general",
-            "rules": "standard",
-            "output": "bullets",
-            "content_type": "general",
-            "depth": "quick",
-            "tone": "口语化",
-            "word_count": "500",
+            "language": "简体中文",
         },
     },
 ]
@@ -809,8 +720,8 @@ def build_modular_prompt(dimensions: Dict[str, str], content: str,
                          custom_prompt: str = "",
                          full_override: str = "") -> str:
     """
-    根据 8 维选择拼装完整 prompt
-    dimensions: {role, rules, output, content_type, depth, tone, word_count, mode}
+    根据 9 维选择拼装完整 prompt
+    dimensions: {role, rules, output, content_type, depth, tone, word_count, mode, language}
     content: 待总结的转录文本
     custom_prompt: 用户维度级自定义指令（作为额外指引追加）
     full_override: 完全自定义提示词（非空时直接覆盖一切维度拼装，仅注入 content）
