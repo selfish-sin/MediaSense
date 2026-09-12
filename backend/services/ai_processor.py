@@ -540,6 +540,40 @@ def _split_by_boundary(text: str, max_chars: int) -> list:
     return chunks
 
 
+# ============ 校正提示词模板（按内容领域切换） ============
+# 'default'：通用内容；'tcm'：中医/针灸类——核心是"只改转写错，不改说得对"，
+# 保护经典引文原字、药量单位与发言人观点不被模型用自己的领域知识替换。
+_CORRECTION_PROMPTS = {
+    'default': """【校正要求】
+1. 修正同音错字、形近字误识别（如"终南山"→"钟南山"）
+2. 修正专有名词错误（人名、地名、术语、品牌、技术名词）
+3. 补全缺失的标点（句号、逗号、问号等），保持中文标点规范
+4. 修正明显的断句错误，但不改变原意
+5. 保留所有时间戳标记（如 [MM:SS - MM:SS] 格式），不修改时间戳本身
+6. 保留 [说话人X] 等说话人标记
+7. 不要增删实质内容，不要添加解释、注释
+8. 直接输出校正后的纯文本，不要加任何前后缀说明""",
+    'tcm': """【通用校正要求】
+1. 修正同音错字、形近字误识别，但以"明显是语音误听"为准
+2. 补全缺失的标点（句号、逗号、问号等），保持中文标点规范
+3. 修正明显的断句错误，但不改变原意
+4. 保留所有时间戳标记（如 [MM:SS - MM:SS] 格式），不修改时间戳本身
+5. 保留 [说话人X] 等说话人标记
+6. 不要增删实质内容，不要添加解释、注释、总结
+7. 直接输出校正后的纯文本，不要加任何前后缀说明
+
+【中医专项规则】
+8. 穴位名按国标《GB/T 12346 腧穴名称与定位》校正明显误听（如"足山里"→"足三里"）；拿不准时保留原词
+9. 方剂名、中成药名、中药名仅在明显误听时校正（如"贵之汤"→"桂枝汤"）；药量与单位（克/钱/两/毫升/贴/剂）原样保留，不换算、不改写
+10. 中医术语规范：针灸手法"泻法"不写"泄法"，通称"腧穴"不写"俞穴"；但"荣卫"等古称异写是合法写法，不要强行改成"营卫"
+11. 经典原文引文（《黄帝内经》《伤寒论》《金匮要略》等条文）逐字保留：不规范化异体字（"恬惔虚无"不改"恬淡虚无"）、不译成白话、不增删一字
+12. ★ 只改"转写错"，不改"说得对"：发言人的医学观点、方药用量、取穴思路即使与教材不同，也一字不动；绝不用你自己的医学知识替换、补充或"圆"内容
+13. 无法确定的术语一律保留原文——宁存疑，勿擅改""",
+}
+
+_CORRECTION_DOMAIN_LABELS = {'default': '通用', 'tcm': '中医'}
+
+
 def _diff_lines(orig: str, corrected: str) -> list:
     """逐行对比校正前后文本（按时间戳标记出现顺序对齐），返回内容变化的行。
 
@@ -575,12 +609,14 @@ async def correct_transcript(
     model: str = DEFAULT_MODEL,
     sio=None,
     job_id: str = '',
+    domain: str = 'default',
 ) -> Tuple[str, int, int, dict]:
     """
     用云端模型校正语音转写文本。
 
     针对语音转写常见错误：同音错字、专有名词误识别、标点缺失、断句不当。
     保持原意与时间戳标记，只修正明显错误，不增删内容。
+    domain: 校正提示词模板（_CORRECTION_PROMPTS 键），未知值回退 default。
 
     返回：(校正后文本, input_tokens, output_tokens, stats)
       stats = {
@@ -610,7 +646,7 @@ async def correct_transcript(
     if sio:
         from socket_handlers import emit_progress, emit_log
         await emit_progress(sio, job_id, 'correct', 0, f'AI 校正转录文本（{model}）...')
-        await emit_log(sio, job_id, f'🔧 开始 AI 校正（模型: {model}）')
+        await emit_log(sio, job_id, f'🔧 开始 AI 校正（模型: {model}，领域: {_CORRECTION_DOMAIN_LABELS.get(domain, domain)}）')
 
     # ★ 按行/标记边界分块，避免在时间戳标记中间硬切
     max_chars = 80000
@@ -631,17 +667,10 @@ async def correct_transcript(
             from socket_handlers import emit_progress
             await emit_progress(sio, job_id, 'correct', pct, f'AI 校正中... ({i+1}/{len(chunks)})')
 
+        rules = _CORRECTION_PROMPTS.get(domain, _CORRECTION_PROMPTS['default'])
         prompt = f"""以下是语音识别（ASR）转录的文本。请校正其中的明显错误：
 
-【校正要求】
-1. 修正同音错字、形近字误识别（如"终南山"→"钟南山"）
-2. 修正专有名词错误（人名、地名、术语、品牌、技术名词）
-3. 补全缺失的标点（句号、逗号、问号等），保持中文标点规范
-4. 修正明显的断句错误，但不改变原意
-5. 保留所有时间戳标记（如 [MM:SS - MM:SS] 格式），不修改时间戳本身
-6. 保留 [说话人X] 等说话人标记
-7. 不要增删实质内容，不要添加解释、注释
-8. 直接输出校正后的纯文本，不要加任何前后缀说明
+{rules}
 
 【待校正文本】
 {chunk}"""

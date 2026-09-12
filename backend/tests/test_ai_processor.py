@@ -298,6 +298,25 @@ class TestCorrectTranscript:
         assert len(stats['changed_lines']) == 100
         assert stats['changed_truncated'] is True
 
+    async def test_domain_prompt_selection(self):
+        """领域模板选择：tcm 用中医专项规则，未知领域回退 default。"""
+        captured = []
+
+        async def fake_call_ai(cfg, prompt, **kw):
+            captured.append(prompt)
+            return "[00:05] 文本", 1, 1
+
+        with patch("services.ai_processor.get_model_by_key", return_value=self.mock_cfg), \
+             patch("services.ai_processor._call_ai", side_effect=fake_call_ai), \
+             patch("services.ai_processor._record_token_usage"):
+            await correct_transcript("[00:05] 文本", model="glm", domain='tcm')
+            await correct_transcript("[00:05] 文本", model="glm", domain='unknown-xyz')
+            await correct_transcript("[00:05] 文本", model="glm", domain='default')
+        assert '中医专项规则' in captured[0]
+        assert '中医专项规则' not in captured[1]  # 未知领域回退通用
+        assert '中医专项规则' not in captured[2]
+        assert '直接输出校正后的纯文本' in captured[1]  # 通用骨架仍在
+
     async def test_length_anomaly_warns_but_keeps(self):
         # 标记完整但长度暴增 >30% → 告警但不回退
         orig = "短"

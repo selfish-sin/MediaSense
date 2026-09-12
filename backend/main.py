@@ -853,6 +853,8 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             from services.ai_processor import correct_transcript
             # 校正模型：优先用 ai_correct_model，否则用主模型
             correct_model = options.get('ai_correct_model') or model
+            # 校正领域模板：default=通用 / tcm=中医（未知值由 correct_transcript 回退 default）
+            correct_domain = options.get('ai_correct_domain') or 'default'
             try:
                 raw_text = await _read_text(txt_path)
                 if raw_text.strip():
@@ -863,7 +865,8 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                     result['files']['txt_raw'] = raw_backup
 
                     corrected, c_in, c_out, corr_stats = await correct_transcript(
-                        raw_text, model=correct_model, sio=sio, job_id=job_id
+                        raw_text, model=correct_model, sio=sio, job_id=job_id,
+                        domain=correct_domain
                     )
                     # 写回 txt（校正后）
                     with open(txt_path, 'w', encoding='utf-8') as f:
