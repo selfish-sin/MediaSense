@@ -45,10 +45,13 @@
 
 | 用户选择 | 实际回退链 |
 |---|---|
-| cloud（默认） | 云端 MiMo（付费主力）→ firered（仅模型就绪时）→ Whisper |
+| cloud（默认） | 云端 MiMo（付费主力）→ 云端 XingChen（免费档）→ firered（仅模型就绪时）→ Whisper |
 | cloud_free | 云端 XingChen Ultra（免费档，简单视频）→ firered → Whisper |
 | firered | FireRedASR → Whisper |
 | local | Whisper（无回退） |
+
+- **成本不变量**：付费档失败只往更便宜的方向降（MiMo→免费 XingChen→本地）；反向不成立——
+  用户选免费档失败绝不转付费引擎（`test_cloud_free_never_falls_back_to_paid` 锁定）。
 
 - 取消（`TranscriptionCancelledError`）在任何一环直接上抛，不回退。
 - 链尾 Whisper 失败无路可退，上抛给 job。

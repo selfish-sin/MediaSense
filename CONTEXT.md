@@ -28,7 +28,7 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `backend/config.py` | 数据目录、7001、Whisper 模型和清理 TTL | 改路径、端口或默认值 |
 | `backend/db/` | SQLite 初始化、job、模型、token 用量仓储 | 改持久化或任务状态 |
 | `backend/services/downloader.py` | yt-dlp 下载/媒体准备 | 改 URL 下载和代理 |
-| `backend/services/transcriber.py` | 字幕读取、Whisper 转录、语言/模型/设备（auto/cuda/cpu）、`_transcribe_sync` 引擎路由单点（回退链 cloud/cloud_free→firered→local，firered 仅模型就绪时参与且不触发下载，取消不回退） | 改转录回退、引擎路由或设备选择 |
+| `backend/services/transcriber.py` | 字幕读取、Whisper 转录、语言/模型/设备（auto/cuda/cpu）、`_transcribe_sync` 引擎路由单点（回退链 cloud→cloud_free→firered→local；cloud_free→firered→local，付费失败只降不升反向不回付费，firered 仅模型就绪时参与且不触发下载，取消不回退） | 改转录回退、引擎路由或设备选择 |
 | `backend/services/cloud_asr.py` | 云端 ASR 双 provider：mimo（付费主力，chat+base64）/ xingchen（免费档 cloud_free，multipart）；静音切分→并发分片→句级化写盘；单片失败本地补录不留空洞；延迟画像日志 | 改云端引擎、句级切分或补录策略 |
 | `backend/services/local_asr.py` | 本地 FireRedASR2-AED（sherpa-onnx int8/CPU）：模型按需下载→VAD 分段（+padding）→段间并行解码→标点恢复→句级写盘 | 改本地 FireRed 引擎、模型下载或 VAD/标点参数 |
 | `.trellis/spec/backend/transcription-chain.md` | **识别链全链路权威文档**：输入四策略/字幕优先防错位/引擎回退链/三引擎内部/分片补录/横评结论/参数速查/坑点汇总 | 改转录链任何环节前必读 |
