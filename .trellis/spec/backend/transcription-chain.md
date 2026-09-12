@@ -109,13 +109,16 @@ accept_waveform**，整段喂只报尾部；段首尾 +0.15s padding 防吞字�
 - XingChen 系其他模型（V3.2 普通版/Diarize 说话人分离版）同为 SiliconFlow multipart 接口，
   接入只需改 `ASR_FREE_MODEL` 或加 provider 配置，零代码。
 
-## 4. 分片级递归补救（cloud_asr._rescue_chunks_locally，09-12 新增）
+## 4. 分片级备用引擎补录（cloud_asr._rescue_failed_chunks，09-12 升级）
 
 云端单片失败不再留空洞：失败片**在分片文件清理前**递归补录——
-firered（`transcribe_chunk_text`，模型就绪优先）→ Whisper base（`transcribe_audio_sample`
-固定 CPU，中文带简中提示词，与字幕抽查同路径）→ 都失败才留空（日志可见）。
-补录文本按原时间轴并入结果并句级化；全失败但补录有收获则不再抛 Unavailable。
-完成文案透出：`N 片由本地引擎（FireRedASR）补录`。
+XingChen（`transcribe_file(provider='xingchen')`，**免费云端先行**：主 provider 被 429 限流时
+换一家成功率最高；主 provider 就是 xingchen 时跳过此级，不拿同一家限流接口重试）
+→ firered（`transcribe_chunk_text`，模型就绪才参与，不触发下载）→ Whisper base
+（`transcribe_audio_sample` 固定 CPU，中文带简中提示词，与字幕抽查同路径）→ 都失败才留空
+（日志可见）。补录文本按原时间轴并入结果并句级化；全失败但补录有收获则不再抛 Unavailable。
+完成文案透出实际用到的引擎，如 `N 片由备用引擎（XingChen（免费））补录`；
+部分失败告警**只列真正未恢复的区间**（09-12 前误列全部失败段，已修）。
 
 ## 5. 引擎横评结论（同素材 BV1bH4y1r75q 前 10 分钟，88 片 c8）
 
@@ -153,3 +156,6 @@ FireRedASR 免费离线保留。XingChen 未参与 10min 全量横评（单片�
 8. GitHub release 下载 `follow_redirects=True`，tar 解包 `filter='data'`；标点模型 tag 是
    `punctuation-models`（不是 punct-models）。
 9. `local` 引擎值语义冻结；改回退链只动 `_FALLBACK_CHAINS` 单点。
+10. **服务运行环境 ≠ backend/venv**：服务实际跑在 PATH 上的 python（D:\path\python.exe），
+   「No module named sherpa_onnx」排查先看进程解释器（`Get-CimInstance Win32_Process`）再装包；
+   新依赖进 requirements.txt 必须同步 start.bat 探测 import 列表，否则启动不自动补装。
