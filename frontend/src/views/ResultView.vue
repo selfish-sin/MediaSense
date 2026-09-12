@@ -54,10 +54,11 @@ const mindmapContainer = ref(null)
 // ============ 转录文本 tab ============
 // ★ 校正后文本(txt)与原文(txt_raw)独立展示，不再混入 result_text
 //   - transcriptTab: 'transcript' 时显示转录区
-//   - transcriptView: 'corrected'(校正后) / 'raw'(校正前原文)
+//   - transcriptView: 'corrected'(校正后) / 'raw'(校正前原文) / 'clean'(纯净阅读版)
 //   - hasCorrection: 是否做过 AI 校正（有 txt_raw 备份）
 const transcriptText = ref('')        // 校正后转录文本
 const transcriptRawText = ref('')     // 校正前原文（仅校正过才有）
+const transcriptCleanText = ref('')   // 纯净阅读版（无时间戳/说话人标记）
 const transcriptLoading = ref(false)
 const transcriptLoaded = ref(false)
 const transcriptView = ref('corrected')  // 默认看校正后
@@ -67,6 +68,8 @@ const resultTab = ref('summary')
 
 // 是否做过 AI 校正：有 txt_raw 备份文件即视为校正过
 const hasCorrection = computed(() => !!(job.value?.files?.txt_raw))
+// 是否有纯净文本（txt_clean，所有转录任务都有；校对开启时基于校正后文本）
+const hasClean = computed(() => !!(job.value?.files?.txt_clean))
 // 校正统计（后端持久化，仅校正过的任务有）
 const correctionStats = computed(() => job.value?.correction_stats || null)
 const correctionNeedReview = computed(() => {
@@ -272,6 +275,7 @@ watch(() => route.params.jobId, (newId, oldId) => {
     // 重置转录状态
     transcriptText.value = ''
     transcriptRawText.value = ''
+    transcriptCleanText.value = ''
     transcriptLoaded.value = false
     transcriptView.value = 'corrected'
     if (mindmapContainer.value) mindmapContainer.value.innerHTML = ''
@@ -510,6 +514,15 @@ async function loadTranscript() {
         if (resRaw.ok) transcriptRawText.value = await resRaw.text()
       } catch { /* 原文读取失败不阻塞 */ }
     }
+    // 纯净阅读版（无时间戳/说话人标记）
+    if (files.txt_clean) {
+      try {
+        const resClean = await fetch(`/api/download/view?path=${encodeURIComponent(files.txt_clean)}`)
+        if (resClean.ok) transcriptCleanText.value = await resClean.text()
+      } catch { /* 纯净版读取失败不阻塞 */ }
+    }
+    // 无校正但有纯净版时，默认展示纯净版
+    if (!hasCorrection.value && hasClean.value) transcriptView.value = 'clean'
     transcriptLoaded.value = true
   } catch (err) {
     ElMessage.error('加载转录文本失败: ' + (err.message || err))
@@ -523,10 +536,13 @@ function switchToTranscriptTab() {
   if (!transcriptLoaded.value) loadTranscript()
 }
 
-// 当前展示的转录文本（根据校正/原文切换）
+// 当前展示的转录文本（根据校正/原文/纯净切换）
 const displayTranscript = computed(() => {
   if (transcriptView.value === 'raw' && transcriptRawText.value) {
     return transcriptRawText.value
+  }
+  if (transcriptView.value === 'clean' && transcriptCleanText.value) {
+    return transcriptCleanText.value
   }
   return transcriptText.value
 })
@@ -737,11 +753,12 @@ async function copyTranscript() {
         <div v-if="resultTab === 'transcript'">
           <!-- 转录工具栏 -->
           <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;">
-            <el-radio-group v-if="hasCorrection" v-model="transcriptView" size="small">
-              <el-radio-button label="corrected">校正后</el-radio-button>
-              <el-radio-button label="raw">校正前原文</el-radio-button>
+            <el-radio-group v-if="hasCorrection || hasClean" v-model="transcriptView" size="small">
+              <el-radio-button v-if="hasCorrection" label="corrected">校正后</el-radio-button>
+              <el-radio-button v-if="hasCorrection" label="raw">校正前原文</el-radio-button>
+              <el-radio-button v-if="hasClean" label="clean">纯净</el-radio-button>
             </el-radio-group>
-            <span v-else style="font-size: 12px; color: var(--app-text-secondary);">未启用 AI 校正</span>
+            <span v-else style="font-size: 12px; color: var(--app-text-secondary);">无转录文本</span>
             <div style="flex: 1;" />
             <el-button size="small" type="success" plain @click="copyTranscript" :disabled="!displayTranscript">复制转录</el-button>
           </div>
@@ -762,8 +779,23 @@ async function copyTranscript() {
           <!-- 校正统计（正常） -->
           <div v-if="hasCorrection && correctionStats && !correctionNeedReview && transcriptView === 'corrected'"
                style="font-size: 12px; color: #67c23a; margin-bottom: 8px;">
-            ✅ AI 校正完成，{{ correctionStats.total_chunks }} 批全部通过完整性校验
+            ✅ AI 校正完成，{{ correctionStats.total_chunks }} 批全部通过完整性校验，改动 {{ correctionStats.changed_count || 0 }} 处
           </div>
+          <!-- 逐句改动明细：语义级替换机械防线拦不住，必须可见可复核 -->
+          <el-collapse v-if="hasCorrection && correctionStats && (correctionStats.changed_count || 0) > 0 && transcriptView === 'corrected'"
+                       style="margin-bottom: 8px;">
+            <el-collapse-item :title="`改动明细（${correctionStats.changed_count} 处）`">
+              <div v-for="(d, i) in (correctionStats.changed_lines || [])" :key="i" class="correction-diff-item">
+                <span class="diff-ts">{{ d.ts }}</span>
+                <span class="diff-before">{{ d.before }}</span>
+                <span class="diff-arrow">→</span>
+                <span class="diff-after">{{ d.after }}</span>
+              </div>
+              <div v-if="correctionStats.changed_truncated" class="correction-diff-item" style="color: var(--app-text-secondary);">
+                改动较多，仅显示前 100 处
+              </div>
+            </el-collapse-item>
+          </el-collapse>
           <!-- 转录文本内容 -->
           <div v-if="transcriptLoading" style="text-align: center; padding: 40px; color: var(--app-text-secondary);">
             <el-icon class="is-loading" style="font-size: 24px;"><Loader2 /></el-icon>
@@ -891,6 +923,29 @@ async function copyTranscript() {
   max-height: 70vh;
   overflow-y: auto;
   font-family: 'Consolas', 'Monaco', 'Source Code Pro', monospace;
+}
+
+/* 校正改动明细 */
+.correction-diff-item {
+  font-size: 12.5px;
+  line-height: 1.8;
+  padding: 2px 0;
+  word-break: break-word;
+}
+.correction-diff-item .diff-ts {
+  color: var(--app-text-secondary);
+  margin-right: 6px;
+  font-family: 'Consolas', 'Monaco', 'Source Code Pro', monospace;
+}
+.correction-diff-item .diff-before {
+  color: #e6a23c;
+}
+.correction-diff-item .diff-arrow {
+  color: var(--app-text-secondary);
+  margin: 0 6px;
+}
+.correction-diff-item .diff-after {
+  color: #67c23a;
 }
 
 /* 思维导图容器 */
