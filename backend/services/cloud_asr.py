@@ -17,7 +17,8 @@
 - CloudASRUnavailableError：400/429/5xx/网络错误退避重试耗尽（400 可能是单片内容问题，
   重试耗尽后跳过交给本地补录，不能上升为整体配置失败）
 分片级韧性（长视频数百片，单片抖动不应整体回退本地）：
-- 单片 Unavailable 失败 → 先本地引擎补录（_rescue_chunks_locally），补不回才留空洞
+- 单片 Unavailable 失败 → 备用引擎补录（XingChen 免费 → firered → Whisper，
+  _rescue_failed_chunks），补不回才留空洞
 - 全部分片失败且补录无收获 → 抛 CloudASRUnavailableError，调用方整体回退本地 Whisper
 - 部分失败 → 返回补录后的结果并在日志/进度条告警
 """
@@ -534,38 +535,55 @@ def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int
     raise CloudASRUnavailableError(f'云端 ASR 重试 {max_retries} 次后仍失败: {last_reason}')
 
 
-def _rescue_chunks_locally(
+def _rescue_failed_chunks(
     failed_chunks: List[Tuple[str, float, float]],
     language: Optional[str],
     progress_callback: Optional[Callable] = None,
     cancel_check: Optional[Callable] = None,
+    primary_provider: str = 'mimo',
 ) -> Tuple[str, List[Tuple[float, float, str]]]:
-    """递归路由的分片级应用：云端失败的单片当场换本地引擎补录，不留空洞。
+    """递归路由的分片级应用：云端失败的单片当场换备用引擎补录，不留空洞。
 
-    firered 模型就绪则优先（快且准，不触发下载）；否则 Whisper base（固定 CPU，
-    与字幕抽查同路径，中文带简体提示词防幻觉英文）。单片补录失败不拖垮整体
-    （该段留空 + 日志可见）。返回 (引擎标签, [(seg_start, seg_end, text)])。
+    备用链：XingChen（免费云端，换一家避开主 provider 限流；主 provider 就是
+    xingchen 时跳过，不拿同一家限流的接口重试）→ firered（模型就绪时，快且准，
+    不触发下载）→ Whisper base（固定 CPU，与字幕抽查同路径，中文带简体提示词
+    防幻觉英文）。单片补录失败不拖垮整体（该段留空 + 日志可见）。
+    返回 (实际用到的引擎标签, [(seg_start, seg_end, text)])。
     """
     from services import local_asr
     from services.transcriber import transcribe_audio_sample
 
+    free_ok = primary_provider != 'xingchen' and cloud_asr_configured('xingchen')
     use_firered = local_asr.firered_model_ready()
-    engine_label = 'FireRedASR' if use_firered else 'Whisper(base)'
+    chain_label = '、'.join(label for label, ok in (
+        ('XingChen（免费）', free_ok), ('FireRedASR', use_firered), ('Whisper(base)', True)) if ok)
     if progress_callback:
         progress_callback(
-            90, f'{len(failed_chunks)} 片云端失败，改用本地引擎（{engine_label}）补录...')
+            90, f'{len(failed_chunks)} 片云端失败，改用备用引擎（{chain_label}）补录...')
 
     lang = language or 'zh'
     zh_prompt = _ZH_RESCUE_PROMPT if lang == 'zh' else None
+    used: List[str] = []
     out: List[Tuple[float, float, str]] = []
     for cp, seg_start, seg_end in failed_chunks:
         if cancel_check and cancel_check():
             raise TranscriptionCancelledError('用户取消，转录中止')
         text = None
-        if use_firered:
+        if free_ok:
+            try:
+                text = transcribe_file(cp, provider='xingchen')
+                if text and 'XingChen（免费）' not in used:
+                    used.append('XingChen（免费）')
+            except Exception as e:
+                logger.warning(
+                    f'XingChen（免费）补录失败（{Path(cp).name}: {type(e).__name__}: {e}），改用本地引擎')
+                text = None
+        if not text and use_firered:
             try:
                 text = local_asr.transcribe_chunk_text(
                     cp, language=lang if lang in ('zh', 'en') else None)
+                if text and 'FireRedASR' not in used:
+                    used.append('FireRedASR')
             except Exception as e:
                 logger.warning(
                     f'本地 FireRedASR 补录失败（{Path(cp).name}: {type(e).__name__}: {e}），改用 Whisper base')
@@ -574,13 +592,15 @@ def _rescue_chunks_locally(
             try:
                 text = transcribe_audio_sample(
                     cp, max_seconds=90.0, language=lang, initial_prompt=zh_prompt)
+                if text and 'Whisper(base)' not in used:
+                    used.append('Whisper(base)')
             except Exception as e:
                 logger.error(
                     f'本地 Whisper 补录失败（{Path(cp).name}: {type(e).__name__}: {e}），该段留空')
                 continue
         if text:
             out.append((seg_start, seg_end, text.strip()))
-    return engine_label, out
+    return ('、'.join(used) if used else 'Whisper(base)'), out
 
 
 def transcribe_audio_cloud(
@@ -715,13 +735,13 @@ def transcribe_audio_cloud(
                 results.append((seg_start, seg_end, text))
             _report()
 
-        # ── 分片级递归补救：云端失败的片当场换本地引擎补录（必须发生在
+        # ── 分片级递归补救：云端失败的片当场换备用引擎补录（必须发生在
         # finally 清理分片文件之前），失败的片不再是空洞 ──
         rescued = 0
         rescue_engine = ''
         if failed_chunks:
-            rescue_engine, rescued_texts = _rescue_chunks_locally(
-                failed_chunks, language, progress_callback, cancel_check)
+            rescue_engine, rescued_texts = _rescue_failed_chunks(
+                failed_chunks, language, progress_callback, cancel_check, primary_provider=provider)
             results.extend(rescued_texts)
             rescued = len(rescued_texts)
     finally:
@@ -752,15 +772,19 @@ def transcribe_audio_cloud(
             '云端转录全部分片失败（网络/429/5xx 重试耗尽），回退本地 Whisper')
     if failures:
         still_failed = failures - rescued
+        # 只列真正没补回来的段——failed_ranges 是全部失败段（含已补录的），照抄会误导
+        rescued_starts = {r[0] for r in rescued_texts}
+        still_ranges = [rng for rng, (_cp, s, _e) in zip(failed_ranges, failed_chunks)
+                        if s not in rescued_starts]
         if still_failed > 0:
-            shown = '、'.join(failed_ranges[:10])
-            more = f'…共 {len(failed_ranges)} 段' if len(failed_ranges) > 10 else ''
+            shown = '、'.join(still_ranges[:10])
+            more = f'…共 {len(still_ranges)} 段' if len(still_ranges) > 10 else ''
             logger.error(
                 f'云端转录完成但 {still_failed}/{total} 分片失败且补录未恢复（区间: {shown}{more}），'
                 f'输出为部分结果'
             )
         else:
-            logger.info(f'云端 {failures}/{total} 分片失败，已全部由本地引擎（{rescue_engine}）补录')
+            logger.info(f'云端 {failures}/{total} 分片失败，已全部由备用引擎（{rescue_engine}）补录')
 
     srt_path = str(src.with_suffix('.srt'))
     txt_path = str(src.with_suffix('.txt'))

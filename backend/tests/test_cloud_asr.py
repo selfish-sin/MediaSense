@@ -365,12 +365,14 @@ def _setup_orchestration(monkeypatch, tmp_path, duration=100.0, texts=None, sile
 class TestTranscribeAudioCloud:
     @staticmethod
     def _disable_rescue(monkeypatch):
-        """禁用本地补录路径（编排测试不触碰真实本地模型）。"""
+        """禁用补录路径（编排测试不触碰真实本地模型/免费云端）。"""
         import services.local_asr as la
         monkeypatch.setattr(la, 'firered_model_ready', lambda: False)
         monkeypatch.setattr(
             'services.transcriber.transcribe_audio_sample',
             lambda *a, **kw: (_ for _ in ()).throw(Exception('rescue disabled')))
+        monkeypatch.setattr(cloud_asr, 'cloud_asr_configured',
+                            lambda provider='mimo': provider != 'xingchen')
 
     def test_full_flow_srt_txt(self, monkeypatch, tmp_path, fake_audio):
         chunk_paths, calls = _setup_orchestration(monkeypatch, tmp_path)
@@ -493,6 +495,8 @@ class TestTranscribeAudioCloud:
         """分片级递归补救：云端单片失败 → firered 补录恢复，不产出空洞。"""
         _setup_orchestration(monkeypatch, tmp_path)
         import services.local_asr as la
+        monkeypatch.setattr(cloud_asr, 'cloud_asr_configured',
+                            lambda provider='mimo': provider != 'xingchen')
         monkeypatch.setattr(la, 'firered_model_ready', lambda: True)
         monkeypatch.setattr(la, 'transcribe_chunk_text',
                             lambda p, language=None: '本地补录内容。')
@@ -507,10 +511,54 @@ class TestTranscribeAudioCloud:
         srt_text = Path(srt).read_text(encoding='utf-8')
         assert '本地补录内容。' in srt_text
 
+    def test_rescue_prefers_free_cloud_when_primary_mimo(self, monkeypatch, tmp_path, fake_audio):
+        """mimo 单片 429 失败 → 补录先用免费档 XingChen（换一家避开限流）。"""
+        _setup_orchestration(monkeypatch, tmp_path)
+        import services.local_asr as la
+        monkeypatch.setattr(cloud_asr, 'cloud_asr_configured',
+                            lambda provider='mimo': True)
+        monkeypatch.setattr(la, 'firered_model_ready', lambda: False)
+
+        def flaky(path, provider='mimo', **kw):
+            if provider == 'mimo' and Path(path).name == 'fake_audio_cloud_002.mp3':
+                raise CloudASRUnavailableError('重试耗尽: HTTP 429')
+            return f'OK-{provider}-{Path(path).name}'
+        monkeypatch.setattr(cloud_asr, 'transcribe_file', flaky)
+        srt, _txt, seg_count = transcribe_audio_cloud(fake_audio)
+        assert seg_count == 5
+        assert 'OK-xingchen-fake_audio_cloud_002.mp3' in Path(srt).read_text(encoding='utf-8')
+
+    def test_rescue_skips_free_cloud_when_primary_is_xingchen(self, monkeypatch, tmp_path, fake_audio):
+        """主 provider 就是 xingchen 时，补录不再拿同一家限流接口重试，直接本地。"""
+        _setup_orchestration(monkeypatch, tmp_path)
+        import services.local_asr as la
+        monkeypatch.setattr(cloud_asr, 'cloud_asr_configured',
+                            lambda provider='mimo': True)
+        monkeypatch.setattr(la, 'firered_model_ready', lambda: False)
+        monkeypatch.setattr('services.transcriber.transcribe_audio_sample',
+                            lambda *a, **kw: 'Whisper补录内容。')
+
+        calls = []
+
+        def flaky(path, provider='mimo', **kw):
+            calls.append((Path(path).name, provider))
+            if Path(path).name == 'fake_audio_cloud_002.mp3':
+                raise CloudASRUnavailableError('重试耗尽: HTTP 429')
+            return f'OK-{Path(path).name}'
+        monkeypatch.setattr(cloud_asr, 'transcribe_file', flaky)
+        srt, _txt, seg_count = transcribe_audio_cloud(fake_audio, provider='xingchen')
+        assert seg_count == 5
+        assert 'Whisper补录内容。' in Path(srt).read_text(encoding='utf-8')
+        # 失败片只被主 provider 尝试过一次（补录没再调 xingchen）
+        assert ('fake_audio_cloud_002.mp3', 'xingchen') in calls
+        assert calls.count(('fake_audio_cloud_002.mp3', 'xingchen')) == 1
+
     def test_rescue_falls_back_to_whisper_when_firered_unavailable(self, monkeypatch, tmp_path, fake_audio):
         """firered 模型未就绪 → 补录走 Whisper base。"""
         _setup_orchestration(monkeypatch, tmp_path)
         import services.local_asr as la
+        monkeypatch.setattr(cloud_asr, 'cloud_asr_configured',
+                            lambda provider='mimo': provider != 'xingchen')
         monkeypatch.setattr(la, 'firered_model_ready', lambda: False)
         monkeypatch.setattr('services.transcriber.transcribe_audio_sample',
                             lambda *a, **kw: 'Whisper补录内容。')
@@ -541,6 +589,8 @@ class TestTranscribeAudioCloud:
         """云端全失败但本地补录全部恢复 → 不抛 Unavailable，直接交付补录结果。"""
         _setup_orchestration(monkeypatch, tmp_path)
         import services.local_asr as la
+        monkeypatch.setattr(cloud_asr, 'cloud_asr_configured',
+                            lambda provider='mimo': provider != 'xingchen')
         monkeypatch.setattr(la, 'firered_model_ready', lambda: True)
         monkeypatch.setattr(la, 'transcribe_chunk_text',
                             lambda p, language=None: '补录。')
