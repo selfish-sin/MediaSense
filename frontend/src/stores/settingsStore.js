@@ -68,8 +68,10 @@ export const useSettingsStore = defineStore('settings', () => {
     purpose: '学习笔记',
     speaker_diarization: false,
     model_size: 'medium',
-    // ★ 转录引擎：cloud=云端 MiMo-ASR（默认，推荐）/ firered=本地 FireRedASR2（中英最准）/
-    //   local=本地 Whisper；云端未配置或失败时自动回退本地，原因可见
+    // ★ 转录引擎：cloud_free=云端 XingChen（免费，后端推荐优先）/ cloud=云端 MiMo-ASR（付费）/
+    //   firered=本地 FireRedASR2（中英最准）/ local=本地 Whisper；
+    //   初始 'cloud' 为占位——loadCloudAsrStatus 按 /api/asr/status 的 recommended_engine
+    //   替换默认值（免费优先）；运行时失败自动回退本地，原因可见
     transcribe_engine: 'cloud',
     // ★ 转录设备：auto=自动探测（有GPU用GPU）/ cuda=强制CUDA(不可用回退CPU) / cpu=强制CPU（仅本地引擎）
     whisper_device: 'auto',
@@ -118,7 +120,7 @@ export const useSettingsStore = defineStore('settings', () => {
     await Promise.all([loadDeepConfig(), loadCloudAsrStatus()])
   }
 
-  // 拉取云端 ASR 配置状态：未配置时引擎回落 local（云端选项禁用）
+  // 拉取云端 ASR 配置状态：默认引擎消费后端推荐（免费优先），云端选项可用性同步
   async function loadCloudAsrStatus() {
     try {
       const res = await asrApi.status()
@@ -126,12 +128,16 @@ export const useSettingsStore = defineStore('settings', () => {
       cloudAsrModel.value = res.model || ''
       freeCloudAvailable.value = !!res.free_configured
       fireredReady.value = !!res.firered_ready
-      if (!cloudAsrAvailable.value && advancedOptions.value.transcribe_engine === 'cloud') {
-        advancedOptions.value.transcribe_engine = 'local'
+      // ★ 默认引擎策略单点在后端（routers/asr.py recommended_engine）：
+      //   前端只消费者——用户仍停留在默认 'cloud' 时替换为推荐值，手选不被覆盖
+      const recommended = res.recommended_engine
+      if (recommended && advancedOptions.value.transcribe_engine === 'cloud') {
+        advancedOptions.value.transcribe_engine = recommended
       }
     } catch (err) {
       console.error('加载云端 ASR 状态失败:', err)
       cloudAsrAvailable.value = false
+      // 状态不可用（后端未起/网络异常）：保守落 local，不猜云端
       if (advancedOptions.value.transcribe_engine === 'cloud') {
         advancedOptions.value.transcribe_engine = 'local'
       }
