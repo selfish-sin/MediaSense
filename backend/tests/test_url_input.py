@@ -58,12 +58,14 @@ class TestBilibiliPaths:
         assert files['audio'] == str(audio)
         assert (srt, txt, seg) == ('t.srt', 't.txt', 3)
 
-    async def test_subtitle_check_fail_reuses_audio_and_registers(self, tmp_path):
-        """B站字幕抽查失败：丢弃错位字幕、复用抽查音频转录，files['audio'] 必须登记。"""
+    async def test_subtitle_check_fail_downloads_full_audio_for_transcribe(self, tmp_path):
+        """B站字幕抽查失败：丢弃错位字幕；抽查只下片段，转录时完整音频重新下载。"""
         from main import _handle_url_input
 
-        audio = tmp_path / 'video.m4a'
-        audio.write_bytes(b'x' * 2048)
+        sample = tmp_path / 'sample90s.m4a'
+        sample.write_bytes(b'x' * 2048)
+        full = tmp_path / 'full.m4a'
+        full.write_bytes(b'y' * 4096)
         sub_srt = tmp_path / 'bilibili_subtitle.srt'
         sub_srt.write_text('1\n00:00:00,000 --> 00:00:06,000\n旧字幕\n', encoding='utf-8')
         sub_txt = tmp_path / 'bilibili_subtitle.txt'
@@ -80,24 +82,29 @@ class TestBilibiliPaths:
                       return_value=(False, '相似度 0.05（错位）')))
             m_dl = stack.enter_context(
                 patch('services.downloader.download_video', new_callable=AsyncMock,
-                      return_value=(str(audio), '', '')))
+                      side_effect=[(str(sample), '', ''), (str(full), '标题', '哔哩哔哩')]))
             m_tr = stack.enter_context(
                 patch('services.transcriber.transcribe_audio', new_callable=AsyncMock,
                       return_value=('t.srt', 't.txt', 5)))
             _srt, _txt, _seg, _title, _platform, files = await _handle_url_input(
                 BILI_URL, tmp_path, MagicMock(), 'j1', _opts(), 'base', False, 'zh')
 
-        m_dl.assert_called_once()   # 只下载一次：复用抽查音频，无二次下载
+        # 两次下载：抽查片段（max_seconds=90，子目录）+ 转录完整音频（片段不复用）
+        assert m_dl.call_count == 2
+        first, second = m_dl.call_args_list
+        assert first.kwargs.get('max_seconds') == 90
+        assert first.args[1].name == '_subtitle_check'
+        assert 'max_seconds' not in second.kwargs
         m_tr.assert_called_once()
-        assert files['audio'] == str(audio)
+        assert files['audio'] == str(full)
         assert not sub_srt.exists() and not sub_txt.exists()   # 错位字幕已丢弃
 
-    async def test_subtitle_check_pass_registers_audio_as_material(self, tmp_path):
-        """B站字幕抽查通过：不转录，但抽查已下载的音频登记为素材（不闲置）。"""
+    async def test_subtitle_check_pass_uses_clip_only_no_audio_material(self, tmp_path):
+        """B站字幕抽查通过：只为比对下载开头片段（max_seconds=90），片段不作为素材。"""
         from main import _handle_url_input
 
-        audio = tmp_path / 'video.m4a'
-        audio.write_bytes(b'x' * 2048)
+        sample = tmp_path / 'sample.m4a'
+        sample.write_bytes(b'x' * 2048)
         sub_srt = tmp_path / 'bilibili_subtitle.srt'
         sub_srt.write_text('1\n00:00:00,000 --> 00:00:06,000\n对得上的字幕\n', encoding='utf-8')
         sub_txt = tmp_path / 'bilibili_subtitle.txt'
@@ -112,9 +119,9 @@ class TestBilibiliPaths:
             stack.enter_context(
                 patch('services.downloader.verify_subtitle_against_audio', new_callable=AsyncMock,
                       return_value=(True, '相似度 0.90')))
-            stack.enter_context(
+            m_dl = stack.enter_context(
                 patch('services.downloader.download_video', new_callable=AsyncMock,
-                      return_value=(str(audio), '', '')))
+                      return_value=(str(sample), '', '')))
             m_tr = stack.enter_context(
                 patch('services.transcriber.transcribe_audio', new_callable=AsyncMock))
             srt, _txt, _seg, _title, _platform, files = await _handle_url_input(
@@ -122,7 +129,9 @@ class TestBilibiliPaths:
 
         m_tr.assert_not_called()                     # 字幕可用，不转录
         assert str(srt) == str(sub_srt)
-        assert files['audio'] == str(audio)          # 已下载音频登记为素材
+        m_dl.assert_called_once()                    # 抽查只下载一次
+        assert m_dl.call_args.kwargs.get('max_seconds') == 90
+        assert 'audio' not in files                  # 片段不作为素材登记
 
 
 class TestNonBilibiliPaths:

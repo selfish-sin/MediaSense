@@ -465,3 +465,64 @@ class TestSubtitleContentCheck:
         ok, detail = await verify_subtitle_against_audio(txt, "audio.m4a")
         assert ok is True
         assert "本地" in detail
+
+
+class TestDownloadVideoSections:
+    """download_video(max_seconds)：只取开头片段（--download-sections）+ 失败回退完整下载。"""
+
+    @staticmethod
+    def _fake_run(download_rcs, out_dir, calls):
+        rc_iter = iter(download_rcs)
+
+        def fake_run(cmd, capture_output, timeout):
+            args = [str(c) for c in cmd]
+            if '--dump-json' in args:            # 视频信息步骤：失败走默认 title
+                return SimpleNamespace(returncode=1, stdout=b'', stderr=b'')
+            calls.append(args)
+            rc = next(rc_iter)
+            if rc == 0:
+                (out_dir / 'video.m4a').write_bytes(b'x' * 4096)
+            return SimpleNamespace(returncode=rc, stdout=b'', stderr=b'boom')
+
+        return fake_run
+
+    async def test_max_seconds_adds_download_sections(self, tmp_path, monkeypatch):
+        from services.downloader import download_video
+
+        calls = []
+        monkeypatch.setattr('services.downloader.subprocess.run',
+                            self._fake_run([0], tmp_path, calls))
+        result = await download_video(
+            'https://www.bilibili.com/video/BVxxx', tmp_path,
+            only_audio=True, max_seconds=90)
+
+        assert result[0].endswith('video.m4a')
+        assert len(calls) == 1
+        assert '--download-sections' in calls[0]
+        assert '*0-90' in calls[0]
+
+    async def test_sections_failure_falls_back_to_full_download(self, tmp_path, monkeypatch):
+        from services.downloader import download_video
+
+        calls = []
+        monkeypatch.setattr('services.downloader.subprocess.run',
+                            self._fake_run([1, 0], tmp_path, calls))
+        result = await download_video(
+            'https://www.bilibili.com/video/BVxxx', tmp_path,
+            only_audio=True, max_seconds=90)
+
+        assert result[0].endswith('video.m4a')
+        assert len(calls) == 2
+        assert '--download-sections' in calls[0]
+        assert '--download-sections' not in calls[1]   # 回退完整下载
+
+    async def test_no_max_seconds_keeps_full_download_args(self, tmp_path, monkeypatch):
+        from services.downloader import download_video
+
+        calls = []
+        monkeypatch.setattr('services.downloader.subprocess.run',
+                            self._fake_run([0], tmp_path, calls))
+        await download_video('https://www.bilibili.com/video/BVxxx', tmp_path, only_audio=True)
+
+        assert len(calls) == 1
+        assert '--download-sections' not in calls[0]

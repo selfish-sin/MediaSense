@@ -981,9 +981,11 @@ async def download_video(
     video_only: bool = False,
     sio=None,
     job_id: str = '',
+    max_seconds: Optional[int] = None,
 ) -> Tuple[str, str, str]:
     """
     用 yt-dlp 下载视频/音频（支持多平台）
+    max_seconds：只取开头 N 秒（字幕抽查等"只要片段"场景；失败自动回退完整下载）
     返回：(file_path, title, platform_name)
     """
     # ★ 安全清洗：剥离可能混入的前缀（如列表编号 "3. "、中文逗号、截断的BV片段等）
@@ -1049,15 +1051,22 @@ async def download_video(
         fmt = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]'
 
     output_template = str(output_dir / '%(title)s.%(ext)s')
-    dl_args = proxy_args + bilibili_headers + [
-        '--no-check-certificate',
-        '-f', fmt,
-        '-o', output_template,
-        '--newline', url
-    ]
+    # ★ 只取开头片段（字幕抽查等场景）：--download-sections 需 ffmpeg 切片（用项目自带）
+    section_args = []
+    if max_seconds and max_seconds > 0:
+        section_args = ['--download-sections', f'*0-{int(max_seconds)}']
 
-    def _run_download():
-        r = _run_ytdlp(dl_args, timeout=600)
+    def _build_dl_args(with_section: bool) -> list:
+        return proxy_args + bilibili_headers + [
+            '--no-check-certificate',
+            '-f', fmt,
+            *((FFMPEG_ARGS + section_args) if with_section else []),
+            '-o', output_template,
+            '--newline', url
+        ]
+
+    def _run_download(args: list):
+        r = _run_ytdlp(args, timeout=600)
         if r.stdout:
             tail = r.stdout.decode('utf-8', errors='ignore')[-800:]
             logger.info(f'yt-dlp输出尾部:\n{tail}')
@@ -1066,9 +1075,17 @@ async def download_video(
     try:
         if sio:
             from socket_handlers import emit_progress, emit_log
-            await emit_progress(sio, job_id, 'download', 15, f'下载中（{platform}）... 请稍候（最长约10分钟）')
+            mode_hint = f'前 {int(max_seconds)}s 片段' if section_args else '完整音频'
+            await emit_progress(sio, job_id, 'download', 15, f'下载中（{platform}，{mode_hint}）... 请稍候（最长约10分钟）')
             await emit_log(sio, job_id, f'⬇️ 下载进行中 | yt-dlp 拉流中，完成后汇报文件与大小...')
-        returncode = await asyncio.to_thread(_run_download)
+        returncode = await asyncio.to_thread(_run_download, _build_dl_args(bool(section_args)))
+        if returncode != 0 and section_args:
+            # 片段下载失败（个别流不支持 section 切割）→ 回退完整下载，保证调用方拿到可用音频
+            logger.warning(f'片段下载失败（--download-sections），回退完整下载: {platform}')
+            if sio:
+                from socket_handlers import emit_log
+                await emit_log(sio, job_id, '⚠ 片段下载失败，回退完整音频下载...')
+            returncode = await asyncio.to_thread(_run_download, _build_dl_args(False))
     except subprocess.TimeoutExpired:
         raise Exception(f'{platform} 下载超时(600s)')
     except Exception as e:

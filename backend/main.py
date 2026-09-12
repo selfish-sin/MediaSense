@@ -489,8 +489,6 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
     #   适用于B站AI字幕质量差、需要更高准确度、或不想依赖B站登录态的场景
     force_transcribe = options.get('force_transcribe', False)
     is_bilibili = 'bilibili' in input_url.lower() or 'b23.tv' in input_url.lower()
-    # 字幕内容抽查时预下载的音频；校验不过时复用，避免二次下载
-    pre_downloaded_audio = None
 
     if is_bilibili and force_transcribe:
         await emit_log(sio, job_id, f'🔧 已开启「强制转录」，跳过B站字幕提取，直接下载音频转录（{_engine_desc}）')
@@ -526,9 +524,13 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                 # 与字幕开头做相似度比对，对不上就丢弃字幕改走 Whisper 转录。
                 if not force_transcribe and options.get('subtitle_check', True):
                     try:
-                        await emit_log(sio, job_id, '🧪 B站字幕内容抽查：下载音频并与字幕开头比对（防旧/错误字幕）...')
+                        await emit_log(sio, job_id, '🧪 B站字幕内容抽查：下载音频开头片段并与字幕比对（防旧/错误字幕）...')
+                        # ★ 只取前 90s（--download-sections）：抽查只看开头，长视频不再为校验
+                        #   付整段下载成本（实测 10min 片段 3.3s）；放独立子目录，避免被
+                        #   断点续传扫描误当作完整音频复用
                         audio_path, _, _ = await download_video(
-                            input_url, job_dir, only_audio=True, sio=sio, job_id=job_id
+                            input_url, job_dir / '_subtitle_check', only_audio=True,
+                            max_seconds=90, sio=sio, job_id=job_id
                         )
                         # 采样转写语言必须跟随任务转录语言（默认中文）：
                         # base 模型自动检测会把中文幻觉成英文导致相似度恒≈0，好字幕全被误杀
@@ -537,8 +539,6 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                             language=language,
                         )
                         if ok:
-                            # ★ 抽查下载的完整音频登记为素材（已付的下载不闲置，前端「下载素材」可见）
-                            files['audio'] = str(audio_path)
                             await emit_log(sio, job_id, f'✅ B站字幕内容抽查通过（{_detail}），使用该字幕')
                         else:
                             await emit_log(sio, job_id, f'⚠ B站字幕内容抽查未通过（{_detail}）：疑似旧/错误字幕，丢弃，转转录（{_engine_desc}）')
@@ -547,7 +547,7 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                                     Path(_p).unlink(missing_ok=True)
                                 except OSError:
                                     pass
-                            pre_downloaded_audio = str(audio_path)
+                            # 抽查只下了开头片段，转录需完整音频 → 交给 _acquire_audio 正常下载
                             srt_path = None
                             txt_path = None
                     except Exception as e:
@@ -578,7 +578,7 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
         _retry = options.get('_retry', False)
         file_path, title, platform = await _acquire_audio(
             input_url, job_dir, sio, job_id, options, files,
-            title=title, platform=platform, pre_downloaded_audio=pre_downloaded_audio,
+            title=title, platform=platform,
         )
 
         update_job(job_id, title=title, platform=platform)
@@ -621,22 +621,18 @@ _VIDEO_EXTS = ('.mp4', '.mkv', '.avi', '.mov')
 
 
 async def _acquire_audio(input_url, job_dir, sio, job_id, options, files, *,
-                         title='', platform='', pre_downloaded_audio=None):
-    """获取待转录音频（唯一出口）：复用预下载 → 断点续传 → 按 options 下载。
+                         title='', platform=''):
+    """获取待转录音频（唯一出口）：断点续传复用 → 按 options 下载。
 
     ★ 不变量：成功返回的媒体文件一律登记进 files（素材登记单点）——
-      抽查预下载/断点续传复用与纯音频下载 → files['audio']；视频/视频+音频下载 → files['video']。
-    返回 (file_path, title, platform)；file_path 为 Path（复用）或 str（下载）。
+      断点续传复用与纯音频下载 → files['audio']；视频/视频+音频下载 → files['video']。
+    （字幕抽查只下载开头片段、不作为转录输入与素材，见 _handle_url_input 抽查分支。）
+    返回 (file_path, title, platform)。
     """
     from services.downloader import download_video
 
     file_path = None
-    if pre_downloaded_audio:
-        # ★ 字幕内容抽查时已下载音频，校验不过直接复用，避免二次下载（复用也必须登记）
-        file_path = Path(pre_downloaded_audio)
-        files['audio'] = str(file_path)
-        await emit_log(sio, job_id, '↩ 复用字幕抽查时下载的音频，跳过重复下载')
-    elif options.get('_retry', False):
+    if options.get('_retry', False):
         # 搜索 job_dir 下已有音频/视频文件（重试场景）
         audio_exts = ('.m4a', '.mp3', '.wav', '.opus', '.aac', '.webm', '.mp4', '.mkv')
         for f in sorted(job_dir.glob('*'), key=lambda x: x.stat().st_mtime, reverse=True):
