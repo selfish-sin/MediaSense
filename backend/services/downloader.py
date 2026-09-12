@@ -347,7 +347,7 @@ def _fetch_subtitles_via_player_v2(aid, cid, bvid):
 async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_id: str = '') -> dict:
     """
     提取B站字幕（AI字幕 / 创作者上传字幕）
-    策略：bilibili-api-python库（完整wbi签名+风控处理）→ yt-dlp兜底 → Whisper转录
+    策略：bilibili-api-python库（完整wbi签名+风控处理）→ yt-dlp兜底 → 转录流程
     返回 dict: {"success": True/False, "srt_path": Path, "txt_path": Path, "title": str, "message": str}
     """
     match = re.search(r'(BV[A-Za-z0-9]{10})', url)
@@ -505,9 +505,9 @@ async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_i
             # （yt-dlp 读的是同一个接口，只会白等 412 或重复确认无字幕），直接走 Whisper
             if sio:
                 from socket_handlers import emit_log
-                await emit_log(sio, job_id, '⚠ B站确认无可用字幕，跳过yt-dlp兜底，直接走Whisper转录')
-            logger.info(f'B站确认无字幕 bvid={bvid}，跳过yt-dlp，转Whisper')
-            return {"success": False, "message": "B站确认无可用字幕（直接Whisper转录）", "reason": "no_subtitle"}
+                await emit_log(sio, job_id, '⚠ B站确认无可用字幕，跳过yt-dlp兜底，进入转录流程')
+            logger.info(f'B站确认无字幕 bvid={bvid}，跳过yt-dlp，进入转录流程')
+            return {"success": False, "message": "B站确认无可用字幕", "reason": "no_subtitle"}
         if sio:
             from socket_handlers import emit_log
             await emit_log(sio, job_id, '⚠ 字幕接口状态未知（可能被风控/异常），转yt-dlp兜底')
@@ -782,7 +782,7 @@ async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None
             if not new_srt_names:
                 stderr = result.stderr.decode('utf-8', errors='ignore')[:200] if result.stderr else ''
                 if result.returncode != 0:
-                    hint = '（B站风控412拦截，自动转Whisper转录）' if '412' in stderr or 'Precondition Failed' in stderr else ''
+                    hint = '（B站风控412拦截，进入转录流程）' if '412' in stderr or 'Precondition Failed' in stderr else ''
                     logger.warning(f'yt-dlp字幕提取失败(returncode={result.returncode}){hint}: {stderr}')
                 else:
                     logger.info(f'yt-dlp {sub_flag} 成功但未生成新srt（可能视频无字幕）')
@@ -837,9 +837,9 @@ async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None
         logger.debug(f'清理B站临时cookie失败（忽略）: {e}')
     if sio:
         from socket_handlers import emit_log
-        await emit_log(sio, job_id, '❌ B站无可用字幕（AI字幕未生成+无CC字幕），将下载音频走Whisper转录')
+        await emit_log(sio, job_id, '❌ B站无可用字幕（AI字幕未生成+无CC字幕），进入转录流程')
     # 返回 success=False，main.py 会自动走 download_video + transcribe_audio 流程
-    return {"success": False, "message": "B站无可用字幕，将走Whisper转录"}
+    return {"success": False, "message": "B站无可用字幕，进入转录流程"}
 
 
 async def extract_youtube_subtitles(
@@ -937,8 +937,9 @@ async def extract_youtube_subtitles(
 
     if sio:
         from socket_handlers import emit_log
-        await emit_log(sio, job_id, '❌ 该视频无可用字幕（CC+自动字幕均无），将下载音频走Whisper转录')
-    return {"success": False, "message": "YouTube无可用字幕，将走Whisper转录"}
+        # 本函数对 YouTube 与通用平台通用，文案不写死平台名
+        await emit_log(sio, job_id, '❌ 该视频无可用平台字幕（CC+自动字幕均无），进入转录流程')
+    return {"success": False, "message": "无可用平台字幕，进入转录流程"}
 
 
 def _srt_to_txt(srt_path: Path, txt_path: Path):

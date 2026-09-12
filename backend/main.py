@@ -469,13 +469,15 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                             transcribe_engine: str = 'cloud'):
     """URL 输入：B站字幕（含内容抽查）→ 平台原文字幕 → 下载+Whisper 转录（含断点续传）。"""
     from socket_handlers import check_cancelled
-    from services.transcriber import transcribe_audio
+    from services.transcriber import transcribe_audio, engine_label
     from services.downloader import (
         download_video, extract_bilibili_subtitles, verify_subtitle_against_audio,
         detect_platform, extract_youtube_subtitles,
     )
 
     platform, _ = detect_platform(input_url)
+    # 日志/提示用实际引擎显示名（不再写死 "Whisper" 误导用户；标签单一事实源在 transcriber）
+    _engine_desc = engine_label(transcribe_engine)
     title = ''
     files = {}
     srt_path = None
@@ -483,7 +485,7 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
     seg_count = 0
 
     # B站特殊路径：优先尝试提取字幕（CC + AI 双路径）
-    # ★ force_transcribe=True 时跳过B站字幕，直接下载音频+Whisper转录
+    # ★ force_transcribe=True 时跳过B站字幕，直接下载音频转录
     #   适用于B站AI字幕质量差、需要更高准确度、或不想依赖B站登录态的场景
     force_transcribe = options.get('force_transcribe', False)
     is_bilibili = 'bilibili' in input_url.lower() or 'b23.tv' in input_url.lower()
@@ -491,7 +493,7 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
     pre_downloaded_audio = None
 
     if is_bilibili and force_transcribe:
-        await emit_log(sio, job_id, '🔧 已开启「强制转录」，跳过B站字幕提取，直接下载音频用Whisper转录（更慢但准确度更高）')
+        await emit_log(sio, job_id, f'🔧 已开启「强制转录」，跳过B站字幕提取，直接下载音频转录（{_engine_desc}）')
     elif is_bilibili:
         bvid = await _extract_bvid(input_url)
         # 短链不一定在输入中直接包含 BV，仍交给提取器做重定向解析。
@@ -539,7 +541,7 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                             files['audio'] = str(audio_path)
                             await emit_log(sio, job_id, f'✅ B站字幕内容抽查通过（{_detail}），使用该字幕')
                         else:
-                            await emit_log(sio, job_id, f'⚠ B站字幕内容抽查未通过（{_detail}）：疑似旧/错误字幕，丢弃，转本地Whisper转录')
+                            await emit_log(sio, job_id, f'⚠ B站字幕内容抽查未通过（{_detail}）：疑似旧/错误字幕，丢弃，转转录（{_engine_desc}）')
                             for _p in (srt_path, txt_path):
                                 try:
                                     Path(_p).unlink(missing_ok=True)
@@ -569,7 +571,7 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
             update_job(job_id, title=title, platform=platform, status='transcribing',
                        progress_msg='原文字幕已获取（跳过转录）')
         else:
-            await emit_log(sio, job_id, f'⚠️ 原文字幕抓取失败：{yt_sub.get("message", "")}，转Whisper转录')
+            await emit_log(sio, job_id, f'⚠️ 原文字幕抓取失败：{yt_sub.get("message", "")}，进入转录流程（{_engine_desc}）')
 
     # 如果没有B站字幕 → 获取音频（复用/下载单点）→ 转录
     if not srt_path:

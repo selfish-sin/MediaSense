@@ -642,6 +642,11 @@ _ENGINE_LABELS = {
 }
 
 
+def engine_label(engine: str) -> str:
+    """引擎显示名（唯一事实源；未知值按 cloud）。日志/UI 一律经此取标签，勿再复制映射。"""
+    return _ENGINE_LABELS.get(engine, _ENGINE_LABELS['cloud'])
+
+
 def _fallback_chain(engine: str) -> Tuple[str, ...]:
     """用户选择的引擎 → 实际回退链。firered 模型未就绪时从链中剔除（下载只发生在
     用户显式选 firered 的首次使用，不作为兜底的隐性副作用）。"""
@@ -906,10 +911,10 @@ async def transcribe_audio(
     """
     if sio:
         from socket_handlers import emit_progress, emit_log
-        # 引擎标签单一事实源：_ENGINE_LABELS（四态 cloud/cloud_free/firered/local）
-        engine_label = _ENGINE_LABELS.get(engine, _ENGINE_LABELS['cloud'])
-        await emit_progress(sio, job_id, 'transcribe', 0, f'正在初始化转录（引擎: {engine_label}, 模型: {model_size}, 语言: {language or "自动检测"}）...')
-        await emit_log(sio, job_id, f'🎬 开始转录 | 音频: {Path(audio_path).name} | 引擎: {engine_label} | 模型: {model_size} | 语言: {language or "自动检测"}')
+        # 引擎标签单一事实源：engine_label() → _ENGINE_LABELS（四态 cloud/cloud_free/firered/local）
+        label = engine_label(engine)
+        await emit_progress(sio, job_id, 'transcribe', 0, f'正在初始化转录（引擎: {label}, 模型: {model_size}, 语言: {language or "自动检测"}）...')
+        await emit_log(sio, job_id, f'🎬 开始转录 | 音频: {Path(audio_path).name} | 引擎: {label} | 模型: {model_size} | 语言: {language or "自动检测"}')
 
     # 跨线程进度桥接：线程 → Queue → async emit
     # 队列容量放大，避免密集进度回调丢消息
