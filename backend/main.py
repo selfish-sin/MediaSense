@@ -535,6 +535,8 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                             language=language,
                         )
                         if ok:
+                            # ★ 抽查下载的完整音频登记为素材（已付的下载不闲置，前端「下载素材」可见）
+                            files['audio'] = str(audio_path)
                             await emit_log(sio, job_id, f'✅ B站字幕内容抽查通过（{_detail}），使用该字幕')
                         else:
                             await emit_log(sio, job_id, f'⚠ B站字幕内容抽查未通过（{_detail}）：疑似旧/错误字幕，丢弃，转本地Whisper转录')
@@ -569,50 +571,13 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
         else:
             await emit_log(sio, job_id, f'⚠️ 原文字幕抓取失败：{yt_sub.get("message", "")}，转Whisper转录')
 
-    # 如果没有B站字幕 → 正常下载+转录
+    # 如果没有B站字幕 → 获取音频（复用/下载单点）→ 转录
     if not srt_path:
-        # ★ 断点续传：检测是否已有下载完的文件（重试场景）
         _retry = options.get('_retry', False)
-        file_path = None
-        skip_download = False
-        if pre_downloaded_audio:
-            # ★ 字幕内容抽查时已下载音频，校验不过直接复用，避免二次下载
-            file_path = Path(pre_downloaded_audio)
-            skip_download = True
-            await emit_log(sio, job_id, '↩ 复用字幕抽查时下载的音频，跳过重复下载')
-        elif _retry:
-            # 搜索 job_dir 下已有音频/视频文件
-            audio_exts = ('.m4a', '.mp3', '.wav', '.opus', '.aac', '.webm', '.mp4', '.mkv')
-            for f in sorted(job_dir.glob('*'), key=lambda x: x.stat().st_mtime, reverse=True):
-                if f.suffix.lower() in audio_exts and f.stat().st_size > 1000:
-                    file_path = f
-                    title = title or f.stem
-                    skip_download = True
-                    await emit_log(sio, job_id, f'🔁 断点续传：发现已有文件 {f.name}（{f.stat().st_size//1024}KB），跳过下载')
-                    break
-
-        if not skip_download:
-            update_job(job_id, status='downloading', progress_msg='开始下载')
-
-            # 下载
-            if options.get('download_video_only', False):
-                file_path, title, platform = await download_video(
-                    input_url, job_dir, only_audio=False, video_only=True, sio=sio, job_id=job_id
-                )
-                files['video'] = str(file_path)
-            elif options.get('download_video', False):
-                file_path, title, platform = await download_video(
-                    input_url, job_dir, only_audio=False, sio=sio, job_id=job_id
-                )
-                files['video'] = str(file_path)
-            else:
-                file_path, title, platform = await download_video(
-                    input_url, job_dir, only_audio=True, sio=sio, job_id=job_id
-                )
-                files['audio'] = str(file_path)
-
-        if not file_path:
-            raise Exception("下载失败，未获取到音频/视频文件")
+        file_path, title, platform = await _acquire_audio(
+            input_url, job_dir, sio, job_id, options, files,
+            title=title, platform=platform, pre_downloaded_audio=pre_downloaded_audio,
+        )
 
         update_job(job_id, title=title, platform=platform)
 
@@ -647,6 +612,61 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
             )
 
     return srt_path, txt_path, seg_count, title, platform, files
+
+
+# 复用/登记时的视频扩展名（断点续传复用的媒体按扩展名归类，其余按音频素材）
+_VIDEO_EXTS = ('.mp4', '.mkv', '.avi', '.mov')
+
+
+async def _acquire_audio(input_url, job_dir, sio, job_id, options, files, *,
+                         title='', platform='', pre_downloaded_audio=None):
+    """获取待转录音频（唯一出口）：复用预下载 → 断点续传 → 按 options 下载。
+
+    ★ 不变量：成功返回的媒体文件一律登记进 files（素材登记单点）——
+      抽查预下载/断点续传复用与纯音频下载 → files['audio']；视频/视频+音频下载 → files['video']。
+    返回 (file_path, title, platform)；file_path 为 Path（复用）或 str（下载）。
+    """
+    from services.downloader import download_video
+
+    file_path = None
+    if pre_downloaded_audio:
+        # ★ 字幕内容抽查时已下载音频，校验不过直接复用，避免二次下载（复用也必须登记）
+        file_path = Path(pre_downloaded_audio)
+        files['audio'] = str(file_path)
+        await emit_log(sio, job_id, '↩ 复用字幕抽查时下载的音频，跳过重复下载')
+    elif options.get('_retry', False):
+        # 搜索 job_dir 下已有音频/视频文件（重试场景）
+        audio_exts = ('.m4a', '.mp3', '.wav', '.opus', '.aac', '.webm', '.mp4', '.mkv')
+        for f in sorted(job_dir.glob('*'), key=lambda x: x.stat().st_mtime, reverse=True):
+            if f.suffix.lower() in audio_exts and f.stat().st_size > 1000:
+                file_path = f
+                title = title or f.stem
+                files['video' if f.suffix.lower() in _VIDEO_EXTS else 'audio'] = str(f)
+                await emit_log(sio, job_id, f'🔁 断点续传：发现已有文件 {f.name}（{f.stat().st_size//1024}KB），跳过下载')
+                break
+
+    if file_path is None:
+        update_job(job_id, status='downloading', progress_msg='开始下载')
+        if options.get('download_video_only', False):
+            file_path, title, platform = await download_video(
+                input_url, job_dir, only_audio=False, video_only=True, sio=sio, job_id=job_id
+            )
+            files['video'] = str(file_path)
+        elif options.get('download_video', False):
+            file_path, title, platform = await download_video(
+                input_url, job_dir, only_audio=False, sio=sio, job_id=job_id
+            )
+            files['video'] = str(file_path)
+        else:
+            file_path, title, platform = await download_video(
+                input_url, job_dir, only_audio=True, sio=sio, job_id=job_id
+            )
+            files['audio'] = str(file_path)
+
+    if not file_path:
+        raise Exception("下载失败，未获取到音频/视频文件")
+
+    return file_path, title, platform
 
 
 async def process_job(job_id: str):
