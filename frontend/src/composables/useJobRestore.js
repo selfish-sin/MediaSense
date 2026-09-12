@@ -46,8 +46,6 @@ export function useJobRestore(deps) {
     settings.advancedOptions = { ...settings.advancedOptions, ...restoredOptions, dimensions }
 
     settings.doSummary = options.do_summary ?? true
-    settings.doTranslate = options.do_translate ?? false
-    settings.doSubtitle = options.do_subtitle ?? false
     settings.previewBeforeSummary = options.preview_before_summary ?? false
     outputOptions.value = Array.isArray(options.output_options)
       ? [...options.output_options]

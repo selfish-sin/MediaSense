@@ -297,8 +297,6 @@ async function handleSubmit() {
     },
     do_summary: settings.doSummary,
     force_new: inputType.value === 'url',
-    do_translate: settings.doTranslate,
-    do_subtitle: settings.doSubtitle,
     preview_before_summary: settings.previewBeforeSummary,
     output_options: [...outputOptions.value],  // 输出内容选择
   }
@@ -336,8 +334,6 @@ async function handleSubmit() {
         summary_type: settings.selectedSummaryType,
         dimensions: { ...settings.selectedDimensions },
         do_summary: settings.doSummary,
-        do_translate: settings.doTranslate,
-        do_subtitle: settings.doSubtitle,
         // ★ 批量固定不做转录预览确认（后端 batch_submit 同样强制忽略），流程统一直通总结
         force_new: true,
       })
@@ -573,7 +569,7 @@ watch(() => jobStore.jobStatus, (val) => {
 })
 
 // ============ 结果区 Tab 管理 ============
-// markdown / mindmap / bilingual
+// markdown / mindmap
 const resultTab = ref('markdown')
 
 // 是否有思维导图内容（只在明确选择 mindmap 类型时显示）

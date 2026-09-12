@@ -89,18 +89,6 @@ const transcribeLanguageHint = computed(() => {
               <span class="adv-switch-name">AI 总结</span>
             </span>
           </label>
-          <label class="adv-switch-tile" :class="{ on: settings.doTranslate }">
-            <el-switch v-model="settings.doTranslate" size="small" />
-            <span class="adv-switch-meta">
-              <span class="adv-switch-name">全文翻译</span>
-            </span>
-          </label>
-          <label class="adv-switch-tile" :class="{ on: settings.doSubtitle }">
-            <el-switch v-model="settings.doSubtitle" size="small" />
-            <span class="adv-switch-meta">
-              <span class="adv-switch-name">字幕翻译</span>
-            </span>
-          </label>
           <label class="adv-switch-tile" :class="{ on: settings.previewBeforeSummary }">
             <el-switch v-model="settings.previewBeforeSummary" size="small" />
             <span class="adv-switch-meta">

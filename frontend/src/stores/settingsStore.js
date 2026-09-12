@@ -93,8 +93,6 @@ export const useSettingsStore = defineStore('settings', () => {
 
   // 功能开关
   const doSummary = ref(true)
-  const doTranslate = ref(false)
-  const doSubtitle = ref(false)
   const previewBeforeSummary = ref(false)  // 默认不做转录预览确认（批量固定忽略此开关）
 
   // ============ Actions ============
@@ -266,8 +264,6 @@ export const useSettingsStore = defineStore('settings', () => {
     freeCloudAvailable,
     fireredReady,
     doSummary,
-    doTranslate,
-    doSubtitle,
     previewBeforeSummary,
     // actions
     loadDeepConfig,

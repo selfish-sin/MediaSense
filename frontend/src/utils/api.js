@@ -165,18 +165,6 @@ async function _downloadExport(endpoint, jobId, format) {
   return _downloadBlob(endpoint, { job_id: jobId, format })
 }
 
-// ============ 翻译 API ============
-export const translateApi = {
-  langs: () => api.get('/translate/langs'),
-  bilingual: (text, targetLang, model, jobId) =>
-    api.post('/translate/bilingual', {
-      text,
-      target_lang: targetLang,
-      model: model || undefined,
-      job_id: jobId || undefined,
-    }),
-}
-
 // ============ Token 统计 API ============
 export const tokenApi = {
   usage: () => api.get('/token-usage'),
