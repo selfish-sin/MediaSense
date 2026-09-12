@@ -24,11 +24,11 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 
 | 文件 | 核心内容 | 何时读 |
 |---|---|---|
-| `backend/main.py` | FastAPI、Socket.IO、`process_job`（策略函数拆分：`_handle_text_input`/`_handle_subtitle_file`/`_handle_media_file`/`_handle_url_input`）、`_emit_batch_progress`、启动恢复和 SPA 路由 | 改任务编排、输入处理策略或批量进度推送 |
+| `backend/main.py` | FastAPI、Socket.IO、`process_job`（策略函数拆分：`_handle_text_input`/`_handle_subtitle_file`/`_handle_media_file`/`_handle_url_input`）、`_acquire_audio`（音频获取单点：断点续传复用/下载 + `files` 登记）、`_emit_batch_progress`、启动恢复和 SPA 路由 | 改任务编排、输入处理策略或批量进度推送 |
 | `backend/config.py` | 数据目录、7001、Whisper 模型和清理 TTL | 改路径、端口或默认值 |
 | `backend/db/` | SQLite 初始化、job、模型、token 用量仓储 | 改持久化或任务状态 |
-| `backend/services/downloader.py` | yt-dlp 下载/媒体准备 | 改 URL 下载和代理 |
-| `backend/services/transcriber.py` | 字幕读取、Whisper 转录、语言/模型/设备（auto/cuda/cpu）、`_transcribe_sync` 引擎路由单点（回退链 cloud→cloud_free→firered→local；cloud_free→firered→local，付费失败只降不升反向不回付费，firered 仅模型就绪时参与且不触发下载，取消不回退） | 改转录回退、引擎路由或设备选择 |
+| `backend/services/downloader.py` | yt-dlp 下载/媒体准备（`download_video(max_seconds)` 只取前 N 秒片段、失败回退完整）、B站字幕提取（412 加固/时长校验）与内容抽查比对 | 改 URL 下载、代理或字幕优先链路 |
+| `backend/services/transcriber.py` | 字幕读取、Whisper 转录、语言/模型/设备（auto/cuda/cpu）、`_transcribe_sync` 引擎路由单点（回退链 cloud→cloud_free→firered→local；cloud_free→firered→local，付费失败只降不升反向不回付费，firered 仅模型就绪时参与且不触发下载，取消不回退）、`engine_label()` 引擎显示名单点 | 改转录回退、引擎路由、设备选择或引擎文案 |
 | `backend/services/cloud_asr.py` | 云端 ASR 双 provider：mimo（付费主力，chat+base64）/ xingchen（免费档 cloud_free，multipart）；静音切分→并发分片→句级化写盘；单片失败备用引擎补录（XingChen 免费→firered→Whisper）不留空洞；延迟画像日志 | 改云端引擎、句级切分或补录策略 |
 | `backend/services/local_asr.py` | 本地 FireRedASR2-AED（sherpa-onnx int8/CPU）：模型按需下载→VAD 分段（+padding）→段间并行解码→标点恢复→句级写盘 | 改本地 FireRed 引擎、模型下载或 VAD/标点参数 |
 | `.trellis/spec/backend/transcription-chain.md` | **识别链全链路权威文档**：输入四策略/字幕优先防错位/引擎回退链/三引擎内部/分片补录/横评结论/参数速查/坑点汇总 | 改转录链任何环节前必读 |
@@ -36,7 +36,7 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `backend/routers/jobs.py` | 任务核心域：上传/提交/列表/删除/清理/取消/重试/编辑结果 + 共享的 `normalize_url`/`extract_urls` | 改任务生命周期 API |
 | `backend/routers/jobs_ai.py` | AI 域：重新总结/总结历史/标签/思维导图 | 改 AI 重跑相关端点 |
 | `backend/routers/jobs_batch.py` | 批量域：批量提交/批量状态/转录全文搜索 | 改批量提交或跨任务搜索 |
-| `backend/routers/` | 其余 API 路由（models/summary/export/translate/bilibili/download/templates/chat/search/storage cleanup；export 含单任务 4 格式与 `/export/batch` 批量 ZIP） | 加/改其他 HTTP API |
+| `backend/routers/` | 其余 API 路由（models/summary/export/translate/bilibili/download/templates/chat/search/storage cleanup/asr；export 含单任务 4 格式与 `/export/batch` 批量 ZIP；asr 的 `/api/asr/status` 含 `recommended_engine` 免费优先推荐） | 加/改其他 HTTP API |
 | `backend/socket_handlers.py` | 实时日志和进度事件 | 改前端实时反馈 |
 | `backend/scripts/cleanup_storage.py` | staged/orphan/export/media 清理 | 改清理策略；删除必须显式确认 |
 | `backend/verify.py` | 一键验证：backend pytest + frontend vitest + vite build | 改完代码做全量验证，或想快速回归 |
@@ -93,4 +93,5 @@ python main.py
 - FireRedASR 坑点（勿回退）：silero VAD 必须**分块喂** `VoiceActivityDetector.accept_waveform`（512 样本/块，一次喂整段只报尾部一段）；`vad.window_size`/`front` 是属性/方法易混；`VadModel.create(config)` 不能直接构造；Windows 下 `tempfile.mkstemp` 句柄须先 close 再 unlink；GitHub 下载 httpx 必须 `follow_redirects=True`，tar 解包 `filter='data'`。
 - 云端梯队 + 补录链加固（2026-09-12，无 task，3 提交，pytest 558 全绿）：①回退链 cloud→**cloud_free**→firered→local（付费失败只降不升，反向绝不回付费）；②分片补录链升级 **XingChen 免费档先行**→firered→Whisper（当日 MiMo 429 限流打掉 38/125 片、FireRed 补录因环境缺包全灭、37 片靠 Whisper 硬补 1 片成洞的直接教训；主 provider 是 xingchen 时跳过免费档防同家重试）；③部分失败告警只列真正未恢复区间（原把已补录 37 片也列进去自相矛盾）；④**服务实际运行环境是 PATH 上的 python（D:\path\python.exe），不是 backend/venv**——当日「sherpa-onnx 未安装」即该环境缺包，已手动补装 1.13.8 并把 sherpa_onnx 加进 start.bat 依赖探测清单；服务已重启（firered_ready=true）。坑：新依赖进 requirements.txt 时必须同步 start.bat 探测列表，否则启动不自动补装。
 - 校对领域模板（2026-09-12，无 task，pytest 569 / vitest 55 / build 全绿）：`correct_transcript` 增 `domain` 参数，`_CORRECTION_PROMPTS` 两套模板（default 通用 / tcm 中医）。中医模板核心原则"只改转写错，不改说得对"：穴位按 GB/T 12346 只修明显误听、方剂/剂量单位不换算、经典引文逐字保留（恬惔不规范化）、发言人观点与用量一字不动、拿不准一律保留。options 键 `ai_correct_domain`（未知值回退 default），工作台「校正领域」下拉（settingsStore `ai_correct_domain`）。实测：tcm 模板下引文零改动 + 泄法→泻法照修。校正模型横评结论：glm-5.2 最优（纠错满分/克制/14s），deepseek-v4-flash 在商汤平台流式不可用，v4-pro 太慢（57~91s/小样）。
+- 无字幕链路结构修复 + 免费优先（2026-09-12，task 09-12-no-subtitle-chain-refactor，pytest 586 / vitest 61 / build 全绿）：①音频获取单点 `main._acquire_audio`（断点续传复用/下载统一登记 `files`，修复抽查复用路径丢 `files['audio']`）；②`/api/asr/status` 新增 `recommended_engine`（免费档→cloud_free→cloud→local）前端只消费，"免费使用"成默认路径；③转录日志引擎标签走 `transcriber.engine_label()` 单点（cloud_free 不再误标 MiMo）；④B站字幕抽查改为只下前 90s 片段（`download_video(max_seconds=90)`，加固姿势实测 3.3s/6.9MB；失败回退整段；片段放 `_subtitle_check/` 子目录防断点续传误用），无字幕/兜底文案不再写死 Whisper；⑤免费档横评（同素材 10min）：21.2s/零幻觉/2109 字（mimo 2077），术语同音字弱于 mimo（报告：task research/free-asr-eval.md，"日常可用，专业内容开 AI 校正"）；⑥`verify.py` 末尾 ✓ 打印在 GBK 控制台不再崩。
 - 校对改动明细 + 纯净文本（2026-09-12，无 task，3 提交，pytest 567 / vitest 55 / build 全绿）：①`correct_transcript` 逐句 diff（stats 增 `changed_count`/`changed_lines` 截断 100/`changed_truncated`，日志透出前 15 处「原文→改后」）；对齐前剔全空行（回归坑：校正输出无尾随换行而原文有 → 行数假性不一致 → 真实改动漏报成「零改动」，已修 745a031）；②所有转录任务 Step 1.6 产 `files.txt_clean` 纯净阅读版（无时间戳/说话人标记；校对开启时基于校正后文本，`transcriber.write_clean_text`）；③ResultView 转录 tab 三态视图（校正后/校正前原文/纯净，无校对时默认纯净）+ 改动明细折叠面板（原文橙/改后绿）。背景：对抗实测发现校对器会用领域知识整句替换原文（机械防线拦不住语义级替换），改动必须可见可复核。商汤 sensenova-6.8-flash-lite 实测可用（key 已恢复）。

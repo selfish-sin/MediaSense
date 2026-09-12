@@ -25,21 +25,33 @@
   （CC + AI 双路径，旧版 x/player/v2 优先，412 风控六项加固：串行限流≥1s/wbi 刷新/完整
   Chrome UA+buvid/明确无字幕才跳 yt-dlp）。拿到字幕**不直接信**，过两道防错位校验：
   ①时长校验（字幕时间跨度 vs 视频时长，明显不符即拒）；
-  ②内容抽查（默认开，`subtitle_check=false` 关）：抽开头 ~90s 音频用
-  `transcribe_audio_sample`（**固定 CPU Whisper base，与引擎选择无关**，采样语言跟随
-  任务转录语言 + 简中提示词防幻觉）与字幕头相似度 <0.3 判错位 → 弃字幕转全量转录。
-  抽查预下载的音频在校验失败时复用，不二次下载。
+  ②内容抽查（默认开，`subtitle_check=false` 关）：**只下载开头 90s 片段**
+  （`download_video(max_seconds=90)` → `--download-sections`，实测加固姿势 3.3s/6.9MB；
+  片段放 `job_dir/_subtitle_check/` 子目录防断点续传误当完整音频复用；片段下载失败自动
+  回退整段且日志可见），转写后与字幕头相似度 <0.3 判错位 → 弃字幕转全量转录。
+  抽查转写**云端优先**（`cloud_asr.extract_sample` + `transcribe_file`，mimo 已配置时），
+  失败回退本地 `transcribe_audio_sample`（**固定 CPU Whisper base**，采样语言跟随任务
+  转录语言 + 简中提示词防幻觉）。
+  片段**不作转录输入与素材**：校验失败时转录由 `_acquire_audio` 重新下载完整音频。
 - **YouTube**：`extract_youtube_subtitles` 拿平台字幕，逻辑同上（无抽查）。
 - 其他平台：直接下载 → 引擎路由。
+- **音频获取单点**：`main._acquire_audio`（断点续传复用 → 按 options 下载），成功返回的
+  媒体一律登记 `files['audio'/'video']`（素材登记不变量，勿在别处散落登记）。
 
 ## 2. 引擎路由（单点：transcriber._transcribe_sync，勿散落）
 
 ```
 选项流：前端 settingsStore.advancedOptions.transcribe_engine（cloud/cloud_free/firered/local 四态下拉）
-  → submit 整包进 options → main.py 白名单校验（非法值归一 'cloud'，单点 main.py:773）
+  → submit 整包进 options → main.py 白名单校验（非法值归一 'cloud'）
   → transcriber.transcribe_audio（async 壳：进度队列桥接 + 线程池，无路由逻辑）
   → _transcribe_sync（回退链循环）
 ```
+
+**默认引擎推荐（免费优先）**：`GET /api/asr/status` 的 `recommended_engine`（`routers/asr.py`
+单点）——免费档已配置 → `cloud_free`；否则付费档 → `cloud`；都不可用 → `local`（firered 不
+参与推荐，避免默认触发 1.1GB 下载）。前端 `settingsStore` 只消费推荐值（用户手选不覆盖），
+不再自行降级。
+**引擎显示名**：`transcriber.engine_label()`（唯一事实源；日志/UI/文案勿再复制映射表）。
 
 **回退链（递归降级，每级失败原因经 progress_callback 可见）：**
 
@@ -142,6 +154,7 @@ FireRedASR 免费离线保留。XingChen 未参与 10min 全量横评（单片�
 | `BILI_API_MIN_INTERVAL` | 1s | B站接口限流间隔 |
 | `subtitle_check`（options） | true | B站字幕内容抽查开关 |
 | `force_transcribe`（options） | false | 跳过B站字幕直接转录 |
+| `download_video(max_seconds)` | 无 | 只取开头 N 秒片段（抽查用 90s；失败自动回退完整下载） |
 | `transcribe_language`（options） | 'zh' | 云端忽略但影响本地兜底与字幕抽查 |
 
 ## 7. 坑点汇总（有解法的才记，全链路适用）
