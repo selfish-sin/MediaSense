@@ -15,6 +15,7 @@ from services.ai_processor import (
     generate_mindmap,
     correct_transcript,
     correct_transcript_with_fallback,
+    _CORRECTION_PROMPTS,
     _count_markers,
     _split_by_boundary,
 )
@@ -317,6 +318,14 @@ class TestCorrectTranscript:
         assert '中医专项规则' not in captured[1]  # 未知领域回退通用
         assert '中医专项规则' not in captured[2]
         assert '直接输出校正后的纯文本' in captured[1]  # 通用骨架仍在
+
+    async def test_default_prompt_restraint_rules(self):
+        """默认模板必须带克制原则：只改转写错/拿不准保留/不整句重写（防语义级替换回归）。"""
+        assert '只改"转写错"' in _CORRECTION_PROMPTS['default']
+        assert '拿不准' in _CORRECTION_PROMPTS['default']
+        assert '不整句重写' in _CORRECTION_PROMPTS['default']
+        # tcm 模板同样必须保留克制原则
+        assert '只改"转写错"' in _CORRECTION_PROMPTS['tcm']
 
     async def test_length_anomaly_warns_but_keeps(self):
         # 标记完整但长度暴增 >30% → 告警但不回退
