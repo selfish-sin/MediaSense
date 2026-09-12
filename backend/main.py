@@ -87,7 +87,7 @@ def merge_no_proxy(existing: str, hosts) -> str:
 def apply_proxy_bypass_hosts() -> None:
     """config.PROXY_BYPASS_HOSTS 里的域名直连、不走系统代理。
 
-    httpx（获取模型/测试连接/AI 总结/翻译/chat 所有客户端）trust_env 在客户端
+    httpx（获取模型/测试连接/AI 总结/chat 所有客户端）trust_env 在客户端
     创建时读 NO_PROXY——启动早期合并写回环境变量即可一处生效、全客户端覆盖。
     用于「走代理隧道对某中转域名 ConnectError、直连正常」的场景。
     """
@@ -673,7 +673,7 @@ async def _acquire_audio(input_url, job_dir, sio, job_id, options, files, *,
 
 async def process_job(job_id: str):
     """
-    主处理流程：串联下载→转录→预览→AI总结→翻译→标签
+    主处理流程：串联下载→转录→预览→AI总结→标签
     在后台 asyncio.Task 中运行
 
     ★ 关键设计：preview 等待期间释放信号量，不阻塞其他任务
@@ -780,8 +780,6 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
         input_file = job.get('input_file', '')
         input_type = options.get('input_type', 'url')
         do_summary = options.get('do_summary', True)
-        do_translate = options.get('do_translate', False)
-        do_subtitle = options.get('do_subtitle', False)
         preview_before_summary = options.get('preview_before_summary', False)
         model_size = options.get('model_size', 'base')
         speaker_diarization = options.get('speaker_diarization', False)
@@ -1150,12 +1148,6 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                 files=result.get('files', {}),
             )
             update_job(job_id, summary_version=1)
-
-        # 如果有翻译文本，也存入files的translation_text字段（方便前端展示）
-        if result.get('translation_text'):
-            files_dict = result.get('files', {})
-            files_dict['translation_text'] = result['translation_text']
-            update_job(job_id, files=files_dict)
 
         await emit_log(sio, job_id, '✅ 任务处理完成！')
         await _safe_emit('done', {

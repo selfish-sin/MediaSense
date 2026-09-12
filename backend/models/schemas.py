@@ -170,12 +170,6 @@ class ExportResponse(BaseModel):
     format: str
 
 
-# ============ 翻译相关模型 ============
-class TranslateLangResponse(BaseModel):
-    """翻译语言响应"""
-    langs: Dict[str, Dict[str, str]]
-
-
 # ============ Socket.IO 事件数据模型 ============
 class ContinueSummaryData(BaseModel):
     """用户确认继续总结"""

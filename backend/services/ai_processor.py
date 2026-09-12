@@ -1,6 +1,6 @@
 """
 YouTube Tool V2 - AI 处理服务
-核心：标准AI总结 + 字幕翻译 + 自动打标签 + Token统计
+核心：标准AI总结 + 自动打标签 + Token统计
 使用 httpx AsyncClient 替代旧代码的 requests.post
 """
 import asyncio
