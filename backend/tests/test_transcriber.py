@@ -5,7 +5,7 @@ import os
 import sys
 import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from services.transcriber import (
     _model_complete, _select_model, _format_srt_time, _format_mmss,
@@ -453,3 +453,27 @@ class TestWriteCleanText:
         txt = tmp_path / 'b.txt'
         txt.write_text('[00:00 - 00:06] [说话人1]\n', encoding='utf-8')
         assert write_clean_text(str(txt)) is None
+
+
+class TestEngineLabel:
+    """首条初始化日志/进度的引擎标签必须来自 _ENGINE_LABELS 单一事实源。
+
+    回归：代码曾用三态临时 dict（缺 cloud_free），选免费档时首条日志误标"云端 MiMo"。
+    """
+
+    @pytest.mark.parametrize('engine,expected', [
+        ('cloud', '云端 MiMo'),
+        ('cloud_free', '云端 XingChen（免费）'),
+        ('firered', '本地 FireRedASR'),
+        ('local', '本地 Whisper'),
+    ])
+    async def test_initial_log_matches_engine_labels(self, monkeypatch, engine, expected):
+        from services import transcriber
+        monkeypatch.setattr(transcriber, '_transcribe_sync', lambda **kw: ('a.srt', 'a.txt', 1))
+        with patch('socket_handlers.emit_progress', new_callable=AsyncMock) as mep, \
+             patch('socket_handlers.emit_log', new_callable=AsyncMock) as mel:
+            await transcriber.transcribe_audio('a.wav', engine=engine, sio=MagicMock(), job_id='j1')
+        prog_msgs = ' '.join(str(c.args[4]) for c in mep.call_args_list)
+        log_msgs = ' '.join(str(c.args[2]) for c in mel.call_args_list)
+        assert expected in prog_msgs
+        assert expected in log_msgs

@@ -906,8 +906,8 @@ async def transcribe_audio(
     """
     if sio:
         from socket_handlers import emit_progress, emit_log
-        # engine 只有 cloud/firered/local 三态；非法值按 cloud 展示
-        engine_label = {'local': '本地 Whisper', 'firered': '本地 FireRedASR'}.get(engine, '云端 MiMo')
+        # 引擎标签单一事实源：_ENGINE_LABELS（四态 cloud/cloud_free/firered/local）
+        engine_label = _ENGINE_LABELS.get(engine, _ENGINE_LABELS['cloud'])
         await emit_progress(sio, job_id, 'transcribe', 0, f'正在初始化转录（引擎: {engine_label}, 模型: {model_size}, 语言: {language or "自动检测"}）...')
         await emit_log(sio, job_id, f'🎬 开始转录 | 音频: {Path(audio_path).name} | 引擎: {engine_label} | 模型: {model_size} | 语言: {language or "自动检测"}')
 
