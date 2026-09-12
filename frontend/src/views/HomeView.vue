@@ -14,13 +14,13 @@ import socket, {
   onProgress, onLog, onAiToken, onAiDone, onPreview, onAiThinking,
   continueSummary, cancelPreview, cancelJob,
 } from '../utils/socket'
-import { useBackendLogs } from '../composables/useBackendLogs'
 import { useBatchProgress } from '../composables/useBatchProgress'
 import { useJobRestore } from '../composables/useJobRestore'
 import { useRafMarkdown } from '../composables/useMarkdownRender'
 import { copyText } from '../utils/clipboard'
 import { createFailureNotifier } from '../utils/errorNotice'
 import { uploadRejectReason } from '../utils/uploadRules'
+import BackendLogPanel from '../components/BackendLogPanel.vue'
 import ResummarizeControl from '../components/ResummarizeControl.vue'
 import SplitPromptPanel from '../components/SplitPromptPanel.vue'
 import ChatPanel from '../components/ChatPanel.vue'
@@ -132,12 +132,7 @@ let socketUnsubs = []
 const showJobProgress = ref(true)
 const jobLogAutoScroll = ref(true)
 
-// ── 系统日志（后端文件，默认收起，避免和任务进度抢视线） ──
-// 逻辑抽离到 composables/useBackendLogs（增量拉取+超界全量回退+生命周期自管理）
-const {
-  showBackendLogs, backendLogs, autoScroll,
-  loadAllHistory, clearLogs, scrollLogTop, refreshLogs,
-} = useBackendLogs()
+// ── 系统日志：已拆为 components/BackendLogPanel.vue（useBackendLogs 组件内自持） ──
 
 // ★ 批量任务结果与进度：Socket.IO batch_progress 实时推送为主；
 //   socket 断开时降级为低频（10s）HTTP 轮询，重连后补拉一次对齐状态
@@ -1296,37 +1291,8 @@ function formatTokenTime(t) {
       </div>
     </el-card>
 
-    <!-- 系统日志（后端文件，默认收起） -->
-    <el-card class="wb-card" shadow="never">
-      <template #header>
-        <div class="card-head-row">
-          <span class="wb-card-title">系统日志</span>
-          <div class="card-head-actions">
-            <el-switch v-if="showBackendLogs" v-model="autoScroll" active-text="自动滚动" size="small" />
-            <el-button v-if="showBackendLogs" size="small" text @click="loadAllHistory">全部</el-button>
-            <el-button v-if="showBackendLogs" size="small" text @click="clearLogs">清空</el-button>
-            <el-button v-if="showBackendLogs" size="small" text @click="refreshLogs">刷新</el-button>
-            <el-button size="small" text @click="showBackendLogs = !showBackendLogs">
-              {{ showBackendLogs ? '收起' : '展开' }}
-            </el-button>
-          </div>
-        </div>
-      </template>
-      <div v-show="showBackendLogs" id="log-panel" class="log-panel backend-log-panel">
-        <div
-          v-for="(line, i) in backendLogs"
-          :key="i"
-          class="backend-log-line"
-          :class="{
-            err: line.includes('[ERROR]'),
-            warn: line.includes('[WARNING]'),
-          }"
-        >{{ line }}</div>
-        <div class="log-panel-foot">
-          <el-button size="small" text @click="scrollLogTop">返回顶部</el-button>
-        </div>
-      </div>
-    </el-card>
+    <!-- 系统日志（已拆为 BackendLogPanel 组件） -->
+    <BackendLogPanel />
 
     <!-- 转录预览 -->
     <el-card v-if="isPreviewState" id="preview-section" class="wb-card" shadow="never">
@@ -1452,35 +1418,8 @@ function formatTokenTime(t) {
   margin-bottom: 16px;
   /* 透明背景 + 毛玻璃 + 圆角 + 悬停 glow 已由 App.vue 全局 .wb-card 提供 */
 }
-.wb-card-title {
-  font-weight: 650;
-  letter-spacing: 0.02em;
-  background: linear-gradient(135deg, var(--app-accent-1), var(--app-accent-2));
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-/* 通用卡片头 */
-.card-head-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  width: 100%;
-}
-.card-head-hint {
-  font-size: 11px;
-  color: var(--app-text-secondary);
-  letter-spacing: 0.04em;
-}
-.card-head-actions {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
+/* 通用卡片头样式已提升至 App.vue 全局（.wb-card-title/.card-head-row/.card-head-hint/.card-head-actions），
+   供 HomeView 拆出的子组件共用（2026-09-12 slice-0） */
 
 /* 输入区 */
 .input-type-tabs {
@@ -1750,28 +1689,7 @@ function formatTokenTime(t) {
   padding-left: 6px;
 }
 
-.backend-log-panel {
-  max-height: 300px;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-.backend-log-line {
-  color: var(--app-log-text);
-  border-left: 3px solid transparent;
-  padding-left: 6px;
-}
-.backend-log-line.err {
-  color: #f56c6c;
-  border-left-color: #f56c6c;
-}
-.backend-log-line.warn {
-  color: #e6a23c;
-  border-left-color: #e6a23c;
-}
-.log-panel-foot {
-  text-align: right;
-  margin-top: 4px;
-}
+/* 系统日志面板样式随组件迁至 components/BackendLogPanel.vue（2026-09-12 slice-1） */
 
 /* 进度卡 */
 .progress-card {
@@ -1822,10 +1740,6 @@ function formatTokenTime(t) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.mono-tag {
-  font-family: ui-monospace, Consolas, monospace;
-  letter-spacing: 0.04em;
 }
 .progress-meter {
   margin-bottom: 12px;
@@ -1905,30 +1819,7 @@ function formatTokenTime(t) {
   opacity: 0.75;
 }
 
-/* 日志面板 — 跟随主题 */
-.log-panel {
-  margin-top: 12px;
-  max-height: 200px;
-  overflow-y: auto;
-  background: var(--app-log-bg);
-  color: var(--app-log-text);
-  padding: 12px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--app-log-border);
-  font-family: 'Cascadia Code', 'Consolas', ui-monospace, monospace;
-  font-size: 12px;
-  line-height: 1.65;
-}
-.log-empty {
-  color: var(--app-text-secondary);
-  padding: 10px 0;
-}
-.log-time {
-  color: var(--app-log-time);
-  margin-right: 8px;
-  flex-shrink: 0;
-  opacity: 0.9;
-}
+/* 日志面板基础样式（.log-panel/.log-empty/.log-time）已提升至 App.vue 全局（2026-09-12 slice-0） */
 .job-progress-log {
   max-height: 340px;
   margin-top: 0;

@@ -349,6 +349,64 @@ function scrollToBottom() {
   overflow: hidden;
 }
 
+/* ============ 工作台卡片通用件（HomeView 及拆出的子组件共用） ============
+ * 2026-09-12 从 HomeView scoped 提升为全局：拆分子组件后 scoped 样式不跨组件，
+ * 这些类需全局才可用；值与 HomeView 原定义一致，视觉零变化。 */
+.wb-card-title {
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  background: linear-gradient(135deg, var(--app-accent-1), var(--app-accent-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.card-head-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+.card-head-hint {
+  font-size: 11px;
+  color: var(--app-text-secondary);
+  letter-spacing: 0.04em;
+}
+.card-head-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mono-tag {
+  font-family: ui-monospace, Consolas, monospace;
+  letter-spacing: 0.04em;
+}
+.log-panel {
+  margin-top: 12px;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--app-log-bg);
+  color: var(--app-log-text);
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--app-log-border);
+  font-family: 'Cascadia Code', 'Consolas', ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.log-empty {
+  color: var(--app-text-secondary);
+  padding: 10px 0;
+}
+.log-time {
+  color: var(--app-log-time);
+  margin-right: 8px;
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
