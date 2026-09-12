@@ -13,8 +13,8 @@ from services.prompt_builder import (
 
 
 class TestDimensions:
-    def test_has_8_dims(self):
-        assert len(PROMPT_DIMENSIONS) == 8
+    def test_has_9_dims(self):
+        assert len(PROMPT_DIMENSIONS) == 9
 
     def test_each_dim_has_required_fields(self):
         for dim_key, dim_cfg in PROMPT_DIMENSIONS.items():
@@ -33,7 +33,7 @@ class TestDimensions:
 
     def test_get_default_dimensions(self):
         defaults = get_default_dimensions()
-        assert len(defaults) == 8
+        assert len(defaults) == 9
         for dim_key, dim_cfg in PROMPT_DIMENSIONS.items():
             assert defaults[dim_key] == dim_cfg["default"]
 
@@ -46,6 +46,7 @@ class TestDimensions:
         assert d["depth"] == "standard"
         assert d["tone"] == "学术严谨"
         assert d["word_count"] == "3000"
+        assert d["language"] == "简体中文"
 
 
 class TestRecipes:
@@ -112,7 +113,7 @@ class TestGetDimensionsWithOverrides:
     def test_returns_all_dims(self):
         with patch("services.prompt_builder._load_module_overrides", return_value={}):
             result = get_dimensions_with_overrides()
-            assert len(result) == 8
+            assert len(result) == 9
 
     def test_marks_customized(self):
         overrides = {"role": {"general": "自定义"}}
@@ -235,3 +236,31 @@ class TestDimensionsToLegacy:
     def test_default_summary(self):
         assert dimensions_to_legacy_summary_type({"output": "summary"}) == "summary"
         assert dimensions_to_legacy_summary_type({"depth": "standard"}) == "summary"
+
+
+# ============ 输出语言维度（2026-09-12 删翻译功能后新增，替代原注入机制） ============
+
+
+class TestLanguageOption:
+    def test_default_prompt_contains_chinese(self):
+        """默认输出语言=简体中文，拼在字数之后（外文素材→中文呈现）"""
+        prompt = build_modular_prompt({}, "素材内容")
+        assert "输出语言：" in prompt
+        assert "简体中文" in prompt
+        # 顺序：输出语言行在字数要求之后
+        assert prompt.index("输出语言：") > prompt.index("语气：")
+
+    def test_custom_language(self):
+        """选择其他语言时提示词跟随变化"""
+        prompt = build_modular_prompt({"language": "英语"}, "素材内容")
+        assert "输出一律使用英语" in prompt
+
+    def test_unknown_language_omits_line(self):
+        """历史任务/未知值优雅降级：不写语言行"""
+        prompt = build_modular_prompt({"language": "不存在"}, "素材内容")
+        assert "输出语言：" not in prompt
+
+    def test_full_override_no_language_block(self):
+        """full_override 完全接管提示词，无选项块"""
+        prompt = build_modular_prompt({}, "素材内容", full_override="逐字记录 {{CONTENT}}")
+        assert "输出语言：" not in prompt

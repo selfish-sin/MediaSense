@@ -794,7 +794,7 @@ class TestSummaryRouter:
     def test_get_dimensions(self, client):
         resp = client.get("/api/summary/dimensions")
         assert resp.status_code == 200
-        assert len(resp.json()["dimensions"]) == 8
+        assert len(resp.json()["dimensions"]) == 9
 
     def test_get_recipes(self, client):
         resp = client.get("/api/summary/recipes")

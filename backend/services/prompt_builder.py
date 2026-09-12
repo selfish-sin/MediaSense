@@ -438,6 +438,19 @@ PROMPT_DIMENSIONS = {
         ],
     },
 
+    # ────────────── 8. 输出语言（复用 prompts.py 的 LANGUAGE_DESCS；默认中文，外文素材翻译呈现） ──────────────
+    "language": {
+        "label": "输出语言",
+        "desc": "总结的输出语言",
+        "default": "简体中文",
+        "modules": [
+            {"key": "简体中文", "name": "简体中文", "desc": "外文素材翻译成中文呈现"},
+            {"key": "繁体中文", "name": "繁体中文", "desc": "繁体中文输出"},
+            {"key": "英语", "name": "英语", "desc": "英文输出"},
+            {"key": "跟随素材", "name": "跟随素材", "desc": "素材什么语言就输出什么语言"},
+        ],
+    },
+
     # ────────────── 8. 模式（通用 / 社科深度特化） ──────────────
     # 控制整体认知框架：通用=精简忠实提取；社科深度特化=注入旧15种提示词的精华
     "mode": {
@@ -786,6 +799,11 @@ def _get_word_count_desc(word_count: str) -> str:
     return WORD_COUNT_DESCS.get(word_count, f"请务必输出至少{word_count}字，宁多勿少，绝对不允许少于{word_count}字。")
 
 
+def _get_language_desc(language: str) -> str:
+    from services.prompts import LANGUAGE_DESCS
+    return LANGUAGE_DESCS.get(language, "")
+
+
 # ============ 核心：拼装完整 prompt ============
 def build_modular_prompt(dimensions: Dict[str, str], content: str,
                          custom_prompt: str = "",
@@ -850,14 +868,18 @@ def build_modular_prompt(dimensions: Dict[str, str], content: str,
     if custom_prompt and custom_prompt.strip():
         sections.append(f"【自定义指引】\n{custom_prompt.strip()}")
 
-    # 8. 语气 + 字数
+    # 8. 语气 + 字数 + 输出语言
     tone_desc = _get_tone_desc(dims["tone"])
     word_count_desc = _get_word_count_desc(dims["word_count"])
+    lang_desc = _get_language_desc(dims.get("language", ""))
     option_block = ""
     if tone_desc:
         option_block += f"语气：{tone_desc}。\n"
     if word_count_desc:
         option_block += word_count_desc
+    # 输出语言固定拼在字数之后（产品默认中文；选"跟随素材"时也明确写出）
+    if lang_desc:
+        option_block += f"\n输出语言：{lang_desc}。"
     if option_block:
         sections.append(option_block.strip())
 
