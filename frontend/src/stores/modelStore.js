@@ -5,6 +5,8 @@ import { modelsApi } from '../utils/api'
 export const useModelStore = defineStore('model', () => {
   const models = ref([])
   const defaultModel = ref('glm-4.5-air')
+  // AI 校正默认模型（校正模型选择器留空时后端使用；空串 = 回退总结主模型）
+  const correctDefault = ref('')
   const loading = ref(false)
 
   async function loadModels() {
@@ -13,6 +15,7 @@ export const useModelStore = defineStore('model', () => {
       const res = await modelsApi.list()
       models.value = res.models || []
       defaultModel.value = res.default || 'glm-4.5-air'
+      correctDefault.value = res.correct_default || ''
     } catch (err) {
       console.error('加载模型失败:', err)
     } finally {
@@ -47,6 +50,7 @@ export const useModelStore = defineStore('model', () => {
   return {
     models,
     defaultModel,
+    correctDefault,
     loading,
     loadModels,
     addModel,

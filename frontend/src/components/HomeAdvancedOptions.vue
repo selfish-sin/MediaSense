@@ -16,6 +16,14 @@ const modelStore = useModelStore()
 const outputOptions = defineModel('outputOptions', { type: Array, required: true })
 const emit = defineEmits(['touch-model'])
 
+// ── 校正模型选择器占位：展示后端配置的校正默认模型（留空时生效的那个） ──
+const correctModelPlaceholder = computed(() => {
+  const d = modelStore.correctDefault
+  if (!d) return '留空则用主模型'
+  const m = modelStore.models.find((x) => x.key === d)
+  return m ? `留空用默认：${modelDisplayName(m)}` : `留空用默认：${d}`
+})
+
 // ── 转录引擎相关的提示文案（cloud/cloud_free/firered/local） ──
 // 引擎异常状态提示（未配置/需下载时显示，正常为空不渲染）
 const engineHint = computed(() => {
@@ -106,6 +114,52 @@ const transcribeLanguageHint = computed(() => {
               <span class="adv-switch-desc">{{ speakerDiarizationDesc }}</span>
             </span>
           </label>
+          <!-- ★ 强制转录：决定"要不要用视频自带字幕"，与具体转录引擎无关（原「强制 Whisper 转录」易误解） -->
+          <label class="adv-switch-tile" :class="{ on: settings.advancedOptions.force_transcribe }">
+            <el-switch v-model="settings.advancedOptions.force_transcribe" size="small" />
+            <span class="adv-switch-meta">
+              <span class="adv-switch-name">强制转录</span>
+              <span class="adv-switch-desc">跳过视频字幕，直接转录音频</span>
+            </span>
+          </label>
+          <!-- ★ AI 校正：对所有文本来源生效（B站/平台字幕、云端/本地转录、文本输入） -->
+          <label class="adv-switch-tile" :class="{ on: settings.advancedOptions.ai_correct }">
+            <el-switch v-model="settings.advancedOptions.ai_correct" size="small" />
+            <span class="adv-switch-meta">
+              <span class="adv-switch-name">AI 校正</span>
+              <span class="adv-switch-desc">字幕/转录文本均适用，纠同音字/专名/标点</span>
+            </span>
+          </label>
+        </div>
+        <!-- ★ 校正子选项：仅开启 AI 校正时显示（跟在处理流程开关后，不再塞进语音转录栏） -->
+        <div v-if="settings.advancedOptions.ai_correct" class="adv-field-grid adv-correct-grid">
+          <div class="adv-field">
+            <div class="adv-field-label">校正领域</div>
+            <el-select
+              v-model="settings.advancedOptions.ai_correct_domain"
+              class="adv-field-control"
+            >
+              <el-option label="通用" value="default" />
+              <el-option label="中医 / 针灸" value="tcm" />
+            </el-select>
+          </div>
+          <div class="adv-field">
+            <div class="adv-field-label">校正模型</div>
+            <el-select
+              v-model="settings.advancedOptions.ai_correct_model"
+              class="adv-field-control"
+              :placeholder="correctModelPlaceholder"
+              clearable
+              filterable
+            >
+              <el-option
+                v-for="m in modelStore.models"
+                :key="m.key"
+                :label="modelDisplayName(m)"
+                :value="m.key"
+              />
+            </el-select>
+          </div>
         </div>
       </section>
 
@@ -154,48 +208,6 @@ const transcribeLanguageHint = computed(() => {
               <el-option label="自动检测" :value="null" />
             </el-select>
             <p v-if="transcribeLanguageHint" class="adv-field-hint">{{ transcribeLanguageHint }}</p>
-          </div>
-          <div class="adv-field adv-field--switch">
-            <div class="adv-field-label">强制 Whisper 转录</div>
-            <div class="adv-inline-switch">
-              <el-switch v-model="settings.advancedOptions.force_transcribe" />
-            </div>
-          </div>
-          <div class="adv-field adv-field--switch">
-            <div class="adv-field-label">AI 校正转录</div>
-            <div class="adv-inline-switch">
-              <el-switch v-model="settings.advancedOptions.ai_correct" />
-              <span class="adv-field-hint-inline">纠同音字 / 专名 / 标点</span>
-            </div>
-          </div>
-          <!-- ★ 校正领域：仅开启 AI 校正时显示；tcm 模板保护经典引文/用量/观点不被改写 -->
-          <div v-if="settings.advancedOptions.ai_correct" class="adv-field">
-            <div class="adv-field-label">校正领域</div>
-            <el-select
-              v-model="settings.advancedOptions.ai_correct_domain"
-              class="adv-field-control"
-            >
-              <el-option label="通用" value="default" />
-              <el-option label="中医 / 针灸" value="tcm" />
-            </el-select>
-          </div>
-          <!-- ★ 校正模型选择器：仅开启 AI 校正时显示，留空则用主模型 -->
-          <div v-if="settings.advancedOptions.ai_correct" class="adv-field">
-            <div class="adv-field-label">校正模型</div>
-            <el-select
-              v-model="settings.advancedOptions.ai_correct_model"
-              class="adv-field-control"
-              placeholder="留空则用上方主模型"
-              clearable
-              filterable
-            >
-              <el-option
-                v-for="m in modelStore.models"
-                :key="m.key"
-                :label="modelDisplayName(m)"
-                :value="m.key"
-              />
-            </el-select>
           </div>
         </div>
       </section>
@@ -319,20 +331,11 @@ const transcribeLanguageHint = computed(() => {
   color: var(--app-text-secondary);
   line-height: 1.4;
 }
-.adv-field-hint-inline {
-  font-size: 11px;
-  color: var(--app-text-secondary);
-  line-height: 1.4;
-}
-.adv-inline-switch {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 32px;
-  flex-wrap: wrap;
-}
-.adv-field--switch {
-  justify-content: flex-start;
+/* 校正子选项：跟在处理流程开关网格下方，留出一行呼吸空间 */
+.adv-correct-grid {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--app-border);
 }
 
 /* 输出素材 */
