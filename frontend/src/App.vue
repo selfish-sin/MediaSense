@@ -413,6 +413,10 @@ function scrollToBottom() {
   color: var(--app-text-secondary);
   line-height: 1.4;
 }
+/* 输入控件通用宽度（输入区组件与转录预览卡共用；2026-09-12 slice-A 自 HomeView 提升） */
+.input-main {
+  width: 100%;
+}
 
 body {
   margin: 0;

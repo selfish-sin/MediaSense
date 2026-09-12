@@ -2,7 +2,7 @@
 import { ref, onMounted, onUnmounted, onActivated, computed, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { UploadCloud, Pencil, Check, X, Copy, Loader2, ArrowDown } from 'lucide-vue-next'
+import { Pencil, Check, X, Copy, Loader2, ArrowDown } from 'lucide-vue-next'
 import { useJobStore } from '../stores/jobStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useModelStore } from '../stores/modelStore'
@@ -17,10 +17,9 @@ import { useJobRestore } from '../composables/useJobRestore'
 import { useRafMarkdown } from '../composables/useMarkdownRender'
 import { copyText } from '../utils/clipboard'
 import { createFailureNotifier } from '../utils/errorNotice'
-import { uploadRejectReason } from '../utils/uploadRules'
 import BackendLogPanel from '../components/BackendLogPanel.vue'
-import BatchResultPanel from '../components/BatchResultPanel.vue'
 import HomeAdvancedOptions from '../components/HomeAdvancedOptions.vue'
+import HomeInputPanel from '../components/HomeInputPanel.vue'
 import HomeTokenPanel from '../components/HomeTokenPanel.vue'
 import JobProgressPanel from '../components/JobProgressPanel.vue'
 import ResummarizeControl from '../components/ResummarizeControl.vue'
@@ -77,7 +76,6 @@ const inputType = ref('url')  // url / file / text / batch
 const inputUrl = ref('')
 const inputText = ref('')
 const batchUrls = ref('')
-const uploading = ref(false)
 // 重新处理的来源任务，仅用于提示和配置回填，不代表当前运行任务
 const rerunSourceJobId = ref(null)
 
@@ -380,54 +378,10 @@ async function handleSubmit() {
 }
 
 // ============ 文件上传 ============
-// 上传区可见状态只由上传结果驱动：成功才显示「已上传」，失败/超限不留任何痕迹
+// 交互逻辑（进行中状态/校验/请求）已随输入区迁至 components/HomeInputPanel.vue（2026-09-12 slice-A）；
+// 父组件仅保留路径/文件名状态（输入区经 v-model 写回，handleSubmit/useJobRestore 读取）
 const uploadedFilePath = ref('')
 const uploadedFileName = ref('')
-const uploadingFileName = ref('')
-const uploadRef = ref(null)
-
-async function handleFileUpload(file) {
-  if (file.status !== 'ready') return
-  // 内部列表始终清空：不展示未上传成功的文件，也保证同一文件可以重新选择
-  uploadRef.value?.clearFiles()
-  const reject = uploadRejectReason(file.name, file.raw?.size || 0)
-  if (reject) {
-    ElMessage.error({ message: reject, duration: 6000 })
-    return
-  }
-  if (uploading.value) { ElMessage.warning('文件正在上传中，请稍候'); return }
-  uploading.value = true
-  uploadingFileName.value = file.name
-  try {
-    const formData = new FormData()
-    formData.append('file', file.raw)
-    const api = (await import('../utils/api.js')).default
-    const res = await api.post('/jobs/upload', formData, {
-      timeout: 120000,
-    })
-    if (res.success) {
-      uploadedFilePath.value = res.file_path
-      uploadedFileName.value = res.file_name
-      ElMessage.success(`文件上传成功: ${res.file_name}`)
-    } else {
-      ElMessage.error(res.message || '上传失败')
-    }
-  } catch (err) {
-    if (err.response) {
-      console.error('[上传失败]', err.response.status, JSON.stringify(err.response.data, null, 2))
-      console.error('[请求头]', err.config?.headers)
-    }
-    ElMessage.error(err.message)
-  } finally {
-    uploading.value = false
-    uploadingFileName.value = ''
-  }
-}
-
-function handleFileRemove() {
-  uploadedFilePath.value = ''
-  uploadedFileName.value = ''
-}
 
 // ============ 转录预览确认/取消 ============
 function handleConfirmPreview() {
@@ -730,87 +684,20 @@ const tokenPanelRef = ref(null)
 <template>
   <div class="home-workbench">
 
-    <!-- 输入区 -->
-    <el-card class="wb-card" shadow="never">
-      <template #header>
-        <div class="card-head-row">
-          <span class="wb-card-title">输入</span>
-        </div>
-      </template>
-
-      <el-radio-group v-model="inputType" class="input-type-tabs" size="default">
-        <el-radio-button value="url">URL</el-radio-button>
-        <el-radio-button value="batch">批量 URL</el-radio-button>
-        <el-radio-button value="file">文件上传</el-radio-button>
-        <el-radio-button value="text">文本粘贴</el-radio-button>
-      </el-radio-group>
-
-      <!-- URL 输入 -->
-      <el-input
-        v-if="inputType === 'url'"
-        v-model="inputUrl"
-        placeholder="粘贴视频 URL"
-        size="large"
-        clearable
-        class="input-main"
-      >
-        <template #prepend>URL</template>
-      </el-input>
-
-      <!-- 文件上传：内部列表隐藏，状态区只展示真实上传结果（成功才有「已上传」） -->
-      <el-upload
-        v-else-if="inputType === 'file'"
-        ref="uploadRef"
-        class="input-upload"
-        drag
-        :auto-upload="false"
-        :show-file-list="false"
-        :on-change="handleFileUpload"
-        accept="audio/*,video/*,.srt,.vtt,.txt,.md"
-      >
-        <el-icon class="upload-icon"><UploadCloud /></el-icon>
-        <div class="upload-title">拖拽文件到此处，或点击上传</div>
-        <template #tip>
-          <div class="upload-tip">
-            支持音频、视频、字幕、TXT、Markdown，单个文件不超过 2GB
-            <span v-if="uploading && uploadingFileName" class="upload-busy">上传中: {{ uploadingFileName }}…</span>
-            <span v-else-if="uploadedFileName" class="upload-ok"><el-icon :size="12" style="vertical-align: -1px;"><Check /></el-icon> 已上传: {{ uploadedFileName }}<el-icon class="upload-remove" :size="12" title="移除" @click.stop="handleFileRemove"><X /></el-icon></span>
-          </div>
-        </template>
-      </el-upload>
-
-      <!-- 文本粘贴 -->
-      <el-input
-        v-else-if="inputType === 'text'"
-        v-model="inputText"
-        type="textarea"
-        :rows="6"
-        resize="vertical"
-        placeholder="粘贴需要总结的文本内容"
-        class="input-main"
-      />
-
-      <!-- 批量URL -->
-      <el-input
-        v-else-if="inputType === 'batch'"
-        v-model="batchUrls"
-        type="textarea"
-        :rows="6"
-        resize="vertical"
-        placeholder="每行一个 URL"
-        class="input-main"
-      />
-
-      <!-- 批量任务进度面板（已拆为 BatchResultPanel 组件） -->
-      <BatchResultPanel
-        v-if="inputType === 'batch' && batchResult"
-        :batch-result="batchResult"
-        @refresh="refreshBatchStatus"
-        @view-job="viewBatchJob"
-        @confirm-preview="confirmBatchPreview"
-        @cancel-preview="cancelBatchPreview"
-      />
-    </el-card>
+    <!-- 输入区（已拆为 HomeInputPanel 组件，2026-09-12 slice-A） -->
+    <HomeInputPanel
+      v-model:input-type="inputType"
+      v-model:input-url="inputUrl"
+      v-model:input-text="inputText"
+      v-model:batch-urls="batchUrls"
+      v-model:uploaded-file-path="uploadedFilePath"
+      v-model:uploaded-file-name="uploadedFileName"
+      :batch-result="batchResult"
+      @refresh="refreshBatchStatus"
+      @view-job="viewBatchJob"
+      @confirm-preview="confirmBatchPreview"
+      @cancel-preview="cancelBatchPreview"
+    />
 
     <!-- 总结配置 -->
     <el-card class="wb-card" shadow="never">
@@ -986,54 +873,8 @@ const tokenPanelRef = ref(null)
 /* 通用卡片头样式已提升至 App.vue 全局（.wb-card-title/.card-head-row/.card-head-hint/.card-head-actions），
    供 HomeView 拆出的子组件共用（2026-09-12 slice-0） */
 
-/* 输入区 */
-.input-type-tabs {
-  margin-bottom: 14px;
-  display: flex;
-  flex-wrap: wrap;
-}
-.input-main {
-  width: 100%;
-}
-.input-upload :deep(.el-upload-dragger) {
-  border-radius: 12px;
-  border-color: var(--app-border);
-  background: var(--app-progress-meter-bg, transparent);
-  padding: 28px 16px;
-}
-.upload-icon {
-  font-size: 40px;
-  color: var(--app-text-secondary);
-}
-.upload-title {
-  margin-top: 8px;
-  color: var(--app-text);
-  font-size: 13px;
-}
-.upload-tip {
-  font-size: 12px;
-  color: var(--app-text-secondary);
-  margin-top: 6px;
-}
-.upload-ok {
-  color: #67c23a;
-  margin-left: 8px;
-  font-weight: 600;
-}
-.upload-busy {
-  color: var(--el-color-primary, #409eff);
-  margin-left: 8px;
-  font-weight: 600;
-}
-.upload-remove {
-  margin-left: 6px;
-  cursor: pointer;
-  vertical-align: -1px;
-  color: var(--app-text-secondary);
-}
-.upload-remove:hover {
-  color: var(--el-color-danger, #f56c6c);
-}
+/* 输入区样式随组件迁至 components/HomeInputPanel.vue（2026-09-12 slice-A）；
+   .input-main 提升至 App.vue 全局（转录预览卡复用） */
 
 /* 批量面板样式随组件迁至 components/BatchResultPanel.vue（2026-09-12 slice-3） */
 
