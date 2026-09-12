@@ -122,6 +122,76 @@ class TestProcessJob:
             mts.assert_called_once()
             mf.assert_called()
 
+    def test_translate_runs_without_srt_and_prefers_txt_clean(self, tmp_path):
+        """全文翻译只依赖 txt：srt 缺失不阻断；输入优先 txt_clean 纯净版（无时间戳/说话人标记）"""
+        from main import process_job
+        jid = self._make_job()
+        txt = tmp_path / "t.txt"
+        txt.write_text("[00:00 - 00:05] Hello world[说话人1]\n[00:05 - 00:10] Second line\n",
+                       encoding="utf-8")
+        with patch("main.get_job") as mj, patch("main.update_job"), \
+             patch("main.finish_job") as mf, \
+             patch(MOCK_HANDLE, return_value=(txt, "")), \
+             patch(MOCK_AI, new_callable=AsyncMock) as mai, \
+             patch("socket_handlers.emit_log", new_callable=AsyncMock), \
+             patch("socket_handlers.emit_progress", new_callable=AsyncMock):
+            mj.return_value = {"id":jid,"model":"glm","summary_type":"s",
+                "input_url":"","input_text":"x","input_file":"","title":"t",
+                "options":self._base_opts(do_translate=True, **{"translate_target_lang":"en"}),
+                "files":{},"tags":[],"token_usage":{}}
+            mai.return_value = ("AI 译文",10,20)
+            asyncio.run(process_job(jid))
+            mai.assert_called_once()  # 无 srt 仍执行全文翻译
+            clean_text = mai.call_args[0][0]
+            assert "Hello world" in clean_text
+            assert "[" not in clean_text  # 时间戳/说话人标记已被剥掉（txt_clean 优先）
+            # 统一语言参数生效：译文落 __en.md
+            out = tmp_path / "t__en.md"
+            assert out.exists()
+            assert out.read_text(encoding="utf-8") == "AI 译文"
+            mf.assert_called()
+
+    def test_subtitle_translate_uses_unified_target_lang(self):
+        """字幕翻译语言统一走 translate_target_lang（新入口）"""
+        from main import process_job
+        jid = self._make_job()
+        with patch("main.get_job") as mj, patch("main.update_job"), \
+             patch("main.finish_job") as mf, \
+             patch(MOCK_HANDLE, return_value=(Path("/t.txt"), Path("/t.srt"))), \
+             patch(MOCK_TRANS_SUB, new_callable=AsyncMock) as mts, \
+             patch("socket_handlers.emit_log", new_callable=AsyncMock), \
+             patch("socket_handlers.emit_progress", new_callable=AsyncMock):
+            mj.return_value = {"id":jid,"model":"glm","summary_type":"s",
+                "input_url":"","input_text":"x","input_file":"","title":"t",
+                "options":self._base_opts(do_subtitle=True, **{"translate_target_lang":"en"}),
+                "files":{},"tags":[],"token_usage":{}}
+            mts.return_value = "/tmp/tr.srt"
+            asyncio.run(process_job(jid))
+            mts.assert_called_once()
+            assert mts.call_args.kwargs["target_lang"] == "en"
+            mf.assert_called()
+
+    def test_subtitle_translate_legacy_lang_override(self):
+        """历史兼容：显式 subtitle_target_lang 仍优先生效（旧任务回放不变）"""
+        from main import process_job
+        jid = self._make_job()
+        with patch("main.get_job") as mj, patch("main.update_job"), \
+             patch("main.finish_job") as mf, \
+             patch(MOCK_HANDLE, return_value=(Path("/t.txt"), Path("/t.srt"))), \
+             patch(MOCK_TRANS_SUB, new_callable=AsyncMock) as mts, \
+             patch("socket_handlers.emit_log", new_callable=AsyncMock), \
+             patch("socket_handlers.emit_progress", new_callable=AsyncMock):
+            mj.return_value = {"id":jid,"model":"glm","summary_type":"s",
+                "input_url":"","input_text":"x","input_file":"","title":"t",
+                "options":self._base_opts(do_subtitle=True,
+                    **{"translate_target_lang":"en","subtitle_target_lang":"ja"}),
+                "files":{},"tags":[],"token_usage":{}}
+            mts.return_value = "/tmp/tr.srt"
+            asyncio.run(process_job(jid))
+            mts.assert_called_once()
+            assert mts.call_args.kwargs["target_lang"] == "ja"
+            mf.assert_called()
+
     # ── URL 路径 ──
     def test_url_download_transcribe(self):
         from main import process_job

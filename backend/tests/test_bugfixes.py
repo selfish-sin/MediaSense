@@ -2,8 +2,8 @@
 定向 bug 修复回归测试（纯本地：临时 SQLite + mock，不联网、不起服务）
 
 覆盖：
-- 修复1：翻译接口 files 合并逻辑（原 files 不丢、不再双重 JSON 编码）
-         + _row_to_dict 对历史双层编码脏数据的防御性修复
+- 修复1：files 脏数据防御（_row_to_dict 对历史双层/三层编码的解码修复）
+         ※ 原 bilingual 翻译端点已于 2026-09-12 删除（前端双语块移除后无调用方）
 - 修复4：finish_job/update_job 终态保护（cancelled 不被 completed/failed 覆盖）
 - 修复6：fail_interrupted_jobs 把重启遗留的非终态任务标记为 failed
 """
@@ -30,83 +30,11 @@ def _patch_conn(db_path):
         yield
 
 
-def _raw_files_value(db_path, job_id):
-    """直接读 DB 原始 files 列（不经过 _row_to_dict）"""
-    conn = sqlite3.connect(str(db_path))
-    row = conn.execute("SELECT files FROM jobs WHERE id = ?", (job_id,)).fetchone()
-    conn.close()
-    return row[0]
+# ============ 修复1：files 脏数据防御 ============
 
-
-# ============ 修复1：翻译接口 files 合并 ============
-
-class TestTranslateFilesMerge:
-    """bilingual_translate 保存译文到 job.files 的行为"""
-
-    async def _call_route(self, monkeypatch, job_id):
-        """mock 掉 AI 调用和模型查询后调用翻译路由（不联网）"""
-        import services.ai_processor as aip
-        import routers.translate as tr
-
-        async def fake_call_ai(model_cfg, prompt, timeout=120.0, **kwargs):
-            return "模拟译文", 11, 22
-
-        monkeypatch.setattr(aip, "_call_ai", fake_call_ai)
-        monkeypatch.setattr(
-            tr, "get_model_by_key",
-            lambda key: {"key": key, "endpoint": "http://fake.local", "temperature": 0.3},
-        )
-        return await tr.bilingual_translate(tr.BilingualRequest(
-            text="hello world", target_lang="zh", job_id=job_id,
-        ))
-
-    async def test_merge_keeps_original_files(self, monkeypatch, db_path):
-        """① 原 files（txt/srt/audio）不丢 + 译文合并 + DB 单层编码"""
-        jid = create_job(input_type="url", input_url="https://x.com/v")
-        update_job(jid, files={"txt": "/d/x.txt", "srt": "/d/x.srt", "audio": "/d/x.m4a"})
-
-        resp = await self._call_route(monkeypatch, jid)
-        assert resp["success"] is True
-
-        files = get_job(jid)["files"]
-        assert isinstance(files, dict)
-        # 原文件路径保留
-        assert files["txt"] == "/d/x.txt"
-        assert files["srt"] == "/d/x.srt"
-        assert files["audio"] == "/d/x.m4a"
-        # 译文已合并
-        assert files["translation_text"] == "模拟译文"
-        assert files["translation_lang"] == "zh"
-
-        # DB 原始值是单层 JSON：loads 一次即得 dict（旧 bug 下是 str）
-        raw = _raw_files_value(db_path, jid)
-        once = json.loads(raw)
-        assert isinstance(once, dict)
-        assert once["translation_text"] == "模拟译文"
-
-    async def test_merge_on_legacy_double_encoded_row(self, monkeypatch, db_path):
-        """② 历史脏数据（DB 里双层编码、读回是 str）也能正确合并并不再污染"""
-        jid = create_job(input_type="url", input_url="https://x.com/v2")
-        inner = json.dumps({"txt": "/d/old.txt", "srt": "/d/old.srt"}, ensure_ascii=False)
-        double = json.dumps(inner, ensure_ascii=False)  # 模拟旧 bug 写入的脏值
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("UPDATE jobs SET files = ? WHERE id = ?", (double, jid))
-        conn.commit()
-        conn.close()
-
-        # _row_to_dict 防御性修复：读回即 dict
-        job = get_job(jid)
-        assert isinstance(job["files"], dict)
-        assert job["files"]["txt"] == "/d/old.txt"
-
-        resp = await self._call_route(monkeypatch, jid)
-        assert resp["success"] is True
-
-        files = get_job(jid)["files"]
-        assert files["txt"] == "/d/old.txt"          # 脏数据里的原路径仍在
-        assert files["translation_text"] == "模拟译文"
-        # 写回后已是干净单层编码
-        assert isinstance(json.loads(_raw_files_value(db_path, jid)), dict)
+class TestFilesDecodeRepair:
+    """_row_to_dict 对历史双层/三层编码脏数据的防御性修复
+    （原 bilingual_translate 路由用例随端点删除，2026-09-12）"""
 
     def test_row_to_dict_repairs_double_and_triple_encoding(self, db_path):
         """③ _row_to_dict 对双层/三层编码的防御性解码"""

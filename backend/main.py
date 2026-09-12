@@ -1104,12 +1104,16 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                 await emit_log(sio, job_id, f'标签: {", ".join(tags)}')
 
         # ===== Step 4: 翻译（可选） =====
-        if do_translate and txt_path and srt_path:
+        # ★ 译读文本与字幕文件相互独立：翻译文稿只依赖 txt_path（srt 缺失不阻断）
+        if do_translate and txt_path:
             target_lang = options.get('translate_target_lang', 'zh-CN')
-            await emit_log(sio, job_id, f'开始翻译 → {target_lang}')
+            await emit_log(sio, job_id, f'开始翻译全文 → {target_lang}')
 
-            # 全文翻译（使用translate总结类型）
-            text_content = await _read_text(txt_path)
+            # 全文翻译（使用translate总结类型）；优先纯净阅读版 txt_clean（无时间戳/说话人标记，
+            # 校对开启时已基于校正后文本），历史任务/生成失败回退原 txt
+            clean_path = result.get('files', {}).get('txt_clean')
+            translate_src = clean_path if clean_path and Path(clean_path).exists() else txt_path
+            text_content = await _read_text(translate_src)
             # ★ 整体总超时兜底
             translation, in_tok, out_tok = await asyncio.wait_for(
                 ai_process(
@@ -1130,7 +1134,9 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
 
         # ===== Step 5: 字幕翻译（可选） =====
         if do_subtitle and srt_path:
-            target_lang = options.get('subtitle_target_lang', 'zh-CN')
+            # ★ 语言参数统一：translate_target_lang 是唯一入口；
+            #   subtitle_target_lang 仅作历史任务兼容回退读取
+            target_lang = options.get('subtitle_target_lang') or options.get('translate_target_lang', 'zh-CN')
             subtitle_category = options.get('subtitle_category', 'auto')
             cn_srt_path = await translate_subtitles(
                 srt_path, target_lang=target_lang, model=model,

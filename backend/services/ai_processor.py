@@ -434,6 +434,7 @@ async def translate_subtitles(
     cat_cfg = CATEGORY_PROMPTS.get(category, CATEGORY_PROMPTS['auto'])
 
     translated = []
+    failed_batches = []  # 翻译失败保留原文的批次（1-based），完成后必须可见（禁止静默吞错）
     for i, batch in enumerate(batches):
         pct = int((i + 1) / len(batches) * 90)
         if sio:
@@ -471,15 +472,26 @@ async def translate_subtitles(
         except httpx.HTTPStatusError as e:
             logger.warning(f'字幕翻译失败 (批次 {i+1}): {describe_http_error(e)}')
             translated.append(batch_text)
+            failed_batches.append(i + 1)
         except Exception as e:
             logger.warning(f'字幕翻译失败 (批次 {i+1}): {e}')
             translated.append(batch_text)
+            failed_batches.append(i + 1)
 
     # 生成翻译文件
     lang_suffix = target_lang.replace('-', '_')
     cn_srt_path = srt_path.replace('.srt', f'__{lang_suffix}.srt')
     with open(cn_srt_path, 'w', encoding='utf-8') as f:
         f.write('\n\n'.join(translated))
+
+    # ★ 部分失败必须对用户可见：失败批次保留了原文，产物里会出现中英混杂
+    if failed_batches:
+        failed_desc = '、'.join(f'#{n}' for n in failed_batches[:10]) + ('…' if len(failed_batches) > 10 else '')
+        logger.warning(f'字幕翻译部分失败: {len(failed_batches)}/{len(batches)} 批保留原文 ({failed_desc})')
+        if sio:
+            from socket_handlers import emit_log
+            await emit_log(sio, job_id,
+                           f'⚠ 字幕翻译 {len(failed_batches)}/{len(batches)} 批次失败（{failed_desc}），失败段落保留原文')
 
     if sio:
         from socket_handlers import emit_progress
