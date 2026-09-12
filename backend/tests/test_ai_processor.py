@@ -272,6 +272,15 @@ class TestCorrectTranscript:
         assert stats['changed_count'] == 0
         assert stats['changed_lines'] == []
 
+    async def test_trailing_newline_diff_still_captured(self):
+        """回归：校正模型输出无尾随换行而原文有 → 空行不参与对齐，改动不漏报。"""
+        orig = "[00:05] 银马尔可夫\n[00:10] 第二句\n"
+        corrected = "[00:05] 隐马尔可夫\n[00:10] 第二句"
+        _, _, _, stats = await self._run(orig, [(corrected, 10, 10)])
+        assert stats['changed_count'] == 1
+        assert stats['changed_lines'][0]['before'] == '银马尔可夫'
+        assert stats['changed_lines'][0]['after'] == '隐马尔可夫'
+
     async def test_reverted_batch_not_counted_as_change(self):
         """标记丢失回退原文的批次不进改动明细（由完整性告警负责）。"""
         orig = "[00:05] 第一句\n[00:10] 第二句"

@@ -551,9 +551,13 @@ def _diff_lines(orig: str, corrected: str) -> list:
         for line in text.split('\n'):
             m = _TS_RE.search(line)
             if m:
-                out.append((m.group(0), line[m.end():].strip()))
+                content = line[m.end():].strip()
             else:
-                out.append(('', line.strip()))
+                content = line.strip()
+            # 全空行不参与对齐：校正前后尾随换行/空行差异会造成行数假性不一致
+            if not m and not content:
+                continue
+            out.append((m.group(0) if m else '', content))
         return out
 
     lo, lc = _parse(orig), _parse(corrected)
