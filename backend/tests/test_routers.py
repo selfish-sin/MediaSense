@@ -914,3 +914,45 @@ class TestAsrStatusRouter:
         resp = client.get("/api/asr/status")
         assert resp.status_code == 200
         assert resp.json()["cloud_configured"] is False
+
+    # ── recommended_engine：默认引擎策略单点（免费优先） ──
+    def _set_free_cfg(self, monkeypatch, configured: bool):
+        monkeypatch.setattr('config.ASR_FREE_ENABLED', True, raising=False)
+        monkeypatch.setattr(
+            'config.ASR_FREE_ENDPOINT',
+            'https://api.siliconflow.cn/v1/audio/transcriptions', raising=False)
+        monkeypatch.setattr('config.ASR_FREE_API_KEY',
+                            'sk-free' if configured else '', raising=False)
+
+    def _set_paid_cfg(self, monkeypatch, configured: bool):
+        monkeypatch.setattr('config.ASR_CLOUD_ENABLED', configured, raising=False)
+        monkeypatch.setattr(
+            'config.ASR_CLOUD_ENDPOINT',
+            'https://api.xiaomimimo.com/v1/chat/completions', raising=False)
+        monkeypatch.setattr('config.ASR_CLOUD_API_KEY',
+                            'sk-paid' if configured else '', raising=False)
+
+    def test_recommended_engine_free_first(self, client, monkeypatch):
+        """免费优先：免费档可用时推荐 cloud_free（即使付费档也可用）。"""
+        self._set_free_cfg(monkeypatch, True)
+        self._set_paid_cfg(monkeypatch, True)
+        data = client.get("/api/asr/status").json()
+        assert data["recommended_engine"] == "cloud_free"
+
+    def test_recommended_engine_free_only(self, client, monkeypatch):
+        """仅配置免费档 → cloud_free（前端不再强制落 local）。"""
+        self._set_free_cfg(monkeypatch, True)
+        self._set_paid_cfg(monkeypatch, False)
+        assert client.get("/api/asr/status").json()["recommended_engine"] == "cloud_free"
+
+    def test_recommended_engine_paid_when_free_missing(self, client, monkeypatch):
+        """免费档不可用但付费档可用 → cloud（用户配置付费即接受兜底）。"""
+        self._set_free_cfg(monkeypatch, False)
+        self._set_paid_cfg(monkeypatch, True)
+        assert client.get("/api/asr/status").json()["recommended_engine"] == "cloud"
+
+    def test_recommended_engine_local_when_none(self, client, monkeypatch):
+        """云端全不可用 → local 保底（firered 不参与推荐，不默认触发下载）。"""
+        self._set_free_cfg(monkeypatch, False)
+        self._set_paid_cfg(monkeypatch, False)
+        assert client.get("/api/asr/status").json()["recommended_engine"] == "local"
