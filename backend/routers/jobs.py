@@ -223,8 +223,6 @@ async def submit_job(job: JobCreate):
         summary_type=job.summary_type or "summary",
         options=job.options or {},
         do_summary=job.do_summary,
-        do_translate=job.do_translate,
-        do_subtitle=job.do_subtitle,
         preview_before_summary=job.preview_before_summary,
         dimensions=job.dimensions,
     )

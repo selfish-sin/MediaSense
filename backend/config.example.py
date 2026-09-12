@@ -79,19 +79,6 @@ PROXY_BYPASS_HOSTS = []  # 需要时填写域名列表
 # ============ AI 模型（在 /models 页面管理，API Key 存数据库） ============
 DEFAULT_MODEL = "deepseek-v4-flash"
 
-# ============ 翻译语言列表 ============
-TRANSLATE_LANGS = {
-    "zh-CN": {"name": "简体中文", "code": "zh-CN"},
-    "zh-TW": {"name": "繁体中文", "code": "zh-TW"},
-    "en":    {"name": "英语", "code": "en"},
-    "ja":    {"name": "日语", "code": "ja"},
-    "ko":    {"name": "韩语", "code": "ko"},
-    "fr":    {"name": "法语", "code": "fr"},
-    "de":    {"name": "德语", "code": "de"},
-    "es":    {"name": "西班牙语", "code": "es"},
-    "ru":    {"name": "俄语", "code": "ru"},
-}
-
 # ============ 总结类型预设（15种，与功能手册完全对齐 + critique增强） ============
 # key 必须与 prompts.py SUMMARY_PROMPTS 的 key 完全一致
 # 名称/描述/适用场景/组织策略 均来自功能手册_完整版.md
@@ -110,7 +97,6 @@ SUMMARY_TYPES = {
     "news":       {"name": "资讯整理",   "desc": "新闻/信息播报",             "applicable": "新闻/资讯",  "strategy": "five_w_one_h",          "icon": "Reading",       "category": "deep"},
     "quick":      {"name": "快速判断",   "desc": "30秒决定值不值得看",        "applicable": "快速筛选",  "strategy": "density_assessment",    "icon": "MagicStick",    "category": "quick"},
     "custom":     {"name": "自定义",     "desc": "完全自由编辑提示词",        "applicable": "任意",       "strategy": "",                      "icon": "EditPen",       "category": "general"},
-    "translate":  {"name": "全文翻译",   "desc": "学术级翻译",               "applicable": "翻译需求",   "strategy": "original_paragraph",    "icon": "Switch",        "category": "translate"},
 }
 
 # 分类名映射（前端筛选用）
@@ -119,7 +105,6 @@ CATEGORY_NAMES = {
     "structured": "结构化",
     "deep":       "深度",
     "quick":      "快速",
-    "translate":  "翻译",
 }
 
 # ============ 总结选项预设（与功能手册完全对齐） ============
@@ -149,7 +134,6 @@ SUMMARY_OPTIONS = {
 # ============ 场景预设（与功能手册6个按钮完全对齐） ============
 SCENARIOS = {
     "video_edit":    {"name": "🎬 视频剪辑·做字幕", "word_count": "不限",    "tone": "口语化",  "format": "要点列表", "purpose": "素材收集", "summary_type": "core"},
-    "reading":       {"name": "📄 全文精读翻译",    "word_count": "不限",    "tone": "学术严谨", "format": "纯文本",   "purpose": "内容归纳", "summary_type": "translate"},
     "study":         {"name": "📝 学习做笔记",      "word_count": "3000",    "tone": "学术严谨", "format": "Markdown", "purpose": "学习笔记", "summary_type": "notes"},
     "skim":          {"name": "👀 快速扫一眼",      "word_count": "1000",    "tone": "通俗科普", "format": "要点列表", "purpose": "快速浏览", "summary_type": "summary"},
     "deep_research": {"name": "🔬 深度研究分析",    "word_count": "不限",    "tone": "学术严谨", "format": "结构化大纲","purpose": "深度分析", "summary_type": "deep_research"},

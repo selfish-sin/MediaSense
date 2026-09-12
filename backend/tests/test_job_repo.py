@@ -61,12 +61,10 @@ class TestCreateJob:
 
     def test_create_options_has_boolean_flags(self):
         jid = create_job(input_type="url", input_url="x",
-                         do_summary=True, do_translate=True,
-                         do_subtitle=False, preview_before_summary=True)
+                         do_summary=True, preview_before_summary=True)
         job = get_job(jid)
         assert job["options"]["do_summary"] is True
-        assert job["options"]["do_translate"] is True
-        assert job["options"]["do_subtitle"] is False
+        assert job["options"]["preview_before_summary"] is True
 
     def test_create_with_dimensions(self):
         jid = create_job(input_type="url", input_url="x",

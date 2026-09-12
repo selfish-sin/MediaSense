@@ -42,8 +42,6 @@ def create_job(
     summary_type: str = "summary",
     options: Optional[Dict[str, Any]] = None,
     do_summary: bool = True,
-    do_translate: bool = False,
-    do_subtitle: bool = False,
     preview_before_summary: bool = False,
     dimensions: Optional[Dict[str, str]] = None,
     batch_id: Optional[str] = None,
@@ -56,8 +54,6 @@ def create_job(
     # 将 boolean options 嵌入 options JSON
     opts.update({
         "do_summary": do_summary,
-        "do_translate": do_translate,
-        "do_subtitle": do_subtitle,
         "preview_before_summary": preview_before_summary,
         "input_type": input_type,
     })

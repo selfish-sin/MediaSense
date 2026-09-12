@@ -17,7 +17,7 @@ from db.model_repo import get_model_by_key
 from db.database import get_connection
 from services.prompts import (
     SUMMARY_PROMPTS, ORG_STRATEGY_DESCS,
-    build_prompt_vars, CATEGORY_PROMPTS,
+    build_prompt_vars,
 )
 from services.httpx_errors import describe_http_error
 
@@ -402,102 +402,6 @@ async def ai_process(
     _record_token_usage(model, total_in, total_out, job_id)
 
     return full_result, total_in, total_out
-
-
-# ============ 字幕翻译 ============
-async def translate_subtitles(
-    srt_path: str,
-    target_lang: str = 'zh-CN',
-    model: str = DEFAULT_MODEL,
-    category: str = 'auto',
-    sio=None,
-    job_id: str = '',
-) -> str:
-    """翻译SRT字幕，返回翻译后的SRT路径"""
-    model_cfg = get_model_by_key(model) or get_model_by_key(DEFAULT_MODEL)
-    headers = _build_headers(model_cfg)
-
-    from config import TRANSLATE_LANGS
-    lang_name = TRANSLATE_LANGS.get(target_lang, {}).get("name", target_lang)
-
-    if sio:
-        from socket_handlers import emit_progress, emit_log
-        await emit_progress(sio, job_id, 'translate', 0, f'正在翻译字幕 → {lang_name}...')
-
-    with open(srt_path, 'r', encoding='utf-8') as f:
-        content = f.read()
-
-    blocks = content.strip().split('\n\n')
-    batch_size = 80
-    batches = [blocks[i:i+batch_size] for i in range(0, len(blocks), batch_size)]
-
-    cat_cfg = CATEGORY_PROMPTS.get(category, CATEGORY_PROMPTS['auto'])
-
-    translated = []
-    failed_batches = []  # 翻译失败保留原文的批次（1-based），完成后必须可见（禁止静默吞错）
-    for i, batch in enumerate(batches):
-        pct = int((i + 1) / len(batches) * 90)
-        if sio:
-            from socket_handlers import emit_progress
-            await emit_progress(sio, job_id, 'translate', pct, f'翻译中... ({i+1}/{len(batches)}) → {lang_name}')
-
-        batch_text = '\n\n'.join(batch)
-        prompt = f"""请将以下{cat_cfg['name']}相关的字幕翻译成{lang_name}。
-
-要求：
-1. 序号和时间戳格式保持原样
-2. 使用自然流畅的{lang_name}
-3. 专有名词可保留原文并附翻译
-4. 保持字幕的简洁性
-
-字幕内容：
-""" + batch_text
-
-        payload = {
-            "model": model_cfg.get('model_id', model),
-            "messages": [
-                {"role": "system", "content": "你是专业的字幕翻译助手，同时具备基础学术素养，对思想史关键术语保持警觉。\n\n翻译协议：\n1. 序号和时间戳格式严格保持原样\n2. 同一原文术语全文使用统一译名，思想史术语优先采用学界约定俗成的译法\n3. 专有名词保留原文并附翻译\n4. 保持字幕简洁性，但不牺牲概念精确性\n5. 转录有歧义处，标注 [译注：原文此处可能为……]"},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.3,
-        }
-
-        try:
-            async with httpx.AsyncClient(timeout=60.0, verify=_client_verify(model_cfg)) as client:
-                resp = await client.post(model_cfg['endpoint'], headers=headers, json=payload)
-                resp.raise_for_status()
-                result = resp.json()
-                translated_text = result['choices'][0]['message']['content']
-                translated.append(translated_text)
-        except httpx.HTTPStatusError as e:
-            logger.warning(f'字幕翻译失败 (批次 {i+1}): {describe_http_error(e)}')
-            translated.append(batch_text)
-            failed_batches.append(i + 1)
-        except Exception as e:
-            logger.warning(f'字幕翻译失败 (批次 {i+1}): {e}')
-            translated.append(batch_text)
-            failed_batches.append(i + 1)
-
-    # 生成翻译文件
-    lang_suffix = target_lang.replace('-', '_')
-    cn_srt_path = srt_path.replace('.srt', f'__{lang_suffix}.srt')
-    with open(cn_srt_path, 'w', encoding='utf-8') as f:
-        f.write('\n\n'.join(translated))
-
-    # ★ 部分失败必须对用户可见：失败批次保留了原文，产物里会出现中英混杂
-    if failed_batches:
-        failed_desc = '、'.join(f'#{n}' for n in failed_batches[:10]) + ('…' if len(failed_batches) > 10 else '')
-        logger.warning(f'字幕翻译部分失败: {len(failed_batches)}/{len(batches)} 批保留原文 ({failed_desc})')
-        if sio:
-            from socket_handlers import emit_log
-            await emit_log(sio, job_id,
-                           f'⚠ 字幕翻译 {len(failed_batches)}/{len(batches)} 批次失败（{failed_desc}），失败段落保留原文')
-
-    if sio:
-        from socket_handlers import emit_progress
-        await emit_progress(sio, job_id, 'translate', 100, '字幕翻译完成！')
-
-    return cn_srt_path
 
 
 # ============ 转录文本 AI 校正 ============

@@ -197,7 +197,6 @@ from routers.models import router as models_router
 from routers.asr import router as asr_router
 from routers.summary import router as summary_router
 from routers.export import router as export_router
-from routers.translate import router as translate_router
 from routers.bilibili import router as bilibili_router
 from routers.download import router as download_router
 from routers.templates import router as templates_router
@@ -215,7 +214,6 @@ app.include_router(models_router,  prefix="/api/models",    tags=["models"])
 app.include_router(asr_router,    prefix="/api/asr",       tags=["asr"])
 app.include_router(summary_router, prefix="/api/summary",   tags=["summary"])
 app.include_router(export_router,  prefix="/api/export",    tags=["export"])
-app.include_router(translate_router, prefix="/api/translate", tags=["translate"])
 app.include_router(bilibili_router, prefix="/api/bilibili", tags=["bilibili"])
 app.include_router(download_router, prefix="/api/download", tags=["download"])
 app.include_router(templates_router, prefix="/api/templates", tags=["templates"])
@@ -747,7 +745,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
     )
     from services.downloader import prevent_sleep, allow_sleep
     from services.ai_processor import (
-        ai_process, translate_subtitles, generate_tags, TaskCancelledError,
+        ai_process, generate_tags, TaskCancelledError,
     )
     from services.textbook_processor import textbook_process
     from services.research_processor import research_process
@@ -1102,47 +1100,6 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             if tags:
                 result['tags'] = tags
                 await emit_log(sio, job_id, f'标签: {", ".join(tags)}')
-
-        # ===== Step 4: 翻译（可选） =====
-        # ★ 译读文本与字幕文件相互独立：翻译文稿只依赖 txt_path（srt 缺失不阻断）
-        if do_translate and txt_path:
-            target_lang = options.get('translate_target_lang', 'zh-CN')
-            await emit_log(sio, job_id, f'开始翻译全文 → {target_lang}')
-
-            # 全文翻译（使用translate总结类型）；优先纯净阅读版 txt_clean（无时间戳/说话人标记，
-            # 校对开启时已基于校正后文本），历史任务/生成失败回退原 txt
-            clean_path = result.get('files', {}).get('txt_clean')
-            translate_src = clean_path if clean_path and Path(clean_path).exists() else txt_path
-            text_content = await _read_text(translate_src)
-            # ★ 整体总超时兜底
-            translation, in_tok, out_tok = await asyncio.wait_for(
-                ai_process(
-                    text_content, summary_type='translate', model=model,
-                    sio=sio, job_id=job_id, summary_options=summary_options if do_summary else {}
-                ),
-                timeout=1800.0,
-            )
-            # 与 Step 3 相同的哨兵拦截：失败串不能当正常译文写盘
-            if isinstance(translation, str) and translation.lstrip().startswith('[处理失败'):
-                raise Exception(translation.strip())
-            lang_suffix = target_lang.replace('-', '_')
-            translation_path = txt_path.replace('.txt', f'__{lang_suffix}.md')
-            with open(translation_path, 'w', encoding='utf-8') as f:
-                f.write(translation)
-            result['files']['translation'] = str(translation_path)
-            result['translation_text'] = translation
-
-        # ===== Step 5: 字幕翻译（可选） =====
-        if do_subtitle and srt_path:
-            # ★ 语言参数统一：translate_target_lang 是唯一入口；
-            #   subtitle_target_lang 仅作历史任务兼容回退读取
-            target_lang = options.get('subtitle_target_lang') or options.get('translate_target_lang', 'zh-CN')
-            subtitle_category = options.get('subtitle_category', 'auto')
-            cn_srt_path = await translate_subtitles(
-                srt_path, target_lang=target_lang, model=model,
-                category=subtitle_category, sio=sio, job_id=job_id
-            )
-            result['files']['translated_srt'] = str(cn_srt_path)
 
         # ===== 完成 =====
         # ★ 取消竞态：收尾前再查一次；若已取消则不写结果、不推 success

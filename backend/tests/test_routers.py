@@ -20,7 +20,6 @@ def app():
     from routers.asr import router as asr_router
     from routers.summary import router as summary_router
     from routers.export import router as export_router
-    from routers.translate import router as translate_router
     from routers.bilibili import router as bilibili_router
     from routers.download import router as download_router
     from routers.templates import router as templates_router
@@ -34,7 +33,6 @@ def app():
     app.include_router(asr_router, prefix="/api/asr")
     app.include_router(summary_router, prefix="/api/summary")
     app.include_router(export_router, prefix="/api/export")
-    app.include_router(translate_router, prefix="/api/translate")
     app.include_router(bilibili_router, prefix="/api/bilibili")
     app.include_router(download_router, prefix="/api/download")
     app.include_router(templates_router, prefix="/api/templates")
@@ -805,13 +803,6 @@ class TestSummaryRouter:
 
     def test_get_defaults(self, client):
         resp = client.get("/api/summary/defaults")
-        assert resp.status_code == 200
-
-
-# ── Translate ──
-class TestTranslateRouter:
-    def test_get_langs(self, client):
-        resp = client.get("/api/translate/langs")
         assert resp.status_code == 200
 
 

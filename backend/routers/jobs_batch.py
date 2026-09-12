@@ -64,7 +64,7 @@ async def batch_submit(request: Request):
         opts = {}
         model = get_default_model_key()
         summary_type = "summary"
-        do_summary, do_translate, do_subtitle = True, False, False
+        do_summary = True
         # ★ 批量固定不做转录预览确认：每任务直通总结，流程统一（用户要求批量不用确认）
         preview_before_summary = False
         dimensions = None
@@ -75,8 +75,6 @@ async def batch_submit(request: Request):
         model = body.get("model") or get_default_model_key()
         summary_type = body.get("summary_type", "summary")
         do_summary = body.get("do_summary", True)
-        do_translate = body.get("do_translate", False)
-        do_subtitle = body.get("do_subtitle", False)
         # ★ 批量固定不做转录预览确认：即使前端传了 preview_before_summary 也忽略，
         #   批量串行与「等待人工确认」天然冲突，会卡住后续任务
         preview_before_summary = False
@@ -147,8 +145,6 @@ async def batch_submit(request: Request):
             summary_type=summary_type,
             options=opts,
             do_summary=do_summary,
-            do_translate=do_translate,
-            do_subtitle=do_subtitle,
             preview_before_summary=preview_before_summary,
             dimensions=dimensions,
             batch_id=batch_id,
