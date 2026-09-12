@@ -180,6 +180,7 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { MessageCircle, Plus, Pencil, Trash2, ArrowDown, Sparkles, Link } from 'lucide-vue-next'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatApi } from '../utils/api'
+import { isDialogCancel } from '../utils/errorNotice'
 import { useMarkdownListCache } from '../composables/useMarkdownRender'
 import { useModelStore } from '../stores/modelStore'
 import { modelDisplayName } from '../utils/modelDisplay'
@@ -284,7 +285,7 @@ async function renameSession() {
     await chatApi.renameSession(props.jobId, activeSessionId.value, { title: value.trim() })
     await refreshSessionMeta()
   } catch (e) {
-    if (e !== 'cancel' && e?.message) ElMessage.error('重命名失败: ' + e.message)
+    if (!isDialogCancel(e) && e?.message) ElMessage.error('重命名失败: ' + e.message)
   }
 }
 

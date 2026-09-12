@@ -9,6 +9,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Pencil, Trash2, Plus, RefreshCw, FileText, Files } from 'lucide-vue-next'
 import { useSettingsStore } from '../stores/settingsStore'
 import { summaryApi, templatesApi } from '../utils/api'
+import { isDialogCancel } from '../utils/errorNotice'
 import DimensionSelector from '../components/DimensionSelector.vue'
 
 const settings = useSettingsStore()
@@ -73,7 +74,9 @@ function deleteRecipe() {
       newRecipe()
       ElMessage.success('已删除')
     })
-    .catch(() => {})
+    .catch((err) => {
+      if (!isDialogCancel(err)) ElMessage.error('删除失败: ' + (err?.message || err))
+    })
 }
 
 function isCustomRecipe() {
@@ -113,7 +116,9 @@ function selectModule(dimKey, moduleKey) {
   if (dirty.value) {
     ElMessageBox.confirm('当前模块有未保存的修改，切换将丢失。继续？', '提示', { type: 'warning' })
       .then(() => doSelect(dimKey, moduleKey))
-      .catch(() => {})
+      .catch((err) => {
+        if (!isDialogCancel(err)) ElMessage.error('切换失败: ' + (err?.message || err))
+      })
     return
   }
   doSelect(dimKey, moduleKey)
@@ -176,7 +181,7 @@ async function handleReset() {
     await doSelect(selectedDim.value, selectedModule.value)
     await settings.reloadDimensions()
   } catch (err) {
-    if (err !== 'cancel') ElMessage.error('恢复失败: ' + (err.message || err))
+    if (!isDialogCancel(err)) ElMessage.error('恢复失败: ' + (err?.message || err))
   }
 }
 
@@ -192,7 +197,7 @@ async function handleResetAll() {
     await settings.reloadDimensions()
     if (selectedDim.value) await doSelect(selectedDim.value, selectedModule.value)
   } catch (err) {
-    if (err !== 'cancel') ElMessage.error('清空失败: ' + (err.message || err))
+    if (!isDialogCancel(err)) ElMessage.error('清空失败: ' + (err?.message || err))
   }
 }
 
@@ -316,7 +321,7 @@ async function deleteLib(item) {
     ElMessage.success('已删除')
     await loadLibrary()
   } catch (err) {
-    if (err !== 'cancel') ElMessage.error('删除失败: ' + (err.message || err))
+    if (!isDialogCancel(err)) ElMessage.error('删除失败: ' + (err?.message || err))
   }
 }
 

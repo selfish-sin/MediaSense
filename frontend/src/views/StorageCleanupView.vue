@@ -6,6 +6,7 @@ import {
   Search, TriangleAlert,
 } from 'lucide-vue-next'
 import { storageCleanupApi } from '../utils/api'
+import { isDialogCancel } from '../utils/errorNotice'
 
 const policy = reactive({
   staged_ttl_hours: 72,
@@ -139,7 +140,7 @@ async function applyCleanup() {
     await loadStatus()
     ElMessage.success('清理已开始，进度会自动刷新')
   } catch (error) {
-    if (error !== 'cancel' && error !== 'close') ElMessage.error(`执行失败：${error.message || error}`)
+    if (!isDialogCancel(error)) ElMessage.error(`执行失败：${error?.message || error}`)
   } finally {
     loading.value = false
   }

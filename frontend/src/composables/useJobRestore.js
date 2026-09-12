@@ -107,7 +107,10 @@ export function useJobRestore(deps) {
 
     // 恢复完成后再清除 query 参数（避免 router.replace 与加载并发导致状态错乱）
     if (route.query.restore || route.query.rerun) {
-      await router.replace({ path: '/', query: {} }).catch(() => {})
+      await router.replace({ path: '/', query: {} }).catch((err) => {
+        // 导航失败不阻断恢复流程，但必须留下痕迹（不静默吞错）
+        console.warn('[useJobRestore] 清除路由参数失败:', err)
+      })
     }
 
     _routeQueryHandled = true

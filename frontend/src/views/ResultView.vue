@@ -7,7 +7,7 @@ import { jobsApi, exportApi, chatApi } from '../utils/api'
 import { useModelStore } from '../stores/modelStore'
 import { useRafMarkdown } from '../composables/useMarkdownRender'
 import { copyText } from '../utils/clipboard'
-import { createFailureNotifier } from '../utils/errorNotice'
+import { createFailureNotifier, isDialogCancel } from '../utils/errorNotice'
 import { buildRerunRoute, buildRestoreRoute, getJobActionModel, buildSamePromptPayload } from '../utils/jobActions'
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
 import ResummarizeControl from '../components/ResummarizeControl.vue'
@@ -385,7 +385,7 @@ async function handleTaskAction(action) {
       job.value.status = 'cancelled'
       ElMessage.success('任务已取消')
     } catch (err) {
-      if (err !== 'cancel') ElMessage.error(err.message)
+      if (!isDialogCancel(err)) ElMessage.error(err?.message || err)
     }
     return
   }
@@ -407,7 +407,7 @@ async function handleTaskAction(action) {
       ElMessage.success(force ? '已从头重新处理' : '已断点续传')
       await router.push(buildRestoreRoute(job.value.id))
     } catch (err) {
-      if (err !== 'cancel') ElMessage.error(err.message)
+      if (!isDialogCancel(err)) ElMessage.error(err?.message || err)
     }
   }
 }

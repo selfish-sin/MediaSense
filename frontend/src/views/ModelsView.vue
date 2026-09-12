@@ -5,6 +5,7 @@ import { RefreshCcw, Eye, EyeOff } from 'lucide-vue-next'
 import { useModelStore } from '../stores/modelStore'
 import { modelsApi } from '../utils/api'
 import { modelDisplayName } from '../utils/modelDisplay'
+import { isDialogCancel } from '../utils/errorNotice'
 
 const modelStore = useModelStore()
 
@@ -178,7 +179,7 @@ async function handleDelete(key) {
     await modelStore.deleteModel(key)
     ElMessage.success('已删除')
   } catch (err) {
-    if (err !== 'cancel') ElMessage.error(err.message)
+    if (!isDialogCancel(err)) ElMessage.error(err?.message || err)
   }
 }
 

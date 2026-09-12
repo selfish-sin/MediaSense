@@ -14,6 +14,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check, X, Plus, Trash2, Pencil } from 'lucide-vue-next'
 import { useSettingsStore } from '../stores/settingsStore'
 import { templatesApi } from '../utils/api'
+import { isDialogCancel } from '../utils/errorNotice'
 
 const settings = useSettingsStore()
 const router = useRouter()
@@ -117,7 +118,7 @@ async function deleteCard(item) {
     ElMessage.success('已删除')
     await loadLibrary()
   } catch (err) {
-    if (err !== 'cancel') ElMessage.error('删除失败: ' + (err.message || err))
+    if (!isDialogCancel(err)) ElMessage.error('删除失败: ' + (err?.message || err))
   }
 }
 

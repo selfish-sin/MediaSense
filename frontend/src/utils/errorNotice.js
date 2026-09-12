@@ -4,6 +4,14 @@
  */
 import { ElMessage } from 'element-plus'
 
+/**
+ * Element Plus 确认框的关闭原因判断：'cancel'（点取消）/'close'（点 X 或 ESC）
+ * 都是"用户主动放弃"，不是业务错误——catch 里用它决定是否需要给错误提示。
+ */
+export function isDialogCancel(err) {
+  return err === 'cancel' || err === 'close'
+}
+
 export function createFailureNotifier(message, threshold = 3) {
   let failures = 0
   return {

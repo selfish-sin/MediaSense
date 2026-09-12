@@ -11,6 +11,7 @@ import {
   getJobActionModel,
 } from '../utils/jobActions'
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
+import { isDialogCancel } from '../utils/errorNotice'
 
 const router = useRouter()
 
@@ -60,8 +61,8 @@ async function handleDelete(jobId) {
     ElMessage.success('已删除（含磁盘文件）')
     await loadJobs()
   } catch (err) {
-    if (err !== 'cancel') {
-      ElMessage.error(err.message)
+    if (!isDialogCancel(err)) {
+      ElMessage.error(err?.message || err)
     }
   }
 }
@@ -73,8 +74,8 @@ async function handleClearAll() {
     ElMessage.success('已清空')
     await loadJobs()
   } catch (err) {
-    if (err !== 'cancel') {
-      ElMessage.error(err.message)
+    if (!isDialogCancel(err)) {
+      ElMessage.error(err?.message || err)
     }
   }
 }
@@ -86,8 +87,8 @@ async function handleClearByStatus(status, label) {
     ElMessage.success(res.message || '已清空')
     await loadJobs()
   } catch (err) {
-    if (err !== 'cancel') {
-      ElMessage.error(err.message)
+    if (!isDialogCancel(err)) {
+      ElMessage.error(err?.message || err)
     }
   }
 }
@@ -104,8 +105,8 @@ async function handleClearFailed() {
     ElMessage.success(`已清空 ${total} 个失败/取消任务`)
     await loadJobs()
   } catch (err) {
-    if (err !== 'cancel') {
-      ElMessage.error(err.message)
+    if (!isDialogCancel(err)) {
+      ElMessage.error(err?.message || err)
     }
   }
 }
@@ -190,7 +191,7 @@ async function handleRetry(jobId, force = false) {
     ElMessage.success(force ? '已从头重新处理，正在打开工作台' : '已断点续传，正在打开工作台')
     await router.push(buildRestoreRoute(jobId))
   } catch (err) {
-    if (err !== 'cancel') ElMessage.error(err.message)
+    if (!isDialogCancel(err)) ElMessage.error(err?.message || err)
   }
 }
 
@@ -208,7 +209,7 @@ async function handleCancel(jobId) {
     ElMessage.success('任务已取消')
     await loadJobs()
   } catch (err) {
-    if (err !== 'cancel') ElMessage.error(err.message)
+    if (!isDialogCancel(err)) ElMessage.error(err?.message || err)
   }
 }
 
@@ -249,7 +250,7 @@ async function handleBatchCancel() {
     selectedJobs.value = []
     await loadJobs()
   } catch (err) {
-    if (err !== 'cancel') ElMessage.error(err.message)
+    if (!isDialogCancel(err)) ElMessage.error(err?.message || err)
   }
 }
 
@@ -317,7 +318,7 @@ async function handleBatchDelete() {
     selectedJobs.value = []
     await loadJobs()
   } catch (err) {
-    if (err !== 'cancel') ElMessage.error(err.message)
+    if (!isDialogCancel(err)) ElMessage.error(err?.message || err)
   }
 }
 
