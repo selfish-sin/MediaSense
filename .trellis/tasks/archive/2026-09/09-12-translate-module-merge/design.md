@@ -25,16 +25,20 @@ config(.example).py: TRANSLATE_LANGS + SUMMARY_TYPES["translate"]
 - 旧任务已生成的 `__zh_CN.md`/`__zh_CN.srt`：磁盘与 files 记录保留，素材下拉 label 保留（翻译字幕/翻译文本）
 - useJobRestore 继续从 restoredOptions delete 旧键，防泄漏进 advancedOptions
 
-### 总结中文硬规则（单点定义）
+### 总结输出语言（最终实现：可选维度，非注入机制）
+
+用户裁定用选择栏替代最初的 CHINESE_OUTPUT_RULE 注入机制（机制版实现一次后撤回）：
 
 ```
-prompt_builder.CHINESE_OUTPUT_RULE = "【语言硬规则】无论素材原本是什么语言，本次总结/分析的输出一律使用简体中文；确需引用外文关键术语/原文时，保留原文并在其后用括号附中文释义。"
-
-注入点 1: build_modular_prompt() 末尾追加（覆盖模块化路径 + 分块重建；full_override 分支提前 return 不受约束）
-注入点 2: ai_process 旧路径 prompt_template 追加（edited_prompt 编辑态不受约束）
+prompts.LANGUAGE_DESCS = {简体中文(默认), 繁体中文, 英语, 跟随素材}
+prompt_builder.PROMPT_DIMENSIONS + "language" 维度（前端选择器自动渲染）
+build_modular_prompt 选项块在字数后追加「输出语言：{desc}。」
+历史任务 dimensions 缺 language 键 → get_default_dimensions 兜底简体中文
+未知语言值 → 语言行优雅省略；full_override 完全接管提示词，无选项块
+前端 DIMENSION_KEYS 加 language；matchRecipeKey 只比对配方已定义的维度
 ```
 
-不变量：用户完全接管提示词（full_override / edited_prompt）时保留原文语义优先于强制中文。
+不变量：语言是用户可选的输出属性而非强制规则；默认值满足"总结必须中文"。
 
 ## 契约
 
