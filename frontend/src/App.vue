@@ -406,6 +406,13 @@ function scrollToBottom() {
   flex-shrink: 0;
   opacity: 0.9;
 }
+/* 字段小提示（批量面板等复用；高级选项组件自带同名 scoped 定义） */
+.adv-field-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--app-text-secondary);
+  line-height: 1.4;
+}
 
 body {
   margin: 0;
