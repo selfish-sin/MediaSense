@@ -331,8 +331,14 @@ async def get_token_usage():
 # base='/' → JS引用路径为 /assets/xxx.js
 # 需要为 /assets/* 和根路径 / 返回静态文件，同时不拦截 /api/* 和 /ws/*
 if STATIC_DIR.exists():
-    app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
-    logger.info(f"静态文件目录: {STATIC_DIR}")
+    # StaticFiles 对目录不存在会直接抛 RuntimeError 导致服务无法启动；
+    # 前端未构建/构建不完整（缺 assets 子目录）时跳过挂载并告警，SPA 路由仍可给出构建提示
+    assets_dir = STATIC_DIR / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+        logger.info(f"静态文件目录: {STATIC_DIR}")
+    else:
+        logger.warning(f"静态目录缺少 assets 子目录，跳过 /assets 挂载（请先构建前端）: {assets_dir}")
 
 
 def _serve_index():
