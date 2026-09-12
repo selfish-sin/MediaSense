@@ -1938,66 +1938,6 @@
         }
       }
     },
-    "/api/translate/langs": {
-      "get": {
-        "tags": [
-          "translate"
-        ],
-        "summary": "Get Translate Langs",
-        "description": "获取翻译语言列表",
-        "operationId": "get_translate_langs_api_translate_langs_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/translate/bilingual": {
-      "post": {
-        "tags": [
-          "translate"
-        ],
-        "summary": "Bilingual Translate",
-        "description": "双语对照翻译\n- 接收原文 + 目标语言，调用 AI 返回译文\n- 如果传了 job_id，同时把译文保存到任务 files.translation_text",
-        "operationId": "bilingual_translate_api_translate_bilingual_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BilingualRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/bilibili/qr": {
       "get": {
         "tags": [
@@ -3236,46 +3176,6 @@
         "title": "BatchExportRequest",
         "description": "批量导出请求：打包多个任务的结果文本为 ZIP"
       },
-      "BilingualRequest": {
-        "properties": {
-          "text": {
-            "type": "string",
-            "title": "Text"
-          },
-          "target_lang": {
-            "type": "string",
-            "title": "Target Lang",
-            "default": "zh"
-          },
-          "model": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Model"
-          },
-          "job_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Job Id"
-          }
-        },
-        "type": "object",
-        "required": [
-          "text"
-        ],
-        "title": "BilingualRequest"
-      },
       "Body_upload_file_api_jobs_upload_post": {
         "properties": {
           "file": {
@@ -3501,18 +3401,6 @@
             "title": "Do Summary",
             "description": "是否AI总结",
             "default": true
-          },
-          "do_translate": {
-            "type": "boolean",
-            "title": "Do Translate",
-            "description": "是否翻译",
-            "default": false
-          },
-          "do_subtitle": {
-            "type": "boolean",
-            "title": "Do Subtitle",
-            "description": "是否字幕翻译",
-            "default": false
           },
           "preview_before_summary": {
             "type": "boolean",
