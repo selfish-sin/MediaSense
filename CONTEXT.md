@@ -4,19 +4,19 @@
 
 ## 一分钟速览
 
-本地视频/音频处理工作站：下载或导入媒体，字幕优先，缺少字幕时回退 Whisper 转录，再做分段、摘要、翻译和导出。后端把 FastAPI 与 Socket.IO 组合为 ASGI 应用，任务并发上限为 2，SQLite 记录任务和 token 用量。
+本地视频/音频处理工作站：下载或导入媒体，字幕优先，缺少字幕时回退 Whisper 转录，再做分段、摘要和导出。总结输出语言是第 9 个提示词维度（默认简体中文）。后端把 FastAPI 与 Socket.IO 组合为 ASGI 应用，任务并发上限为 2，SQLite 记录任务和 token 用量。
 
 ## 技术栈
 
 - 后端：FastAPI + Socket.IO（ASGI 组合）、SQLite（job/token/model 持久化）、yt-dlp（下载）、faster-whisper（字幕缺失时转录）、python-socketio。
 - 前端：Vue 3 + Element Plus + Pinia + Vue Router + Vite（构建产物输出到 `backend/static/`，同源 SPA）。
-- 模型：Whisper `base`（本地，目录在项目同级 `models/`）；本地 FireRedASR2-AED（sherpa-onnx int8，模型 ~1.5GB 同级 `models/` 下，缺失自动下载）；摘要/翻译走可配置的外部 LLM（`backend/config.py` 配 API Key，不入库）。
+- 模型：Whisper `base`（本地，目录在项目同级 `models/`）；本地 FireRedASR2-AED（sherpa-onnx int8，模型 ~1.5GB 同级 `models/` 下，缺失自动下载）；摘要走可配置的外部 LLM（`backend/config.py` 配 API Key，不入库）。
 - 任务流治理：Trellis（`.trellis/` 任务/规范）+ CodeGraph（`.codegraph/` 代码索引，不入库）。
 - 打包：PyInstaller（`MediaSense.spec`）+ Inno Setup（`installer.iss`）。
 
 ```text
 URL/文件 -> downloader -> subtitle 优先或 Whisper
-          -> process_job -> 分段/总结/翻译 -> export/download
+          -> process_job -> 分段/总结 -> export/download
           -> Socket.IO 日志/进度 + SQLite job/token history
 ```
 
@@ -32,14 +32,14 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `backend/services/cloud_asr.py` | 云端 ASR 双 provider：mimo（付费主力，chat+base64）/ xingchen（免费档 cloud_free，multipart）；静音切分→并发分片→句级化写盘；单片失败备用引擎补录（XingChen 免费→firered→Whisper）不留空洞；延迟画像日志 | 改云端引擎、句级切分或补录策略 |
 | `backend/services/local_asr.py` | 本地 FireRedASR2-AED（sherpa-onnx int8/CPU）：模型按需下载→VAD 分段（+padding）→段间并行解码→标点恢复→句级写盘 | 改本地 FireRed 引擎、模型下载或 VAD/标点参数 |
 | `.trellis/spec/backend/transcription-chain.md` | **识别链全链路权威文档**：输入四策略/字幕优先防错位/引擎回退链/三引擎内部/分片补录/横评结论/参数速查/坑点汇总 | 改转录链任何环节前必读 |
-| `backend/services/` | 分段、摘要、翻译、导出、搜索等处理 | 改具体媒体流程 |
+| `backend/services/` | 分段、摘要、导出、搜索等处理（`prompt_builder.py` 模块化提示词 9 维度含输出语言） | 改具体媒体流程 |
 | `backend/routers/jobs.py` | 任务核心域：上传/提交/列表/删除/清理/取消/重试/编辑结果 + 共享的 `normalize_url`/`extract_urls` | 改任务生命周期 API |
 | `backend/routers/jobs_ai.py` | AI 域：重新总结/总结历史/标签/思维导图 | 改 AI 重跑相关端点 |
 | `backend/routers/jobs_batch.py` | 批量域：批量提交/批量状态/转录全文搜索 | 改批量提交或跨任务搜索 |
-| `backend/routers/` | 其余 API 路由（models/summary/export/translate/bilibili/download/templates/chat/search/storage cleanup/asr；export 含单任务 4 格式与 `/export/batch` 批量 ZIP；asr 的 `/api/asr/status` 含 `recommended_engine` 免费优先推荐） | 加/改其他 HTTP API |
+| `backend/routers/` | 其余 API 路由（models/summary/export/bilibili/download/templates/chat/search/storage cleanup/asr；export 含单任务 4 格式与 `/export/batch` 批量 ZIP；asr 的 `/api/asr/status` 含 `recommended_engine` 免费优先推荐） | 加/改其他 HTTP API |
 | `backend/socket_handlers.py` | 实时日志和进度事件 | 改前端实时反馈 |
 | `backend/scripts/cleanup_storage.py` | staged/orphan/export/media 清理 | 改清理策略；删除必须显式确认 |
-| `backend/scripts/export_openapi.py` + `contracts/` | 导出/存放 OpenAPI 契约快照（`openapi.json`，68 端点） | 改后端 API 后重新导出；查全部端点契约时读它 |
+| `backend/scripts/export_openapi.py` + `contracts/` | 导出/存放 OpenAPI 契约快照（`openapi.json`，66 端点） | 改后端 API 后重新导出；查全部端点契约时读它 |
 | `backend/verify.py` | 一键验证：backend pytest + frontend vitest + vite build | 改完代码做全量验证，或想快速回归 |
 | `frontend/src/utils/` | api 封装（axios 拦截器/错误归一化）、jobActions、modelDisplay（引擎-模型显示名）、clipboard/recipes/errorNotice 等工具 | 改 HTTP 调用或共享工具行为 |
 | `frontend/src/views/HomeView.vue` | 核心工作台视图（逻辑拆到 composables，卡片区拆为下面的 Home* 子组件） | 改表单/提交/结果展示 |
@@ -66,7 +66,7 @@ python main.py
 
 ## 当前状态
 
-- 已实现：下载/导入、字幕/Whisper、任务并发、Socket.IO 进度、摘要/翻译、导出、token 用量和受保护的存储清理。
+- 已实现：下载/导入、字幕/Whisper、任务并发、Socket.IO 进度、摘要（输出语言可选，默认中文）、导出、token 用量和受保护的存储清理。
 - 运行数据默认落在 `backend/data`；服务重启不会继续执行内存中的 Python 任务，但会处理启动时的中断记录。
 - 治理基础设施（2026-08-09 bootstrap）：`.trellis/`（scripts/config/workflow/spec/tasks 已入库）+ CodeGraph 索引已 init（不入库）+ `.agents/skills/`（9 个 trellis skill 入库）。
 - 批量 URL 已修（2026-08-09，task 08-09-fix-batch-url-dedup 已归档）：`batch_submit` 读取 `force_new`（默认 True，与单 URL 路径对齐），裸 BV/短链经 `sanitize_input_url` 补全。
@@ -102,3 +102,4 @@ python main.py
 - 前端 ESLint 接入（2026-09-12，task 09-12-frontend-eslint-lint 已归档，pytest 586 / vitest 61 / lint 全绿）：①flat config（eslint 10 + eslint-plugin-vue 10，js recommended + vue essential，不引格式类规则；`vue/multi-word-component-names` off）；②`npm run lint` 新增，`verify.py` frontend 环节纳入 lint 作为门禁；③清理 27 处存量问题（未使用 import/变量、空 catch 加注释显式化、删除 ModelsView 死函数 `handleFetchModels`、HistoryView 冗余赋值）。
 - HomeView 巨型文件拆分（2026-09-12，task 09-12-homeview-split 已归档，pytest 586 / lint + vitest 61 / build 全绿 + 浏览器端到端无 console 错误）：①slice-0 卡片通用类（`wb-card-title`/`card-head-*`/`mono-tag`/`log-panel`/`log-empty`/`log-time`/`adv-field-hint`）从 HomeView scoped 提升到 App.vue 全局（子组件 scoped 不跨组件，拆前必须先提升）；②五个切片拆出 `BackendLogPanel`/`HomeAdvancedOptions`/`BatchResultPanel`/`JobProgressPanel`/`HomeTokenPanel`；③HomeView 2063 → 1162 行（-44%）；④socket `onProgress`/`onLog` 监听随进度卡迁入组件（v-if 挂载语义不变），`scrollToJobProgress` 改调组件 `expose` 的 `reveal()`；⑤未拆：输入区/结果区（与 handleSubmit/useJobRestore 强耦合，留给后续切片）。
 - AI 校正链配置化与实测调优（2026-09-12，无 task，6 提交）：①校正默认模型入 `app_settings`（键 `default_correct_model`，repo 读写 + `GET /api/models` 返回 `correct_default` + `POST /api/models/default` 增 `scope=correct`）；当前值=longcat-2-0（用户定；glm-5-2 实测更慢 ~18 tok/s vs 龙猫 69 tok/s）；解析链 options.ai_correct_model → DB 默认 → 总结主模型；②`correct_transcript_with_fallback` 自动换模型兜底：模型异常或整批无效（failed+integrity==total>0）即换候选（上限 3 个备选，取消绝不重试），决策 logger+socket 双落盘；③默认校正提示词加克制原则（只改转写错/拿不准保留/不整句重写，与 tcm 模板对齐）；④★校正分块 80000→8000 字符——商汤系流式实测 18-69 tok/s，大块必撞 `_call_ai` 的 600s 单轮超时（当晚 glm-5.2/longcat/sensenova 全超时的根因），8k 块龙猫实测 106s/块稳态完成；⑤前端「强制转录」「AI 校正」移入处理流程栏成 tile（原「强制 Whisper 转录」名称误导：跳的是字幕提取、引擎未必 Whisper；原位置暗示校正只对转录生效——实际 Step 1.5 对一切 txt 生效，字幕路径同样校正），校正领域/模型子选项随迁。坑：换模型决策此前只发 socket，服务端排障不可见；商汤端点当晚多次 429（部分块失败可容忍，整批失败才换模型）。遗留可选（未做）：模型管理页「设为校正默认」按钮（API 已有，前端约半小时）。
+- 翻译功能整体删除 + 输出语言维度（2026-09-12，task 09-12-translate-module-merge 已归档，pytest 602 / vitest 61 / lint + build 全绿，7 提交）：原计划"合并全文翻译/字幕翻译"，调查后用户转向**删除翻译功能**（多处断头路：目标语言无入口、译文不可见、bilingual/langs 死端点、字幕翻译批次失败静默回退原文）。删除：main.py Step4/5、`ai_processor.translate_subtitles`、`routers/translate.py`（/api/translate/* 全下线）、SUMMARY_PROMPTS["translate"]、CATEGORY_PROMPTS、TRANSLATE_LANGS、JobCreate/create_job 的 do_translate/do_subtitle；前端开关/提交字段/restore 回填/translateApi。替代需求：**输出语言做成第 9 个提示词维度**（`prompt_builder.PROMPT_DIMENSIONS.language`，默认简体中文，`LANGUAGE_DESCS`：简体/繁体/英语/跟随素材），拼装在选项块字数之后；`matchRecipeKey` 跳过配方未定义的维度（内置配方 8 维不含 language，否则配方高亮全失效）；历史任务 dimensions 缺 language 键由 get_default_dimensions 兜底。历史兼容：旧 job options 的 do_translate/do_subtitle 键 inert 保留；旧翻译产物文件仍可从素材下拉下载（labelMap 保留）。openapi 68→66 端点已重导出。坑：pytest 必须在 `backend/` 目录下跑（从仓库根跑会因 rootdir 错位假报 13 个失败）。
