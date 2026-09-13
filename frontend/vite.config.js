@@ -18,13 +18,14 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      // 开发时前端请求代理到后端
+      // 开发时前端请求代理到后端（用 127.0.0.1 而非 localhost：Node 会把 localhost 解析为 ::1，
+      // 后端监听的是 IPv4，代理会连不上）
       '/api': {
-        target: 'http://localhost:7001',
+        target: 'http://127.0.0.1:7001',
         changeOrigin: true,
       },
       '/ws': {
-        target: 'http://localhost:7001',
+        target: 'http://127.0.0.1:7001',
         changeOrigin: true,
         ws: true,  // WebSocket proxy
       },
