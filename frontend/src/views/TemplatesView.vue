@@ -99,6 +99,9 @@ const selectedModule = ref('')
 const editingText = ref('')
 const originalDefault = ref('')  // 代码默认文本（用于对比/恢复）
 const isCustomized = ref(false)  // 当前模块是否已被覆盖
+const isCustomModule = ref(false) // 是否为模板中心新增的自定义模块（无代码默认）
+const backupOriginal = ref('')   // 最初版本（首次自定义文本）
+const backupPrevious = ref('')   // 上一版本（最近一次覆盖前）
 const loading = ref(false)
 const saving = ref(false)
 const dirty = ref(false)
@@ -133,6 +136,9 @@ async function doSelect(dimKey, moduleKey) {
     const res = await summaryApi.getOverride(dimKey, moduleKey)
     originalDefault.value = res.default_text || ''
     isCustomized.value = res.is_customized
+    isCustomModule.value = !!res.is_custom_module
+    backupOriginal.value = res.original_text || ''
+    backupPrevious.value = res.previous_text || ''
     editingText.value = res.custom_text || res.default_text || ''
   } catch (err) {
     ElMessage.error('加载模块失败: ' + (err.message || err))
@@ -159,6 +165,7 @@ async function handleSave() {
     isCustomized.value = true
     dirty.value = false
     await settings.reloadDimensions()
+    await doSelect(selectedDim.value, selectedModule.value)  // 刷新备份字段（文本变更时旧文本已轮转入备份）
   } catch (err) {
     ElMessage.error('保存失败: ' + (err.message || err))
   } finally {
@@ -168,21 +175,53 @@ async function handleSave() {
 
 async function handleReset() {
   if (!selectedDim.value || !selectedModule.value) return
+  const isCustom = isCustomModule.value
+  const confirmMsg = isCustom
+    ? `确认删除自定义模块「${getSelectedModuleInfo()?.name || selectedModule.value}」？它将从维度选择器中移除。`
+    : `确认恢复「${selectedDim.value} / ${selectedModule.value}」为代码默认？自定义内容将被删除。`
   try {
-    await ElMessageBox.confirm(
-      `确认恢复「${selectedDim.value} / ${selectedModule.value}」为代码默认？自定义内容将被删除。`,
-      '恢复默认',
-      { type: 'warning' }
-    )
+    await ElMessageBox.confirm(confirmMsg, isCustom ? '删除自定义模块' : '恢复默认', { type: 'warning' })
     await summaryApi.deleteOverride(selectedDim.value, selectedModule.value)
-    ElMessage.success('已恢复默认')
+    ElMessage.success(isCustom ? '已删除' : '已恢复默认')
     isCustomized.value = false
     dirty.value = false
-    await doSelect(selectedDim.value, selectedModule.value)
     await settings.reloadDimensions()
+    if (isCustom) {
+      // 自定义模块删除后不复存在，改选该维度第一个模块
+      const dim = dimensionList.value.find(d => d.key === selectedDim.value)
+      const first = dim?.modules?.[0]
+      if (first) await doSelect(selectedDim.value, first.key)
+    } else {
+      await doSelect(selectedDim.value, selectedModule.value)
+    }
   } catch (err) {
-    if (!isDialogCancel(err)) ElMessage.error('恢复失败: ' + (err?.message || err))
+    if (!isDialogCancel(err)) ElMessage.error('操作失败: ' + (err?.message || err))
   }
+}
+
+// ============ 覆盖备份恢复 + 一键用默认文本覆盖 ============
+const restoring = ref(false)
+
+async function handleRestoreBackup(version) {
+  if (!selectedDim.value || !selectedModule.value) return
+  restoring.value = true
+  try {
+    await summaryApi.restoreOverride(selectedDim.value, selectedModule.value, version)
+    ElMessage.success(version === 'original' ? '已恢复最初版本（当前文本转入上一版本备份）' : '已恢复上一版本')
+    await settings.reloadDimensions()
+    await doSelect(selectedDim.value, selectedModule.value)
+  } catch (err) {
+    ElMessage.error('恢复失败: ' + (err?.message || err))
+  } finally {
+    restoring.value = false
+  }
+}
+
+// 一键覆盖：把代码默认文本写入并立即保存（旧自定义文本自动进备份）
+async function handleOverwriteWithDefault() {
+  if (!selectedDim.value || !selectedModule.value || !originalDefault.value) return
+  editingText.value = originalDefault.value
+  await handleSave()
 }
 
 async function handleResetAll() {
@@ -222,22 +261,55 @@ function openNewModuleDialog(dimKey) {
   newModuleDialog.value = true
 }
 
+// key 生成：与配方 genRecipeKey 同风格，中英文皆可，非法字符转下划线，撞名自动加序号
+function genModuleKey(name, taken) {
+  const base = (name || 'module').replace(/[^a-zA-Z0-9\u4e00-\u9fa5]+/g, '_').replace(/^_+|_+$/g, '') || 'module'
+  let key = base
+  let i = 1
+  while (taken.has(key)) { key = `${base}_${i++}` }
+  return key
+}
+
 async function saveNewModule() {
-  if (!newModuleKey.value || !newModuleText.value.trim()) {
-    ElMessage.warning('请填写模块 key 和提示词文本')
+  const dimKey = newModuleDim.value
+  const name = newModuleName.value.trim()
+  const text = newModuleText.value.trim()
+  if (!name) {
+    ElMessage.warning('请填写模块名称')
     return
+  }
+  if (!text) {
+    ElMessage.warning('请填写提示词文本')
+    return
+  }
+  // 同维度现有模块（内置 + 已有自定义）的 key/名称查重——每个维度可加多个，但不能撞车
+  const dim = dimensionList.value.find(d => d.key === dimKey)
+  const existing = dim?.modules || []
+  if (existing.some(m => m.name === name)) {
+    ElMessage.warning(`该维度下已有名为「${name}」的模块，请换个名称`)
+    return
+  }
+  let key = newModuleKey.value.trim()
+  if (key) {
+    if (existing.some(m => m.key === key)) {
+      ElMessage.warning(`模块标识「${key}」已存在，请换一个（或留空自动生成）`)
+      return
+    }
+  } else {
+    key = genModuleKey(name, new Set(existing.map(m => m.key)))
   }
   saving.value = true
   try {
     await summaryApi.upsertOverride({
-      dimension_key: newModuleDim.value,
-      module_key: newModuleKey.value,
-      custom_text: newModuleText.value,
+      dimension_key: dimKey,
+      module_key: key,
+      custom_text: text,
+      display_name: name,
     })
-    ElMessage.success(`新模块「${newModuleName.value || newModuleKey.value}」已保存`)
+    ElMessage.success(`自定义模块「${name}」已保存，可在该维度中选用`)
     newModuleDialog.value = false
     await settings.reloadDimensions()
-    await doSelect(newModuleDim.value, newModuleKey.value)
+    await doSelect(dimKey, key)
   } catch (err) {
     ElMessage.error('保存失败: ' + (err.message || err))
   } finally {
@@ -423,7 +495,8 @@ async function applyLib(item) {
                   @click="selectModule(dim.key, m.key)"
                 >
                   <span class="module-tree-name" :title="m.name">{{ m.name }}</span>
-                  <el-tag v-if="m.is_customized" type="warning" size="small">自定义</el-tag>
+                  <el-tag v-if="m.is_custom" type="success" size="small">自定义</el-tag>
+                  <el-tag v-else-if="m.is_customized" type="warning" size="small">已覆盖</el-tag>
                 </div>
               </div>
             </div>
@@ -439,15 +512,23 @@ async function applyLib(item) {
                     <span style="color: var(--app-text-secondary); font-weight: normal;">/</span>
                     {{ getSelectedModuleInfo()?.name || selectedModule }}
                   </span>
-                  <el-tag v-if="isCustomized" type="warning" size="small" style="margin-left: 8px;">已自定义</el-tag>
+                  <el-tag v-if="isCustomModule" type="success" size="small" style="margin-left: 8px;">自定义模块</el-tag>
+                  <el-tag v-else-if="isCustomized" type="warning" size="small" style="margin-left: 8px;">已覆盖默认</el-tag>
                   <el-tag v-else type="info" size="small" style="margin-left: 8px;">代码默认</el-tag>
                 </div>
                 <div class="edit-actions">
-                  <el-button size="small" @click="editingText = originalDefault; dirty = true" :disabled="!originalDefault">
-                    恢复到默认文本
+                  <el-button
+                    v-if="originalDefault"
+                    size="small"
+                    :loading="saving"
+                    :disabled="!dirty && editingText === originalDefault"
+                    @click="handleOverwriteWithDefault"
+                    title="用代码默认文本覆盖当前内容并立即保存，旧内容自动进备份"
+                  >
+                    用默认文本覆盖
                   </el-button>
                   <el-button v-if="isCustomized" size="small" type="danger" :icon="Trash2" @click="handleReset">
-                    删除覆盖
+                    {{ isCustomModule ? '删除模块' : '删除覆盖' }}
                   </el-button>
                   <el-button size="small" type="primary" :icon="Pencil" :loading="saving" @click="handleSave" :disabled="!dirty">
                     保存
@@ -470,8 +551,36 @@ async function applyLib(item) {
               />
 
               <el-collapse style="margin-top: 12px;">
-                <el-collapse-item title="查看代码默认文本" name="default">
-                  <pre class="default-text-ref">{{ originalDefault || '（无默认文本）' }}</pre>
+                <el-collapse-item v-if="originalDefault" title="查看代码默认文本" name="default">
+                  <pre class="default-text-ref">{{ originalDefault }}</pre>
+                </el-collapse-item>
+                <el-collapse-item
+                  v-if="backupOriginal || backupPrevious"
+                  title="覆盖备份（覆盖前的旧文本，可一键恢复）"
+                  name="backup"
+                >
+                  <div v-if="backupOriginal" class="backup-block">
+                    <div class="backup-head">
+                      <span class="backup-label">最初版本（首次自定义的文本）</span>
+                      <el-button
+                        size="small" type="primary" plain :loading="restoring"
+                        :disabled="backupOriginal === editingText"
+                        @click="handleRestoreBackup('original')"
+                      >恢复此版本</el-button>
+                    </div>
+                    <pre class="default-text-ref backup-text">{{ backupOriginal }}</pre>
+                  </div>
+                  <div v-if="backupPrevious" class="backup-block">
+                    <div class="backup-head">
+                      <span class="backup-label">上一版本（最近一次覆盖前的文本）</span>
+                      <el-button
+                        size="small" type="primary" plain :loading="restoring"
+                        :disabled="backupPrevious === editingText"
+                        @click="handleRestoreBackup('previous')"
+                      >恢复此版本</el-button>
+                    </div>
+                    <pre class="default-text-ref backup-text">{{ backupPrevious }}</pre>
+                  </div>
                 </el-collapse-item>
               </el-collapse>
             </template>
@@ -555,15 +664,15 @@ async function applyLib(item) {
     <!-- 新增自定义模块弹窗 -->
     <el-dialog v-model="newModuleDialog" title="新增自定义模块" width="600px" destroy-on-close>
       <div style="font-size: 12px; color: var(--app-text-secondary); margin-bottom: 12px;">
-        为维度「{{ dimensionList.find(d => d.key === newModuleDim)?.label }}」新增一个自定义模块。
-        保存后会出现在 DimensionSelector 的对应维度中。
+        为维度「{{ dimensionList.find(d => d.key === newModuleDim)?.label }}」新增一个自定义模块，可添加多个。
+        保存后会出现在左侧模块树和 DimensionSelector 的对应维度中。
       </div>
       <el-form label-width="80px">
-        <el-form-item label="模块 key" required>
-          <el-input v-model="newModuleKey" placeholder="如：my_custom_role（英文标识符）" />
+        <el-form-item label="名称" required>
+          <el-input v-model="newModuleName" placeholder="如：我的自定义角色（同维度内不可重名）" maxlength="40" />
         </el-form-item>
-        <el-form-item label="显示名称">
-          <el-input v-model="newModuleName" placeholder="如：我的自定义角色（留空则用 key）" />
+        <el-form-item label="标识 key">
+          <el-input v-model="newModuleKey" placeholder="留空自动生成（支持英文/数字/中文）" />
         </el-form-item>
         <el-form-item label="提示词" required>
           <el-input
@@ -779,6 +888,27 @@ async function applyLib(item) {
   overflow-y: auto;
   margin: 0;
   transition: background 0.25s, color 0.25s;
+}
+/* 覆盖备份面板 */
+.backup-block {
+  margin-bottom: 12px;
+}
+.backup-block:last-child {
+  margin-bottom: 0;
+}
+.backup-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.backup-label {
+  font-size: 12px;
+  color: var(--app-text);
+  font-weight: 600;
+}
+.backup-text {
+  max-height: 120px;
 }
 .empty-hint {
   display: flex;

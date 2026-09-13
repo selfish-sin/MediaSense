@@ -116,6 +116,9 @@ export const summaryApi = {
   upsertOverride: (data) => api.put('/summary/overrides', data),
   deleteOverride: (dimKey, modKey) => api.delete(`/summary/overrides/${dimKey}/${modKey}`),
   resetAllOverrides: () => api.delete('/summary/overrides'),
+  // 一键恢复备份：version = 'original'（最初版本）| 'previous'（上一版本）
+  restoreOverride: (dimKey, modKey, version) =>
+    api.post(`/summary/overrides/${dimKey}/${modKey}/restore`, { version }),
   // 兼容旧 API（保留空实现）
   types: () => Promise.resolve({ types: [] }),
   options: () => Promise.resolve({ options: {} }),
