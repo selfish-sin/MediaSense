@@ -1,7 +1,7 @@
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { RefreshCcw, Eye, EyeOff } from 'lucide-vue-next'
+import { RefreshCcw, Eye, EyeOff, ArrowDown } from 'lucide-vue-next'
 import { useModelStore } from '../stores/modelStore'
 import { modelsApi } from '../utils/api'
 import { modelDisplayName } from '../utils/modelDisplay'
@@ -183,6 +183,13 @@ async function handleDelete(key) {
   }
 }
 
+// 行内「更多」下拉：command 路由到既有处理函数（测试/设为默认/删除）
+function handleRowCommand(cmd, row) {
+  if (cmd === 'test') { handleTest(row.key); return }
+  if (cmd === 'setDefault') { handleSetDefault(row.key); return }
+  if (cmd === 'delete') { handleDelete(row.key); return }
+}
+
 async function handleTest(key) {
   testing.value = true
   testResult.value = null
@@ -284,9 +291,19 @@ async function handleQuickAdd(modelId) {
   }
 }
 
+// 窄窗口（< 1240px）隐藏次要列：全列宽约 820px，低于该宽度时 Element Plus
+// 会裁切超出部分并让 fixed 操作列覆盖相邻列（视觉重叠），这里降级为关键列
+const COMPACT_WIDTH = 1240
+const isCompact = ref(window.innerWidth < COMPACT_WIDTH)
+function updateCompact() {
+  isCompact.value = window.innerWidth < COMPACT_WIDTH
+}
+
 onMounted(() => {
+  window.addEventListener('resize', updateCompact)
   modelStore.loadModels()
 })
+onUnmounted(() => window.removeEventListener('resize', updateCompact))
 </script>
 
 <template>
@@ -300,7 +317,8 @@ onMounted(() => {
 
     <el-card class="app-card" shadow="never">
       <el-table :data="modelStore.models" v-loading="modelStore.loading" stripe style="width: 100%;">
-      <el-table-column label="名称" width="260" show-overflow-tooltip>
+      <!-- 列宽一律 min-width：容器变窄时由 Element Plus 触发横向滚动（固定 width 会被裁切） -->
+      <el-table-column label="名称" min-width="200" show-overflow-tooltip>
         <template #default="{ row }">
           <div style="display: flex; align-items: center; gap: 6px;">
             <span>{{ modelDisplayName(row) }}</span>
@@ -308,26 +326,30 @@ onMounted(() => {
           </div>
         </template>
       </el-table-column>
-      <el-table-column prop="endpoint" label="端点" min-width="260" show-overflow-tooltip />
-      <el-table-column prop="model_id" label="模型ID" width="160" show-overflow-tooltip />
-      <el-table-column prop="auth_type" label="认证" width="76" show-overflow-tooltip />
-      <el-table-column label="默认" width="70" align="center">
+      <el-table-column prop="endpoint" label="端点" min-width="240" show-overflow-tooltip />
+      <el-table-column v-if="!isCompact" prop="model_id" label="模型ID" min-width="130" show-overflow-tooltip />
+      <el-table-column v-if="!isCompact" prop="auth_type" label="认证" min-width="64" show-overflow-tooltip />
+      <el-table-column v-if="!isCompact" label="默认" min-width="60" align="center">
         <template #default="{ row }">
           <el-tag v-if="isDefaultModel(row)" type="success" size="small">默认</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="220" fixed="right">
+      <!-- 操作列：编辑常显，「更多」下拉收纳测试/设默认/删除，避免窄窗口下覆盖相邻列 -->
+      <el-table-column label="操作" min-width="130" fixed="right">
         <template #default="{ row }">
           <el-button size="small" link type="primary" @click="openEditDialog(row)">编辑</el-button>
-          <el-button size="small" link @click="handleTest(row.key)" :loading="testing">测试</el-button>
-          <el-button
-            v-if="!isDefaultModel(row)"
-            size="small"
-            link
-            type="warning"
-            @click="handleSetDefault(row.key)"
-          >设为默认</el-button>
-          <el-button size="small" type="danger" link @click="handleDelete(row.key)" :disabled="row.is_builtin">删除</el-button>
+          <el-dropdown trigger="click" @command="(cmd) => handleRowCommand(cmd, row)">
+            <el-button size="small" link class="row-more-btn">
+              更多<el-icon class="row-more-arrow"><ArrowDown /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="test">测试连接</el-dropdown-item>
+                <el-dropdown-item v-if="!isDefaultModel(row)" command="setDefault">设为默认</el-dropdown-item>
+                <el-dropdown-item divided command="delete" :disabled="row.is_builtin">删除</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </template>
       </el-table-column>
     </el-table>
