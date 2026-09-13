@@ -346,7 +346,7 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
 </script>
 
 <template>
-  <div style="max-width: 1200px; margin: 0 auto; padding: 24px;">
+  <div class="page-container">
     <!-- 标题 + 搜索 + 清空：合并成一个工具条卡片 -->
     <el-card class="app-card" shadow="never" style="margin-bottom: 16px;">
       <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">

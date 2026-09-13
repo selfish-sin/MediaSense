@@ -307,7 +307,7 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
 </script>
 
 <template>
-  <div style="max-width: 1200px; margin: 0 auto; padding: 24px;">
+  <div class="page-container">
     <el-card class="app-card" shadow="never" style="margin-bottom: 16px;">
       <div style="display: flex; justify-content: space-between; align-items: center;">
         <h2 style="margin: 0;">AI模型管理</h2>

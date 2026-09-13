@@ -334,7 +334,7 @@ async function applyLib(item) {
 </script>
 
 <template>
-  <div class="templates-page" style="max-width: 1200px; margin: 0 auto; padding: 24px;">
+  <div class="templates-page page-container">
     <!-- 顶部标题 + Tab 切换 -->
     <el-card class="app-card" shadow="never" style="margin-bottom: 16px;">
       <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -422,7 +422,7 @@ async function applyLib(item) {
                   :class="{ active: selectedDim === dim.key && selectedModule === m.key }"
                   @click="selectModule(dim.key, m.key)"
                 >
-                  <span class="module-tree-name">{{ m.name }}</span>
+                  <span class="module-tree-name" :title="m.name">{{ m.name }}</span>
                   <el-tag v-if="m.is_customized" type="warning" size="small">自定义</el-tag>
                 </div>
               </div>

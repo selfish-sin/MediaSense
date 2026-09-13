@@ -848,4 +848,34 @@ h2, h3 { color: var(--app-text-heading) !important; }
 .bg-drawer .el-drawer__body {
   padding: 20px;
 }
+
+/* ============ 页面容器（2026-09-13 统一；此前各视图各自内联 max-width/margin/padding） ============ */
+.page-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+/* ============ 空态统一（2026-09-13） ============ */
+/* Element Plus 默认插图是浅灰纸箱，深色主题下很突兀：换成主色柔光圆点 + 次级色文案 */
+.el-empty {
+  padding: 16px 0 !important;
+}
+.el-empty__image svg {
+  display: none;
+}
+.el-empty__image::before {
+  content: '';
+  display: block;
+  width: 52px;
+  height: 52px;
+  margin: 0 auto 6px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 32% 32%, var(--app-accent-1, #38bdf8), var(--app-accent-2, #7b5cff));
+  opacity: 0.18;
+}
+.el-empty__description p {
+  color: var(--app-text-secondary) !important;
+  font-size: 13px !important;
+}
 </style>
