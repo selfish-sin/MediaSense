@@ -641,37 +641,43 @@ def get_default_dimensions() -> Dict[str, str]:
 
 
 # ============ DB 覆盖层（prompt_module_overrides 表） ============
-def _load_module_overrides() -> Dict[str, Dict[str, str]]:
+def _load_override_rows() -> List[Dict]:
     """
-    从数据库加载模块文本覆盖（dimension_key → {module_key → custom_text}）
-    如果 DB 不可用或表不存在，返回空 dict（降级到代码默认）
+    从数据库加载覆盖原始行（含 display_name 等元数据）
+    如果 DB 不可用或表不存在，返回空 list（降级到代码默认）
     """
     try:
         from db.database import get_connection
         conn = get_connection()
         rows = conn.execute(
-            "SELECT dimension_key, module_key, custom_text FROM prompt_module_overrides"
+            "SELECT dimension_key, module_key, custom_text, display_name "
+            "FROM prompt_module_overrides"
         ).fetchall()
         conn.close()
-        overrides: Dict[str, Dict[str, str]] = {}
-        for r in rows:
-            dim = r["dimension_key"]
-            mod = r["module_key"]
-            txt = r["custom_text"] or ""
-            if dim not in overrides:
-                overrides[dim] = {}
-            overrides[dim][mod] = txt
-        return overrides
+        return [dict(r) for r in rows]
     except Exception:
         # 表不存在或 DB 异常：降级到代码默认
-        return {}
+        return []
+
+
+def _load_module_overrides() -> Dict[str, Dict[str, str]]:
+    """
+    从数据库加载模块文本覆盖（dimension_key → {module_key → custom_text}）
+    如果 DB 不可用或表不存在，返回空 dict（降级到代码默认）
+    """
+    overrides: Dict[str, Dict[str, str]] = {}
+    for r in _load_override_rows():
+        dim = r["dimension_key"]
+        mod = r["module_key"]
+        overrides.setdefault(dim, {})[mod] = r["custom_text"] or ""
+    return overrides
 
 
 def _get_module_template(dim_key: str, module_key: str,
                          overrides: Optional[Dict[str, Dict[str, str]]] = None) -> str:
     """
     获取某个维度下某个模块的 template 文本
-    优先级：DB 覆盖 > 代码默认
+    优先级：DB 覆盖 > 代码默认（自定义模块只存在于覆盖层，天然走第 1 优先级）
     """
     # 1. 先查 DB 覆盖
     if overrides and dim_key in overrides and module_key in overrides[dim_key]:
@@ -687,9 +693,16 @@ def _get_module_template(dim_key: str, module_key: str,
 def get_dimensions_with_overrides() -> dict:
     """
     返回带 DB 覆盖文本的完整维度定义（供前端 /dimensions API）
-    标注每个模块是否被自定义覆盖
+    标注每个模块是否被自定义覆盖；内置模块之后的自定义模块
+    （module_key 不在代码内置列表，模板中心「新增自定义模块」产生）追加到维度末尾
     """
-    overrides = _load_module_overrides()
+    rows = _load_override_rows()
+    overrides: Dict[str, Dict[str, str]] = {}
+    display_names: Dict[tuple, str] = {}
+    for r in rows:
+        dim, mod = r["dimension_key"], r["module_key"]
+        overrides.setdefault(dim, {})[mod] = r["custom_text"] or ""
+        display_names[(dim, mod)] = r["display_name"] or ""
     result = {}
     for dim_key, dim_cfg in PROMPT_DIMENSIONS.items():
         dim_copy = {
@@ -707,6 +720,19 @@ def get_dimensions_with_overrides() -> dict:
             else:
                 m_copy["is_customized"] = False
             dim_copy["modules"].append(m_copy)
+        # 自定义模块：覆盖表里有、代码内置列表没有的 module_key
+        builtin_keys = {m["key"] for m in dim_cfg["modules"]}
+        for mod_key, text in dim_overrides.items():
+            if mod_key in builtin_keys:
+                continue
+            dim_copy["modules"].append({
+                "key": mod_key,
+                "name": display_names.get((dim_key, mod_key)) or mod_key,
+                "desc": "自定义模块（模板中心新增）",
+                "template": text,
+                "is_customized": True,
+                "is_custom": True,
+            })
         result[dim_key] = dim_copy
     return result
 

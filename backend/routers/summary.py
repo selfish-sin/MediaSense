@@ -16,6 +16,7 @@ from services.prompt_builder import (
 )
 from db.prompt_override_repo import (
     list_overrides, get_override, upsert_override, delete_override, reset_all_overrides,
+    restore_override_backup,
 )
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,11 @@ class ModuleOverrideUpsert(BaseModel):
     dimension_key: str
     module_key: str
     custom_text: str
+    display_name: Optional[str] = None  # 自定义模块显示名；None/空=保留原值（普通编辑保存不改名）
+
+
+class OverrideRestoreBody(BaseModel):
+    version: str  # 'original'=最初版本 / 'previous'=上一版本
 
 
 @router.get("/overrides")
@@ -91,14 +97,16 @@ async def api_list_overrides():
 
 @router.get("/overrides/{dimension_key}/{module_key}")
 async def api_get_override(dimension_key: str, module_key: str):
-    """获取单个模块覆盖（不存在则返回 default template）"""
+    """获取单个模块覆盖（不存在则返回 default template；自定义模块无代码默认文本）"""
     ov = get_override(dimension_key, module_key)
     # 从 PROMPT_DIMENSIONS 取默认文本作为参考
     default_text = ""
+    is_custom_module = True
     dim = PROMPT_DIMENSIONS.get(dimension_key, {})
     for m in dim.get("modules", []):
         if m["key"] == module_key:
             default_text = m.get("template", "")
+            is_custom_module = False
             break
     return {
         "dimension_key": dimension_key,
@@ -106,12 +114,16 @@ async def api_get_override(dimension_key: str, module_key: str):
         "custom_text": ov["custom_text"] if ov else None,
         "default_text": default_text,
         "is_customized": ov is not None,
+        "is_custom_module": ov is not None and is_custom_module,
+        "display_name": (ov["display_name"] if ov else "") or "",
+        "original_text": (ov["original_text"] if ov else "") or "",
+        "previous_text": (ov["previous_text"] if ov else "") or "",
     }
 
 
 @router.put("/overrides")
 async def api_upsert_override(body: ModuleOverrideUpsert):
-    """新增/更新模块覆盖"""
+    """新增/更新模块覆盖（文本变更时旧文本自动轮转进 previous_text 备份）"""
     if not body.custom_text.strip():
         raise HTTPException(status_code=400, detail="custom_text 不能为空（如需恢复默认请用 DELETE）")
     # 校验维度和模块存在
@@ -120,7 +132,21 @@ async def api_upsert_override(body: ModuleOverrideUpsert):
         raise HTTPException(status_code=400, detail=f"维度 {body.dimension_key} 不存在")
     valid_modules = [m["key"] for m in dim.get("modules", [])]
     # 允许覆盖未在代码中定义的 module_key（支持维度级自定义模块）
-    result = upsert_override(body.dimension_key, body.module_key, body.custom_text)
+    result = upsert_override(body.dimension_key, body.module_key, body.custom_text, body.display_name)
+    return {"success": True, "override": result}
+
+
+@router.post("/overrides/{dimension_key}/{module_key}/restore")
+async def api_restore_override(dimension_key: str, module_key: str, body: OverrideRestoreBody):
+    """一键恢复备份（original=最初版本 / previous=上一版本）；恢复本身也走备份轮转"""
+    if not PROMPT_DIMENSIONS.get(dimension_key):
+        raise HTTPException(status_code=400, detail=f"维度 {dimension_key} 不存在")
+    try:
+        result = restore_override_backup(dimension_key, module_key, body.version)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if result is None:
+        raise HTTPException(status_code=404, detail="没有可恢复的备份")
     return {"success": True, "override": result}
 
 

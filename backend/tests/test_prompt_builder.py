@@ -138,24 +138,56 @@ class TestLoadOverrides:
 
 
 class TestGetDimensionsWithOverrides:
+    @staticmethod
+    def _row(dim, mod, text, display_name=""):
+        return {"dimension_key": dim, "module_key": mod, "custom_text": text, "display_name": display_name}
+
     def test_returns_all_dims(self):
-        with patch("services.prompt_builder._load_module_overrides", return_value={}):
+        with patch("services.prompt_builder._load_override_rows", return_value=[]):
             result = get_dimensions_with_overrides()
             assert len(result) == 9
 
     def test_marks_customized(self):
-        overrides = {"role": {"general": "自定义"}}
-        with patch("services.prompt_builder._load_module_overrides", return_value=overrides):
+        with patch("services.prompt_builder._load_override_rows",
+                   return_value=[self._row("role", "general", "自定义")]):
             result = get_dimensions_with_overrides()
             general_mod = [m for m in result["role"]["modules"] if m["key"] == "general"][0]
             assert general_mod["is_customized"] is True
             assert general_mod["template"] == "自定义"
 
     def test_marks_not_customized(self):
-        with patch("services.prompt_builder._load_module_overrides", return_value={}):
+        with patch("services.prompt_builder._load_override_rows", return_value=[]):
             result = get_dimensions_with_overrides()
             general_mod = [m for m in result["role"]["modules"] if m["key"] == "general"][0]
             assert general_mod["is_customized"] is False
+
+    def test_appends_custom_modules(self):
+        rows = [
+            self._row("role", "my_role_a", "文本A", "我的角色A"),
+            self._row("role", "my_role_b", "文本B", "我的角色B"),
+        ]
+        with patch("services.prompt_builder._load_override_rows", return_value=rows):
+            result = get_dimensions_with_overrides()
+        customs = [m for m in result["role"]["modules"] if m.get("is_custom")]
+        assert [m["key"] for m in customs] == ["my_role_a", "my_role_b"]
+        assert [m["name"] for m in customs] == ["我的角色A", "我的角色B"]
+        assert all(m["is_customized"] for m in customs)
+        assert customs[0]["template"] == "文本A"
+
+    def test_custom_module_without_display_name_falls_back_to_key(self):
+        with patch("services.prompt_builder._load_override_rows",
+                   return_value=[self._row("rules", "my_rule", "文本")]):
+            result = get_dimensions_with_overrides()
+        custom = [m for m in result["rules"]["modules"] if m.get("is_custom")][0]
+        assert custom["name"] == "my_rule"
+
+    def test_override_of_builtin_not_duplicated_as_custom(self):
+        rows = [self._row("role", "general", "覆盖内置", "不该出现的名字")]
+        with patch("services.prompt_builder._load_override_rows", return_value=rows):
+            result = get_dimensions_with_overrides()
+        role_keys = [m["key"] for m in result["role"]["modules"]]
+        assert role_keys.count("general") == 1
+        assert not any(m.get("is_custom") for m in result["role"]["modules"])
 
 
 class TestToneAndWordCount:

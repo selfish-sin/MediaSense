@@ -1588,7 +1588,7 @@
           "summary"
         ],
         "summary": "Api Upsert Override",
-        "description": "新增/更新模块覆盖",
+        "description": "新增/更新模块覆盖（文本变更时旧文本自动轮转进 previous_text 备份）",
         "operationId": "api_upsert_override_api_summary_overrides_put",
         "requestBody": {
           "content": {
@@ -1646,7 +1646,7 @@
           "summary"
         ],
         "summary": "Api Get Override",
-        "description": "获取单个模块覆盖（不存在则返回 default template）",
+        "description": "获取单个模块覆盖（不存在则返回 default template；自定义模块无代码默认文本）",
         "operationId": "api_get_override_api_summary_overrides__dimension_key___module_key__get",
         "parameters": [
           {
@@ -1716,6 +1716,66 @@
             }
           }
         ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/summary/overrides/{dimension_key}/{module_key}/restore": {
+      "post": {
+        "tags": [
+          "summary"
+        ],
+        "summary": "Api Restore Override",
+        "description": "一键恢复备份（original=最初版本 / previous=上一版本）；恢复本身也走备份轮转",
+        "operationId": "api_restore_override_api_summary_overrides__dimension_key___module_key__restore_post",
+        "parameters": [
+          {
+            "name": "dimension_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Dimension Key"
+            }
+          },
+          {
+            "name": "module_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Module Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OverrideRestoreBody"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -3843,6 +3903,17 @@
           "custom_text": {
             "type": "string",
             "title": "Custom Text"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
           }
         },
         "type": "object",
@@ -3852,6 +3923,19 @@
           "custom_text"
         ],
         "title": "ModuleOverrideUpsert"
+      },
+      "OverrideRestoreBody": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "title": "Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "title": "OverrideRestoreBody"
       },
       "PreviewRequest": {
         "properties": {

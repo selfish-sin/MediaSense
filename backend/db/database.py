@@ -243,11 +243,26 @@ def init_db():
             dimension_key TEXT NOT NULL,
             module_key TEXT NOT NULL,
             custom_text TEXT NOT NULL,
+            display_name TEXT DEFAULT '',
+            original_text TEXT DEFAULT '',
+            previous_text TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(dimension_key, module_key)
         )
     """)
+
+    # ★ 自定义模块命名 + 覆盖备份列（迁移：旧表没有；
+    #   original_text=首次自定义文本一经写入不变，previous_text=最近一次文本变更前的旧文本）
+    for _stmt in (
+        "ALTER TABLE prompt_module_overrides ADD COLUMN display_name TEXT DEFAULT ''",
+        "ALTER TABLE prompt_module_overrides ADD COLUMN original_text TEXT DEFAULT ''",
+        "ALTER TABLE prompt_module_overrides ADD COLUMN previous_text TEXT DEFAULT ''",
+    ):
+        try:
+            cursor.execute(_stmt)
+        except sqlite3.OperationalError:
+            pass  # 字段已存在
 
     # 应用级设置表（键值对，如用户设置的默认模型）
     cursor.execute("""
