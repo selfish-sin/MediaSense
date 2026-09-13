@@ -281,9 +281,8 @@ class TestJobsRouter:
 
     @patch("routers.jobs_batch.create_job", return_value="job-1")
     @patch("main.start_job")
-    @patch("routers.jobs_batch.find_job_by_url")
-    def test_batch_force_new_skips_history_dedup(self, mock_find, mock_start, mock_create, client):
-        """force_new=True 时跳过 find_job_by_url 跨历史去重，允许重跑已处理过的 URL"""
+    def test_batch_force_new_ignored_never_dedups(self, mock_start, mock_create, client):
+        """force_new 键已废弃：批量永不查历史去重（去重只属于单任务路径）"""
         resp = client.post("/api/jobs/batch", json={
             "urls": ["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
             "force_new": True,
@@ -292,25 +291,44 @@ class TestJobsRouter:
         body = resp.json()
         assert body["count"] == 1
         assert body["skipped"] == 0
-        mock_find.assert_not_called()  # force_new=True 不查历史
         mock_create.assert_called_once()
         mock_start.assert_called_once_with("job-1")
 
     @patch("routers.jobs_batch.create_job", return_value="job-2")
     @patch("main.start_job")
-    @patch("routers.jobs_batch.find_job_by_url")
-    def test_batch_force_new_false_dedups_existing(self, mock_find, mock_start, mock_create, client):
-        """force_new=False 时已有 completed 任务的 URL 被跳过，返回 duplicates"""
-        mock_find.return_value = {"id": "old-job", "status": "completed", "title": "旧任务"}
+    def test_batch_never_dedups_multiform_urls(self, mock_start, mock_create, client):
+        """批量=排队：同一 BV 的分P链接/重复URL 全部建任务，不做规范化去重
+        （2026-09-13 用户场景：6 行分P链接被 BV 号去重后只剩 1 个任务）"""
+        urls = [
+            "https://www.bilibili.com/video/BV1rtXvBvE1W/?spm_id_from=a",
+            "https://www.bilibili.com/video/BV1rtXvBvE1W/?p=2&spm_id_from=a",
+            "https://www.bilibili.com/video/BV1rtXvBvE1W/?p=3&spm_id_from=a",
+        ]
+        resp = client.post("/api/jobs/batch", json={"urls": urls})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 3
+        assert body["skipped"] == 0
+        assert mock_create.call_count == 3
+
+    @patch("routers.jobs_batch.create_job", side_effect=lambda **kw: f"job-{kw['input_url'][:10]}")
+    @patch("main.start_job")
+    def test_batch_invalid_lines_reported(self, mock_start, mock_create, client):
+        """非 URL 行不建任务但不静默吞：行号随响应返回，其余行照常提交"""
         resp = client.post("/api/jobs/batch", json={
-            "urls": ["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
-            "force_new": False,
+            "urls": [
+                "https://www.bilibili.com/video/BV1RGN462EBs/",
+                "这是一行文字不是链接",
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            ],
         })
-        # 全部 URL 都被判重复 → 400
-        assert resp.status_code == 400
-        assert "重复" in resp.json()["detail"]
-        mock_find.assert_called_once()
-        mock_create.assert_not_called()
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 2
+        assert body["skipped"] == 1
+        assert body["invalid_lines"] == [{"line": 2, "text": "这是一行文字不是链接"}]
+        assert "第 2 行" in body["message"]
+        assert mock_create.call_count == 2
 
     @patch("routers.jobs_batch.create_job", return_value="job-bv")
     @patch("main.start_job")

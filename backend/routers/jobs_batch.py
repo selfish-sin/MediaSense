@@ -8,10 +8,9 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request, Query
 
-from db.job_repo import create_job, get_batch_summary, find_job_by_url
+from db.job_repo import create_job, get_batch_summary
 from db.model_repo import get_default_model_key
 from services.downloader import sanitize_input_url
-from routers.jobs import normalize_url
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -43,10 +42,13 @@ async def batch_submit(request: Request):
     """批量提交URL
     body: {"urls": ["url1","url2",...], "options": {...}}  或直接 ["url1","url2",...]（兼容旧前端缓存）
 
-    ★ 完善：①URL 去重过滤 ②生成 batch_id 聚合 ③传递完整参数（model/summary_type/开关）
     批量任务严格串行：创建全部子任务后只启动一个编排任务（_run_batch_sequential），
     按提交顺序逐个执行，一次只跑一个（用户要求"批量=任务序列"，防平台风控降级）；
     全局信号量（MAX_CONCURRENT_JOBS）仍对跨批量/单个任务生效。
+
+    ★ 提交即全跑（2026-09-13 用户定稿）：批量=排队，提交几行就跑几个，不做任何
+    URL 去重跳过（此前按 BV 号规范化去重，B站分P/合集多行链接被误判同一条静默
+    跳过，用户明确反对）。只清洗 URL；非 URL 行不建任务，行号随响应返回由前端告警。
     """
     import uuid
     from typing import List
@@ -68,7 +70,6 @@ async def batch_submit(request: Request):
         # ★ 批量固定不做转录预览确认：每任务直通总结，流程统一（用户要求批量不用确认）
         preview_before_summary = False
         dimensions = None
-        force_new = False  # 旧前端 list 格式无法表达 force_new，保守不去重
     else:
         urls = body.get("urls", [])
         opts = body.get("options", {}) or {}
@@ -78,8 +79,7 @@ async def batch_submit(request: Request):
         # ★ 批量固定不做转录预览确认：即使前端传了 preview_before_summary 也忽略，
         #   批量串行与「等待人工确认」天然冲突，会卡住后续任务
         preview_before_summary = False
-        # ★ 与单 URL 路径对齐：默认 force_new=True（用户主动批量提交即意图处理）
-        force_new = body.get("force_new", True)
+        # 旧客户端的 force_new 键已废弃（2026-09-13 起批量永不跳过），直接忽略
 
     if not isinstance(urls, list):
         raise HTTPException(status_code=400, detail='urls 必须是数组')
@@ -92,46 +92,21 @@ async def batch_submit(request: Request):
         # 模块化提示词：从顶层或 options.dimensions 提取
         dimensions = body.get("dimensions") or opts.get("dimensions")
 
-    # ★ URL 去重 + 清洗（智能提取URL + 去空行 + 去重复，保持顺序）
-    seen_norm = set()   # 规范化URL去重（同一视频不同query参数）
-    seen_raw = set()    # 原始URL去重（完全相同的字符串）
+    # ★ 只清洗不跳过（2026-09-13 用户定稿）：批量=排队，提交几行跑几行。
+    #   sanitize_input_url 负责裸BV/短链/包裹符号/编号前缀等清洗，与单 URL 路径同源；
+    #   注意它对纯文字行会原样返回（单任务路径让下游报错），批量这里以是否得到
+    #   http(s) 链接判定有效性——非 URL 行不建任务，记行号返回前端告警（不静默吞）。
     clean_urls: List[str] = []
-    skipped = 0
-    duplicates = []  # 跨历史重复的 URL，返回给前端用于跳转
-    for url in urls:
-        if not isinstance(url, str):
-            skipped += 1
-            continue
-        # ★ 用 sanitize_input_url 处理：支持裸 BV 号 / 裸短链(b23.tv) / 包裹符号 / 尾部标点
-        #   与单 URL 路径(process_job)用同一函数，保证两条路径对裸链接的处理一致
-        u = sanitize_input_url(url)
-        if not u:
-            # 无有效 URL，跳过（可能是纯文字行）
-            skipped += 1
-            continue
-        nu = normalize_url(u)
-        if nu in seen_norm or u in seen_raw:
-            skipped += 1
-            continue
-        seen_raw.add(u)
-        seen_norm.add(nu)
-        # ★ 跨历史任务 URL 去重：force_new=True 时跳过（与单 URL 路径 submit_job 对齐）
-        if not force_new:
-            existing = find_job_by_url(u)
-            if existing and existing.get('status') in ('pending', 'completed', 'preview', 'downloading', 'transcribing', 'summarizing'):
-                # 已完成/进行中的任务，跳过并返回已有任务信息
-                skipped += 1
-                duplicates.append({
-                    'url': u,
-                    'existing_job_id': existing['id'],
-                    'existing_status': existing['status'],
-                    'existing_title': existing.get('title', ''),
-                })
-                continue
-        clean_urls.append(u)
+    invalid_lines: List[dict] = []  # 非有效 URL 的行（1-based 行号 + 原文）
+    for idx, url in enumerate(urls, start=1):
+        u = sanitize_input_url(url) if isinstance(url, str) else ''
+        if u and u.startswith(('http://', 'https://')):
+            clean_urls.append(u)
+        else:
+            invalid_lines.append({'line': idx, 'text': url if isinstance(url, str) else str(url)})
 
     if not clean_urls:
-        raise HTTPException(status_code=400, detail="没有有效的URL（全部为空或重复）")
+        raise HTTPException(status_code=400, detail="没有有效的URL（所有行都不是有效链接）")
 
     # 生成 batch_id 聚合所有子任务
     batch_id = str(uuid.uuid4())[:8]
@@ -161,9 +136,10 @@ async def batch_submit(request: Request):
         "batch_id": batch_id,
         "job_ids": job_ids,
         "count": len(job_ids),
-        "skipped": skipped,
-        "duplicates": duplicates,
-        "message": f"已提交 {len(job_ids)} 个批量任务（跳过 {skipped} 个无效/重复URL），按顺序逐个执行",
+        "skipped": len(invalid_lines),
+        "invalid_lines": invalid_lines,
+        "message": f"已提交 {len(job_ids)} 个批量任务，按顺序逐个执行"
+                   + (f"（第 {', '.join(str(i['line']) for i in invalid_lines)} 行不是有效链接，未提交）" if invalid_lines else ""),
     }
 
 
