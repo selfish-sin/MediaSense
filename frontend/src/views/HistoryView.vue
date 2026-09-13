@@ -1,8 +1,8 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Eye, Trash2, Search } from 'lucide-vue-next'
+import { Eye, Search, ArrowDown } from 'lucide-vue-next'
 import { jobsApi, exportApi } from '../utils/api'
 import {
   ACTIVE_JOB_STATUSES,
@@ -149,6 +149,14 @@ async function handleSecondaryAction(job) {
   if (action === 'forceRetry') {
     await handleRetry(job.id, true)
   }
+}
+
+// 行内「更多」下拉：command 路由到既有处理函数（次要操作/取消/详情/删除）
+function handleRowCommand(cmd, row) {
+  if (cmd === 'rerun' || cmd === 'forceRetry') { handleSecondaryAction(row); return }
+  if (cmd === 'cancel') { handleCancel(row.id); return }
+  if (cmd === 'detail') { viewResult(row.id); return }
+  if (cmd === 'delete') { handleDelete(row.id); return }
 }
 
 function formatTime(time) {
@@ -322,9 +330,19 @@ async function handleBatchDelete() {
   }
 }
 
+// 窄窗口（< 1240px）隐藏次要列：全列宽约 870px，低于该宽度时 Element Plus
+// 会裁切超出部分并让 fixed 操作列覆盖相邻列（视觉重叠），这里降级为关键列
+const COMPACT_WIDTH = 1240
+const isCompact = ref(window.innerWidth < COMPACT_WIDTH)
+function updateCompact() {
+  isCompact.value = window.innerWidth < COMPACT_WIDTH
+}
+
 onMounted(() => {
+  window.addEventListener('resize', updateCompact)
   loadJobs()
 })
+onUnmounted(() => window.removeEventListener('resize', updateCompact))
 </script>
 
 <template>
@@ -367,43 +385,43 @@ onMounted(() => {
 
       <el-table :data="jobs" v-loading="loading" stripe style="width: 100%;" :empty-text="searchQuery.trim() ? '未找到匹配的任务' : '暂无任务'" @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="40" />
-        <el-table-column prop="title" label="标题" min-width="240" show-overflow-tooltip />
-        <el-table-column prop="platform" label="平台" width="90" />
-        <el-table-column label="状态" width="90">
+        <!-- 列宽一律 min-width：容器变窄时由 Element Plus 触发横向滚动，
+             固定 width 会在窄窗口被裁切且 fixed 列错位覆盖相邻列 -->
+        <el-table-column prop="title" label="标题" min-width="220" show-overflow-tooltip />
+        <el-table-column v-if="!isCompact" prop="platform" label="平台" min-width="80" />
+        <el-table-column label="状态" min-width="84">
           <template #default="{ row }">
             <el-tag :type="jobStatusTagType(row.status)" size="small" effect="plain" round>
               {{ jobStatusLabel(row.status) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="model" label="模型" width="140" show-overflow-tooltip />
-        <el-table-column label="创建时间" width="170">
+        <el-table-column v-if="!isCompact" prop="model" label="模型" min-width="120" show-overflow-tooltip />
+        <el-table-column v-if="!isCompact" label="创建时间" min-width="150">
           <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="340" fixed="right">
+        <!-- 操作列：只保留主操作，「更多」下拉收纳次要操作（重新处理/取消/详情/删除），
+             避免 5 个按钮挤在一列导致窄窗口下覆盖相邻列 -->
+        <el-table-column label="操作" min-width="176" fixed="right">
           <template #default="{ row }">
             <el-button size="small" type="primary" link :icon="Eye" @click="handlePrimaryAction(row)">
               {{ actionFor(row).primaryLabel }}
             </el-button>
-            <el-button
-              v-if="actionFor(row).secondary"
-              size="small"
-              type="warning"
-              link
-              @click="handleSecondaryAction(row)"
-            >{{ actionFor(row).secondaryLabel }}</el-button>
-            <el-button
-              v-if="actionFor(row).canCancel"
-              size="small" type="danger" link
-              @click="handleCancel(row.id)"
-            >取消</el-button>
-            <el-button size="small" type="danger" link :icon="Trash2" @click="handleDelete(row.id)">删除</el-button>
-            <el-button
-              v-if="row.status === 'failed' || row.status === 'cancelled'"
-              size="small"
-              link
-              @click="viewResult(row.id)"
-            >查看详情</el-button>
+            <el-dropdown trigger="click" @command="(cmd) => handleRowCommand(cmd, row)">
+              <el-button size="small" link class="row-more-btn">
+                更多<el-icon class="row-more-arrow"><ArrowDown /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item v-if="actionFor(row).secondary" :command="actionFor(row).secondary">
+                    {{ actionFor(row).secondaryLabel }}
+                  </el-dropdown-item>
+                  <el-dropdown-item v-if="actionFor(row).canCancel" command="cancel">取消任务</el-dropdown-item>
+                  <el-dropdown-item v-if="row.status === 'failed' || row.status === 'cancelled'" command="detail">查看详情</el-dropdown-item>
+                  <el-dropdown-item divided command="delete">删除任务</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </template>
         </el-table-column>
       </el-table>
@@ -431,6 +449,8 @@ onMounted(() => {
   font-size: 13px;
   line-height: 1.6;
 }
+
+/* 操作列「更多」下拉样式（.row-more-btn/.row-more-arrow）已提升至 App.vue 全局 */
 
 /* ========== 批量操作工具栏 ========== */
 .batch-toolbar {

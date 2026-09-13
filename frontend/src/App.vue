@@ -383,6 +383,14 @@ function scrollToBottom() {
   font-family: ui-monospace, Consolas, monospace;
   letter-spacing: 0.04em;
 }
+/* 列表操作列「更多」下拉按钮（历史页/模型页共用，2026-09-13 提升为全局） */
+.row-more-btn {
+  margin-left: 12px;
+}
+.row-more-arrow {
+  margin-left: 2px;
+  font-size: 12px;
+}
 .log-panel {
   margin-top: 12px;
   max-height: 200px;
