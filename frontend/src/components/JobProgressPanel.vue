@@ -1,7 +1,8 @@
 <script setup>
 /**
  * 任务进度卡片（HomeView 拆分 slice-4，2026-09-12）
- * - 自持：socket onProgress/onLog 监听 + 展开/自动滚动状态；进度与日志数据来自 jobStore
+ * - 自持：socket onProgress/onLog 监听 + 展开状态；进度与日志数据来自 jobStore
+ * - 进度详情（进度条/阶段/日志）渲染交给 JobProgressDetail（与批量子任务共用）
  * - expose reveal()：父组件提交任务后调用（展开本卡并滚动到视口，工作台第一眼）
  * - 生命周期注意：本组件在 v-if 下挂载/卸载（无任务时卸载 → 监听随之注销），
  *   与 HomeView 原 socketUnsubs（onUnmounted 清理）语义一致；keep-alive 切页不卸载。
@@ -10,15 +11,14 @@ import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useJobStore } from '../stores/jobStore'
 import { onProgress, onLog } from '../utils/socket'
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
+import JobProgressDetail from './JobProgressDetail.vue'
 
 const jobStore = useJobStore()
 
 // ── 任务进度日志（默认展开，当作进度条使用） ──
 const showJobProgress = ref(true)
-const jobLogAutoScroll = ref(true)
 
 const isProcessing = computed(() => jobStore.isProcessing)
-const progressPct = computed(() => jobStore.progress.pct)
 
 let socketUnsubs = []
 
@@ -32,14 +32,8 @@ onMounted(() => {
   socketUnsubs.push(onLog((data) => {
     if (data.job_id === jobStore.currentJobId) {
       jobStore.addLog(data.msg)
-      // 新进度日志到来时保持面板展开并滚到底
+      // 新进度日志到来时保持面板展开（滚动由 JobProgressDetail 负责）
       if (!showJobProgress.value) showJobProgress.value = true
-      if (jobLogAutoScroll.value) {
-        nextTick(() => {
-          const el = document.getElementById('job-log-panel')
-          if (el) el.scrollTop = el.scrollHeight
-        })
-      }
     }
   }))
 })
@@ -88,8 +82,6 @@ defineExpose({ reveal })
           </span>
         </div>
         <div class="progress-header-right">
-          <el-switch v-model="jobLogAutoScroll" active-text="自动滚动" size="small" />
-          <el-button size="small" text @click="jobStore.clearLogs">清空</el-button>
           <el-button size="small" text @click="showJobProgress = !showJobProgress">
             {{ showJobProgress ? '收起' : '展开' }}
           </el-button>
@@ -97,39 +89,14 @@ defineExpose({ reveal })
       </div>
     </template>
 
-    <div v-show="showJobProgress">
-      <div class="progress-meter">
-        <div class="progress-meter-row">
-          <span class="progress-msg">
-            {{ jobStore.progress.msg || (isProcessing ? '排队/准备中...' : '暂无进度') }}
-          </span>
-          <span v-if="isProcessing || progressPct > 0" class="progress-pct">
-            {{ Math.min(100, Math.max(0, progressPct || 0)) }}%
-          </span>
-        </div>
-        <el-progress
-          v-if="isProcessing || progressPct > 0"
-          class="progress-bar-glow"
-          :percentage="Math.min(100, Math.max(0, progressPct || 0))"
-          :stroke-width="16"
-          :show-text="false"
-          :status="jobStore.jobStatus === 'completed' ? 'success' : (jobStore.jobStatus === 'failed' ? 'exception' : undefined)"
-        />
-        <div v-if="jobStore.progress.step" class="progress-step">
-          阶段 · {{ jobStore.progress.step }}
-        </div>
-      </div>
-
-      <div id="job-log-panel" class="log-panel job-progress-log">
-        <div v-if="!jobStore.logs.length" class="log-empty">
-          提交任务后，这里会实时显示下载、转录、AI 各阶段进度（含速度与预计剩余时间）。
-        </div>
-        <div v-for="(log, i) in jobStore.logs" :key="i" class="job-log-line">
-          <span class="log-time">{{ log.time }}</span>
-          <span class="log-msg">{{ log.msg }}</span>
-        </div>
-      </div>
-    </div>
+    <JobProgressDetail
+      v-show="showJobProgress"
+      :progress="jobStore.progress"
+      :logs="jobStore.logs"
+      :active="isProcessing"
+      :job-status="jobStore.jobStatus"
+      @clear="jobStore.clearLogs"
+    />
   </el-card>
 </template>
 
@@ -182,69 +149,5 @@ defineExpose({ reveal })
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.progress-meter {
-  margin-bottom: 12px;
-  padding: 12px 14px;
-  border-radius: 10px;
-  background: var(--app-progress-meter-bg);
-  border: 1px solid var(--app-border);
-}
-.progress-meter-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  margin-bottom: 8px;
-  gap: 12px;
-}
-.progress-msg {
-  font-size: 13px;
-  color: var(--app-text);
-  flex: 1;
-  word-break: break-all;
-  line-height: 1.5;
-}
-.progress-pct {
-  font-size: 18px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  background: linear-gradient(135deg, var(--app-accent-1), var(--app-accent-2));
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  flex-shrink: 0;
-}
-.progress-step {
-  margin-top: 6px;
-  font-size: 11px;
-  color: var(--app-text-secondary);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-.progress-bar-glow :deep(.el-progress-bar__outer) {
-  background: var(--app-progress-track) !important;
-  border-radius: 999px;
-  overflow: hidden;
-}
-.progress-bar-glow :deep(.el-progress-bar__inner) {
-  border-radius: 999px;
-  background: linear-gradient(90deg, var(--app-accent-1), var(--app-accent-2)) !important;
-  box-shadow: 0 0 12px rgba(var(--app-accent-1-rgb), 0.45);
-}
-.job-progress-log {
-  max-height: 340px;
-  margin-top: 0;
-}
-.job-log-line {
-  display: flex;
-  gap: 6px;
-  padding: 3px 0;
-  border-bottom: 1px solid var(--app-log-line-border);
-  word-break: break-all;
-}
-.job-log-line:last-child { border-bottom: none; }
-.job-log-line .log-msg {
-  color: var(--app-log-text);
-  flex: 1;
 }
 </style>

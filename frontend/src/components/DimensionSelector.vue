@@ -21,6 +21,9 @@ const props = defineProps({
   compact: { type: Boolean, default: false },
   showRecipes: { type: Boolean, default: true },
   showPreview: { type: Boolean, default: true },
+  // 「+ 自定义」chip 是给工作台加维度级追加指引的；模板页配方编辑器里
+  // 会被误解成"在此新增模块"（真正的新增入口在下方模块树的 + 按钮），可关掉
+  showCustomAdd: { type: Boolean, default: true },
 })
 
 const emit = defineEmits(['update:modelValue'])
@@ -200,8 +203,9 @@ async function loadPreview() {
           <span class="module-name">{{ m.name }}</span>
           <el-icon v-if="m.is_customized" class="customized-badge" title="此模块已在模板编辑器中自定义"><Pencil /></el-icon>
         </div>
-        <!-- + 自定义按钮 -->
+        <!-- + 自定义按钮（工作台语境专用，模板页编辑器可关） -->
         <div
+          v-if="showCustomAdd"
           class="module-chip custom-add"
           :class="{ active: hasCustomDimension(dim.key) }"
           @click="openCustomDialog(dim.key)"

@@ -196,6 +196,36 @@ function scrollToBottom() {
 </template>
 
 <style>
+/* ============ 全局光标策略（2026-09-13，"又有i光标了"） ============ */
+/* 整个应用按桌面软件对待：非编辑区一律箭头光标、不出现文本光标与拖选
+   （此前只修了模板中心页 dca5727，其他页面 I 光标复发，故提升为全局）。 */
+body {
+  cursor: default;
+  user-select: none;
+}
+/* 可编辑控件显式还原文本光标（user-select 会波及表单控件内部，须逐类放开） */
+body input,
+body textarea,
+body [contenteditable="true"] {
+  cursor: text;
+  user-select: text;
+}
+/* 内容区保留选中复制：结果/转录/日志/对话/通知 */
+.markdown-body,
+.transcript-text,
+.thinking-body,
+.thinking-text,
+.bubble-body,
+.user-text,
+.log-panel,
+.selectable-text,
+.el-message,
+.el-message-box,
+.el-notification {
+  cursor: text;
+  user-select: text;
+}
+
 /* ============ 主题 CSS 变量 ============ */
 /* 主色由 themeStore 动态写入 --app-accent-1/2 及 -rgb；此处为兜底默认值（午夜青蓝）。 */
 :root[data-theme="dark"] {

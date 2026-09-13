@@ -1,7 +1,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted, onActivated, computed, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useJobStore } from '../stores/jobStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useModelStore } from '../stores/modelStore'
@@ -11,6 +11,7 @@ import socket, {
   continueSummary, cancelPreview, cancelJob,
 } from '../utils/socket'
 import { useBatchProgress } from '../composables/useBatchProgress'
+import { isTerminalStatus } from '../utils/batchProgress'
 import { useJobRestore } from '../composables/useJobRestore'
 import { createFailureNotifier } from '../utils/errorNotice'
 import BackendLogPanel from '../components/BackendLogPanel.vue'
@@ -115,6 +116,20 @@ const progressPanelRef = ref(null)
 function scrollToJobProgress() {
   nextTick(() => progressPanelRef.value?.reveal())
 }
+
+/** 批量提交后滚到批量进度面板（大进度条 + 当前子任务实时进度都在那里） */
+function scrollToBatchProgress() {
+  nextTick(() => {
+    document.getElementById('batch-progress-section')?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    })
+  })
+}
+
+// 批量任务进行期间，进度统一由 BatchResultPanel（大进度条 + 当前子任务详情）承载，
+// 单任务进度卡隐藏，避免同一时刻两处「任务进度」互相干扰
+const showSingleProgress = computed(() => !(inputType.value === 'batch' && batchResult.value))
 
 // ============ 组件挂载 ============
 onMounted(async () => {
@@ -333,30 +348,27 @@ async function handleSubmit() {
         dimensions: { ...settings.selectedDimensions },
         do_summary: settings.doSummary,
         // ★ 批量固定不做转录预览确认（后端 batch_submit 同样强制忽略），流程统一直通总结
-        force_new: true,
       })
       batchResult.value = {
         batch_id: res.batch_id,
         count: res.count,
-        skipped: res.skipped || 0,
-        duplicates: res.duplicates || [],
+        skipped: res.skipped || 0, // 语义 = 无效行数（批量永不去重跳过）
+        invalidLines: res.invalid_lines || [],
         summary: null,
       }
-      // 如果有跨历史重复的 URL，提示用户
-      if (res.duplicates && res.duplicates.length > 0) {
-        const dupInfo = res.duplicates.map(d =>
-          `${d.existing_title || d.url}（${d.existing_status}）`
-        ).join('、')
+      // 非 URL 行不静默吞：行号原样告警（后端只清洗不去重，提交几行跑几行）
+      if (res.invalid_lines && res.invalid_lines.length > 0) {
+        const badInfo = res.invalid_lines.map(i => `第${i.line}行「${String(i.text).slice(0, 30)}」`).join('、')
         ElMessage.warning({
-          message: `${res.duplicates.length} 个URL已有处理记录，已跳过: ${dupInfo}`,
+          message: `${res.invalid_lines.length} 行不是有效链接，未提交: ${badInfo}`,
           duration: 5000,
         })
       }
-      ElMessage.success(`已提交 ${res.count} 个批量任务${res.skipped ? `（跳过 ${res.skipped} 个无效/重复）` : ''}`)
+      ElMessage.success(`已提交 ${res.count} 个批量任务，将按顺序逐个执行`)
       // 立即拉一次进度；后续由 batch_progress 推送实时更新（断线时自动降级轮询）
       refreshBatchStatus()
       syncWithSocket(socket.connected)
-      scrollToJobProgress()
+      scrollToBatchProgress()
       return
     } catch (err) {
       ElMessage.error(err.message); return
@@ -441,6 +453,43 @@ function cancelBatchPreview(jobId) {
   setTimeout(() => refreshBatchStatus(), 1000)
 }
 
+// ★ 批量子任务取消（2026-09-13 用户反馈：批量面板缺取消按钮）。
+//   走后端 POST /jobs/{id}/cancel：request_cancel 打断运行中任务 + 终态保护防覆盖；
+//   未启动的 pending 任务标记取消后，编排器跑到它时 process_job 顶部的取消检查直接跳过。
+async function cancelBatchJob(jobId) {
+  try {
+    await jobsApi.cancel(jobId)
+    ElMessage.info('已取消该任务')
+  } catch (err) {
+    ElMessage.error('取消失败: ' + (err?.message || err))
+  }
+  setTimeout(() => refreshBatchStatus(), 800)
+}
+
+// 取消剩余：批量内全部未终态子任务（含排队中与运行中）一次性取消
+async function cancelBatchRemaining() {
+  const targets = (batchResult.value?.summary?.jobs || [])
+    .filter(j => !isTerminalStatus(j.status))
+    .map(j => j.id)
+  if (!targets.length) return
+  try {
+    await ElMessageBox.confirm(
+      `确定取消剩余 ${targets.length} 个任务？正在运行的任务也会中断。`,
+      '取消批量任务',
+      { type: 'warning', confirmButtonText: '取消这些任务', cancelButtonText: '再想想' }
+    )
+  } catch {
+    return
+  }
+  try {
+    const res = await jobsApi.batchCancel(targets)
+    ElMessage.success(res.message || `已取消 ${res.cancelled_count} 个任务`)
+  } catch (err) {
+    ElMessage.error('批量取消失败: ' + (err?.message || err))
+  }
+  setTimeout(() => refreshBatchStatus(), 800)
+}
+
 // ============ 取消任务 ============
 function handleCancelJob() {
   if (jobStore.currentJobId) {
@@ -509,6 +558,8 @@ const tokenPanelRef = ref(null)
       @view-job="viewBatchJob"
       @confirm-preview="confirmBatchPreview"
       @cancel-preview="cancelBatchPreview"
+      @cancel-job="cancelBatchJob"
+      @cancel-batch="cancelBatchRemaining"
     />
 
     <!-- 总结配置 -->
@@ -538,8 +589,8 @@ const tokenPanelRef = ref(null)
       <el-button v-if="isProcessing" type="danger" size="large" plain @click="handleCancelJob">取消</el-button>
     </div>
 
-    <!-- 任务进度（已拆为 JobProgressPanel 组件） -->
-    <JobProgressPanel ref="progressPanelRef" />
+    <!-- 任务进度（已拆为 JobProgressPanel 组件）；批量时由 BatchResultPanel 承载，避免重复 -->
+    <JobProgressPanel v-if="showSingleProgress" ref="progressPanelRef" />
 
     <!-- 固定结果栏（已拆为 HomeResultPanel 组件，2026-09-12 slice-B） -->
     <HomeResultPanel ref="resultPanelRef" />

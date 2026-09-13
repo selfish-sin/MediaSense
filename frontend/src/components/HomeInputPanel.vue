@@ -4,7 +4,7 @@
  * - 输入类型/内容状态由父组件持有（handleSubmit/useJobRestore/sessionStorage 依赖），
  *   经 6 个 v-model 双向绑定（inputType/inputUrl/inputText/batchUrls/uploadedFilePath/uploadedFileName）
  * - 上传交互（进行中状态/文件名校验/请求）内聚本组件，成功/移除经 v-model 写回父组件
- * - 批量面板 BatchResultPanel 事件原样转发：refresh / view-job / confirm-preview / cancel-preview
+ * - 批量面板 BatchResultPanel 事件原样转发：refresh / view-job / confirm-preview / cancel-preview / cancel-job / cancel-batch
  */
 import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -33,6 +33,8 @@ const emit = defineEmits([
   'view-job',
   'confirm-preview',
   'cancel-preview',
+  'cancel-job',
+  'cancel-batch',
 ])
 
 // ── 双向绑定代理（保持模板 v-model 书写形态与原 HomeView 一致） ──
@@ -182,6 +184,8 @@ function handleFileRemove() {
       @view-job="(id) => emit('view-job', id)"
       @confirm-preview="(id) => emit('confirm-preview', id)"
       @cancel-preview="(id) => emit('cancel-preview', id)"
+      @cancel-job="(id) => emit('cancel-job', id)"
+      @cancel-batch="emit('cancel-batch')"
     />
   </el-card>
 </template>
