@@ -334,7 +334,7 @@ async function applyLib(item) {
 </script>
 
 <template>
-  <div style="max-width: 1200px; margin: 0 auto; padding: 24px;">
+  <div class="templates-page" style="max-width: 1200px; margin: 0 auto; padding: 24px;">
     <!-- 顶部标题 + Tab 切换 -->
     <el-card class="app-card" shadow="never" style="margin-bottom: 16px;">
       <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -584,6 +584,19 @@ async function applyLib(item) {
 </template>
 
 <style scoped>
+/* 整页按应用 UI 对待：非编辑区一律箭头光标、不出现文本光标与拖选 */
+.templates-page {
+  cursor: default;
+  user-select: none;
+}
+/* 可编辑控件显式还原文本光标与选择（父级 user-select 会波及表单控件内部） */
+.templates-page :deep(.el-textarea__inner),
+.templates-page :deep(.el-input__inner),
+.templates-page :deep(.el-select__input) {
+  cursor: text;
+  user-select: text;
+}
+
 .templates-tabs {
   background: rgba(var(--app-dim-color), var(--app-card-opacity, 1));
   border: 1px solid var(--app-border);
