@@ -95,6 +95,19 @@ export const useSettingsStore = defineStore('settings', () => {
   const doSummary = ref(true)
   const previewBeforeSummary = ref(false)  // 默认不做转录预览确认（批量固定忽略此开关）
 
+  // ★ 任务目标（仅生成字幕模式，2026-09-13）：summary=完整处理 / subtitle_only=只出字幕不总结。
+  //   后端 do_summary=false 本就「拿完文本即收尾」，这里只做语义包装：jobGoal↔doSummary、
+  //   subtitleSource↔advancedOptions.force_transcribe 单点映射，组件不各自翻译布尔。
+  //   来源语义（用户定稿）：auto=优先平台字幕，拿不到自动回退转录；transcribe=跳过平台字幕直接转录。
+  const jobGoal = computed({
+    get: () => (doSummary.value ? 'summary' : 'subtitle_only'),
+    set: (v) => { doSummary.value = v === 'summary' },
+  })
+  const subtitleSource = computed({
+    get: () => (advancedOptions.value.force_transcribe ? 'transcribe' : 'auto'),
+    set: (v) => { advancedOptions.value.force_transcribe = v === 'transcribe' },
+  })
+
   // ============ Actions ============
   async function loadDeepConfig() {
     try {
@@ -264,6 +277,8 @@ export const useSettingsStore = defineStore('settings', () => {
     freeCloudAvailable,
     fireredReady,
     doSummary,
+    jobGoal,
+    subtitleSource,
     previewBeforeSummary,
     // actions
     loadDeepConfig,

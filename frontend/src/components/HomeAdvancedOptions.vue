@@ -82,14 +82,48 @@ const transcribeLanguageHint = computed(() => {
       <!-- ② 处理流程开关 -->
       <section class="adv-section">
         <div class="adv-section-title">处理流程</div>
-        <div class="adv-switch-grid">
-          <label class="adv-switch-tile" :class="{ on: settings.doSummary }">
-            <el-switch v-model="settings.doSummary" size="small" />
+        <!-- ★ 任务目标模式卡（v2，2026-09-13）：模式唯一控制点（原「AI 总结」tile 删除）。
+             仅生成字幕 = do_summary=false（后端本就「拿完文本即收尾」），此处只做语义包装；
+             历史回填/提交 payload 直读 do_summary，无需新字段 -->
+        <div class="mode-grid">
+          <label class="mode-card" :class="{ on: settings.jobGoal === 'summary' }">
+            <input v-model="settings.jobGoal" type="radio" value="summary" class="mode-input" />
+            <span class="mode-dot" aria-hidden="true"></span>
             <span class="adv-switch-meta">
-              <span class="adv-switch-name">AI 总结</span>
+              <span class="adv-switch-name">总结成文</span>
+              <span class="adv-switch-desc">转录/字幕 → AI 总结 → 打标签，结果可追问与导出</span>
             </span>
           </label>
-          <label class="adv-switch-tile" :class="{ on: settings.previewBeforeSummary }">
+          <label class="mode-card" :class="{ on: settings.jobGoal === 'subtitle_only' }">
+            <input v-model="settings.jobGoal" type="radio" value="subtitle_only" class="mode-input" />
+            <span class="mode-dot" aria-hidden="true"></span>
+            <span class="adv-switch-meta">
+              <span class="adv-switch-name">仅生成字幕</span>
+              <span class="adv-switch-desc">只要字幕文件，不做 AI 总结</span>
+            </span>
+          </label>
+        </div>
+        <!-- ★ 具体提示：得到什么/不做什么/抽查仍开，选中即见，不留猜测 -->
+        <p v-if="settings.jobGoal === 'subtitle_only'" class="adv-mode-hint">
+          完成后得到 SRT 字幕 + 转录文本，可在结果页下载；不做 AI 总结、不打标签、不消耗总结 token。
+          B站字幕拿到后仍会做内容抽查（防旧字幕）；来源选「自动」时，平台字幕拿不到会自动转录。
+        </p>
+        <!-- ★ 字幕来源子选项：仅字幕模式显示，复用 force_transcribe（与总结模式的「强制转录」同一选项） -->
+        <div v-if="settings.jobGoal === 'subtitle_only'" class="src-row">
+          <span class="adv-field-label">字幕来源</span>
+          <label class="src-chip" :class="{ on: settings.subtitleSource === 'auto' }">
+            <input v-model="settings.subtitleSource" type="radio" value="auto" class="mode-input" />
+            <span class="mode-dot" aria-hidden="true"></span>自动：优先平台字幕，没有就转录
+          </label>
+          <label class="src-chip" :class="{ on: settings.subtitleSource === 'transcribe' }">
+            <input v-model="settings.subtitleSource" type="radio" value="transcribe" class="mode-input" />
+            <span class="mode-dot" aria-hidden="true"></span>直接转录生成
+          </label>
+        </div>
+        <!-- 流程开关：2 列宽卡网格（窄窗口自动降 1 列） -->
+        <div class="adv-switch-grid">
+          <!-- 转录预览仅在总结成文模式有意义（仅字幕模式后端本就跳过预览） -->
+          <label v-if="settings.doSummary" class="adv-switch-tile" :class="{ on: settings.previewBeforeSummary }">
             <el-switch v-model="settings.previewBeforeSummary" size="small" />
             <span class="adv-switch-meta">
               <span class="adv-switch-name">转录预览</span>
@@ -102,8 +136,12 @@ const transcribeLanguageHint = computed(() => {
               <span class="adv-switch-desc">{{ speakerDiarizationDesc }}</span>
             </span>
           </label>
-          <!-- ★ 强制转录：决定"要不要用视频自带字幕"，与具体转录引擎无关（原「强制 Whisper 转录」易误解） -->
-          <label class="adv-switch-tile" :class="{ on: settings.advancedOptions.force_transcribe }">
+          <!-- ★ 强制转录仅总结模式显示：仅字幕模式下字幕来源已由上方 radio 接管（同一 force_transcribe 选项） -->
+          <label
+            v-if="settings.doSummary"
+            class="adv-switch-tile"
+            :class="{ on: settings.advancedOptions.force_transcribe }"
+          >
             <el-switch v-model="settings.advancedOptions.force_transcribe" size="small" />
             <span class="adv-switch-meta">
               <span class="adv-switch-name">强制转录</span>
@@ -245,10 +283,10 @@ const transcribeLanguageHint = computed(() => {
   width: 100%;
 }
 
-/* 流程开关：等宽卡片网格 */
+/* 流程开关：2 列宽卡网格（1040px 宽卡上 160px 会摊成 4-5 个窄条，描述挤成细长条） */
 .adv-switch-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
   gap: 8px;
 }
 .adv-switch-tile {
@@ -287,6 +325,105 @@ const transcribeLanguageHint = computed(() => {
   font-size: 11px;
   color: var(--app-text-secondary);
   line-height: 1.35;
+}
+
+/* 任务目标模式卡：与流程方块同视觉语言，置顶处理流程区（2 列宽卡） */
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.mode-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--app-border);
+  background: var(--app-hover-bg, transparent);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+.mode-card:hover {
+  border-color: rgba(var(--app-accent-1-rgb), 0.45);
+}
+.mode-card.on {
+  border-color: rgba(var(--app-accent-1-rgb), 0.55);
+  background: var(--app-chip-active-soft);
+  box-shadow: 0 0 0 1px rgba(var(--app-accent-1-rgb), 0.12);
+}
+/* 原生 radio 视觉隐藏：label 点击切换，样式层 .mode-dot 表达选中态 */
+.mode-input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.mode-dot {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  border-radius: 50%;
+  border: 1.5px solid var(--app-text-secondary);
+  box-sizing: border-box;
+  position: relative;
+}
+.mode-card.on .mode-dot,
+.src-chip.on .mode-dot {
+  border-color: rgb(var(--app-accent-1-rgb));
+}
+.mode-card.on .mode-dot::after,
+.src-chip.on .mode-dot::after {
+  content: "";
+  position: absolute;
+  inset: 2.5px;
+  border-radius: 50%;
+  background: rgb(var(--app-accent-1-rgb));
+}
+/* 仅字幕模式提示块：得到什么/不做什么，选中即见 */
+.adv-mode-hint {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px dashed var(--app-border);
+  background: var(--app-hover-bg, transparent);
+  font-size: 11.5px;
+  color: var(--app-text-secondary);
+  line-height: 1.55;
+}
+/* 字幕来源子选项行：样式对齐校正子选项（虚线分隔） */
+.src-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  margin-bottom: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--app-border);
+}
+.src-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--app-border);
+  background: var(--app-hover-bg, transparent);
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--app-text);
+  transition: border-color 0.15s, background 0.15s;
+}
+.src-chip .mode-dot {
+  width: 12px;
+  height: 12px;
+  margin-top: 0;
+}
+.src-chip.on {
+  border-color: rgba(var(--app-accent-1-rgb), 0.55);
+  background: var(--app-chip-active-soft);
 }
 
 /* 转录字段网格 */

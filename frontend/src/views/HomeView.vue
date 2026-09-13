@@ -517,6 +517,7 @@ const tokenPanelRef = ref(null)
 
     <!-- 提交按钮 -->
     <div class="submit-row">
+      <!-- 按钮文案随任务目标联动：仅生成字幕模式下明示"生成字幕"，按下前最后确认一次 -->
       <el-button
         class="submit-btn"
         type="primary"
@@ -524,7 +525,7 @@ const tokenPanelRef = ref(null)
         :loading="isProcessing"
         :disabled="isProcessing"
         @click="handleSubmit"
-      >{{ isProcessing ? '处理中...' : '开始处理' }}</el-button>
+      >{{ isProcessing ? '处理中...' : (settings.jobGoal === 'subtitle_only' ? '生成字幕' : '开始处理') }}</el-button>
       <el-button v-if="isProcessing" type="danger" size="large" plain @click="handleCancelJob">取消</el-button>
     </div>
 

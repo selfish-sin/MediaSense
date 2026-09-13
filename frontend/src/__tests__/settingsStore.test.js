@@ -82,3 +82,46 @@ describe('settingsStore 默认转录引擎（消费后端 recommended_engine）'
     expect(store.advancedOptions.transcribe_engine).toBe('local')
   })
 })
+
+describe('settingsStore 任务目标/字幕来源映射（仅生成字幕模式）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    localStorage.clear()
+  })
+
+  it('默认：jobGoal=summary、subtitleSource=auto', () => {
+    const store = useSettingsStore()
+    expect(store.jobGoal).toBe('summary')
+    expect(store.subtitleSource).toBe('auto')
+  })
+
+  it('jobGoal 切 subtitle_only → doSummary 同步为 false（提交 payload 复用既有字段）', () => {
+    const store = useSettingsStore()
+    store.jobGoal = 'subtitle_only'
+    expect(store.doSummary).toBe(false)
+    expect(store.jobGoal).toBe('subtitle_only')
+  })
+
+  it('jobGoal 切回 summary → doSummary 恢复 true', () => {
+    const store = useSettingsStore()
+    store.doSummary = false
+    expect(store.jobGoal).toBe('subtitle_only')
+    store.jobGoal = 'summary'
+    expect(store.doSummary).toBe(true)
+  })
+
+  it('subtitleSource=transcribe → force_transcribe=true（跳过平台字幕直接转录）', () => {
+    const store = useSettingsStore()
+    store.subtitleSource = 'transcribe'
+    expect(store.advancedOptions.force_transcribe).toBe(true)
+    expect(store.subtitleSource).toBe('transcribe')
+  })
+
+  it('subtitleSource=auto → force_transcribe=false（优先平台字幕，拿不到回退转录）', () => {
+    const store = useSettingsStore()
+    store.advancedOptions.force_transcribe = true
+    expect(store.subtitleSource).toBe('transcribe')
+    store.subtitleSource = 'auto'
+    expect(store.advancedOptions.force_transcribe).toBe(false)
+  })
+})
