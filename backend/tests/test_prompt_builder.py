@@ -76,12 +76,24 @@ class TestRecipes:
         """中医预设：专用角色模块 + 原貌保留型维度组合"""
         r = next(x for x in RECIPES if x["key"] == "tcm_lecture")
         assert r["dimensions"]["role"] == "tcm"
+        assert r["dimensions"]["mode"] == "tcm"
         assert r["dimensions"]["content_type"] == "lecture"
         role_mods = [m["key"] for m in PROMPT_DIMENSIONS["role"]["modules"]]
         assert "tcm" in role_mods
         tcm_tpl = _get_module_template("role", "tcm")
         assert "术语原貌" in tcm_tpl
         assert "剂量" in tcm_tpl
+
+    def test_tcm_mode_module(self):
+        """中医认知模式：mode=tcm 模块存在，选中时框架注入提示词"""
+        mode_mods = [m["key"] for m in PROMPT_DIMENSIONS["mode"]["modules"]]
+        assert "tcm" in mode_mods
+        tpl = _get_module_template("mode", "tcm")
+        assert "引文分级" in tpl
+        assert "辨证链" in tpl
+        with patch("services.prompt_builder._load_module_overrides", return_value={}):
+            prompt = build_modular_prompt({"mode": "tcm"}, "content")
+            assert "【中医特化·认知框架】" in prompt
 
 
 class TestModuleTemplate:
