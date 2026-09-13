@@ -193,6 +193,19 @@ function handleFileRemove() {
   display: flex;
   flex-wrap: wrap;
 }
+/* 选中态改用全站渐变主色：Element Plus 默认纯蓝实心与主题配色不一致 */
+.input-type-tabs :deep(.el-radio-button.is-active .el-radio-button__inner) {
+  background: linear-gradient(135deg, var(--app-accent-1), var(--app-accent-2)) !important;
+  border-color: transparent !important;
+  color: #fff !important;
+  box-shadow: 0 4px 12px rgba(var(--app-accent-1-rgb, 56, 189, 248), 0.3);
+}
+.input-type-tabs :deep(.el-radio-button__inner:hover) {
+  color: var(--app-accent-1, #38bdf8);
+}
+.input-type-tabs :deep(.el-radio-button.is-active .el-radio-button__inner:hover) {
+  color: #fff;
+}
 .input-upload :deep(.el-upload-dragger) {
   border-radius: 12px;
   border-color: var(--app-border);

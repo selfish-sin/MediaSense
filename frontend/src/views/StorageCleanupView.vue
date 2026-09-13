@@ -151,7 +151,7 @@ onBeforeUnmount(stopPolling)
 </script>
 
 <template>
-  <div class='storage-page'>
+  <div class='storage-page page-container'>
     <header class='storage-header'>
       <div>
         <div class='eyebrow'><Files /> 存储管理</div>
@@ -292,10 +292,8 @@ onBeforeUnmount(stopPolling)
 </template>
 
 <style scoped>
+/* 容器尺寸/边距复用全局 .page-container（2026-09-13），此处只保留页面自身属性 */
 .storage-page {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 24px;
   box-sizing: border-box;
   color: var(--app-text);
 }
@@ -381,7 +379,8 @@ onBeforeUnmount(stopPolling)
   font-size: 12px;
 }
 
-.policy-grid :deep(.el-input-number) { width: 100%; }
+/* 限宽：撑满整列时数字与右侧增减按钮之间留白过大，视觉松散 */
+.policy-grid :deep(.el-input-number) { width: 100%; max-width: 168px; }
 .policy-grid .toggle-field { justify-content: space-between; }
 .policy-grid .toggle-field :deep(.el-switch) { align-self: flex-start; height: 32px; }
 
