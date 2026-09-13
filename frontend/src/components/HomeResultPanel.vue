@@ -89,7 +89,22 @@ const _jobFiles = ref([])
 
 const jobFiles = computed(() => {
   if (!jobStore.currentJobId) return []
-  return _jobFiles.value
+  // ★ 输出素材过滤（v4 起真实生效）：高级选项勾选 = 这里展示哪些产物。
+  //   txt 组覆盖其衍生文件（纯净版/校正原文备份）；未登记键（历史遗留等）不过滤始终展示
+  const FILE_GROUP_KEYS = {
+    result_md: ['result_md'],
+    srt: ['srt'],
+    txt: ['txt', 'txt_clean', 'txt_raw'],
+    audio: ['audio'],
+    video: ['video'],
+  }
+  const keyToGroup = new Map(
+    Object.entries(FILE_GROUP_KEYS).flatMap(([group, keys]) => keys.map((k) => [k, group])),
+  )
+  return _jobFiles.value.filter((f) => {
+    const group = keyToGroup.get(f.key)
+    return group ? settings.outputOptions.includes(group) : true
+  })
 })
 
 async function loadJobFiles(jobId) {

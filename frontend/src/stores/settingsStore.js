@@ -108,6 +108,11 @@ export const useSettingsStore = defineStore('settings', () => {
     set: (v) => { advancedOptions.value.force_transcribe = v === 'transcribe' },
   })
 
+  // ★ 输出素材（2026-09-13 v4 起为真实生效项）：结果页「下载素材」按勾选过滤展示；
+  //   video 勾选在提交时映射为既有 options.download_video（链接任务真实下载视频原件）。
+  //   默认含核心产物 md/srt/txt；「仅生成字幕」模式强制包含 srt（HomeAdvancedOptions watcher）
+  const outputOptions = ref(['result_md', 'srt', 'txt'])
+
   // ============ Actions ============
   async function loadDeepConfig() {
     try {
@@ -280,6 +285,7 @@ export const useSettingsStore = defineStore('settings', () => {
     jobGoal,
     subtitleSource,
     previewBeforeSummary,
+    outputOptions,
     // actions
     loadDeepConfig,
     loadCloudAsrStatus,

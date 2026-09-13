@@ -155,6 +155,11 @@ onMounted(async () => {
         _realTimeComplete = true       // ★ 标记实时完成
         jobStore.jobStatus = 'completed'
         jobStore.isProcessing = false
+        // ★ 仅生成字幕等无流式输出的任务没有 ai_token 渐进填充，done 时补拉任务
+        //   （result_text=转录文本，结果区/下载素材才有内容；总结任务已有流式文本则跳过）
+        if (!jobStore.resultText) {
+          jobStore.loadJob(data.job_id)
+        }
         jobStore.addLog('AI处理完成')
         tokenPanelRef.value?.refresh()  // 刷新Token统计
       } else {
@@ -280,13 +285,15 @@ async function handleSubmit() {
     options: {
       ...settings.advancedOptions,
       dimensions: { ...settings.selectedDimensions },
-      output_options: [...outputOptions.value],
+      output_options: [...settings.outputOptions],
+      // ★ 输出素材「视频」接通既有后端选项：勾选才真实下载视频原件（默认仅音频）
+      download_video: settings.outputOptions.includes('video'),
       ...(mergedCustom ? { custom_prompt: mergedCustom } : {}),
     },
     do_summary: settings.doSummary,
     force_new: inputType.value === 'url',
     preview_before_summary: settings.previewBeforeSummary,
-    output_options: [...outputOptions.value],  // 输出内容选择
+    output_options: [...settings.outputOptions],  // 输出内容选择（结果页过滤，restore 回填用）
   }
   if (inputType.value === 'url') {
     if (!inputUrl.value.trim()) { ElMessage.warning('请输入视频URL'); return }
@@ -304,6 +311,9 @@ async function handleSubmit() {
     try {
       // ★ 完全自定义提示词库 + 维度自定义指引（同单任务处理）
       const batchOptions = { ...settings.advancedOptions, dimensions: { ...settings.selectedDimensions } }
+      // ★ 输出素材与单任务对齐：结果过滤字段 + 视频→download_video（既有后端选项）
+      batchOptions.output_options = [...settings.outputOptions]
+      batchOptions.download_video = settings.outputOptions.includes('video')
       if (settings.useFullOverride && settings.fullOverride) {
         batchOptions.full_override = settings.fullOverride
       } else {
@@ -444,8 +454,7 @@ function handleCancelJob() {
 const isPreviewState = computed(() => jobStore.jobStatus === 'preview')
 const isProcessing = computed(() => jobStore.isProcessing)
 
-// 输出内容选择（默认全选 AI总结+字幕+转录文本）
-const outputOptions = ref(['result_md'])
+// 输出素材选择已收进 settingsStore.outputOptions（v4：真实过滤结果页下载素材 + video→download_video）
 
 // 渲染节流（useRafMarkdown）/文件列表/结果 Tab/思维导图/编辑/导出/重总结/复制：
 // 已随结果区迁至 components/HomeResultPanel.vue（2026-09-12 slice-B）
@@ -467,7 +476,7 @@ const usePromptOverride = ref(false)
 const { handleRouteQuery } = useJobRestore({
   inputType, inputUrl, inputText,
   uploadedFilePath, uploadedFileName,
-  outputOptions, customPrompt, promptOverride, usePromptOverride,
+  customPrompt, promptOverride, usePromptOverride,
   rerunSourceJobId,
   settings, jobStore, route, router,
   scrollToJobProgress,
@@ -513,7 +522,7 @@ const tokenPanelRef = ref(null)
     </el-card>
 
     <!-- 高级选项（已拆为 HomeAdvancedOptions 组件） -->
-    <HomeAdvancedOptions v-model:output-options="outputOptions" @touch-model="modelTouched = true" />
+    <HomeAdvancedOptions @touch-model="modelTouched = true" />
 
     <!-- 提交按钮 -->
     <div class="submit-row">

@@ -10,7 +10,7 @@ export function useJobRestore(deps) {
   const {
     inputType, inputUrl, inputText,
     uploadedFilePath, uploadedFileName,
-    outputOptions, customPrompt, promptOverride, usePromptOverride,
+    customPrompt, promptOverride, usePromptOverride,
     rerunSourceJobId,
     settings, jobStore, route, router,
     scrollToJobProgress,
@@ -47,7 +47,8 @@ export function useJobRestore(deps) {
 
     settings.doSummary = options.do_summary ?? true
     settings.previewBeforeSummary = options.preview_before_summary ?? false
-    outputOptions.value = Array.isArray(options.output_options)
+    // 输出素材存 settingsStore（v4 起真实生效）：历史任务回填勾选；无记录回退核心三件
+    settings.outputOptions = Array.isArray(options.output_options)
       ? [...options.output_options]
       : ['result_md', 'srt', 'txt']
 

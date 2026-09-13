@@ -1,11 +1,12 @@
 <script setup>
 /**
- * 工作台「高级选项」卡片（HomeView 拆分 slice-2，2026-09-12）
+ * 工作台「高级选项」卡片（HomeView 拆分 slice-2，2026-09-12；v4 三区重构 2026-09-13）
  * - 自持：settings/modelStore（Pinia 全局）+ 引擎提示 computed
- * - outputOptions 用 v-model:output-options 与父组件双向同步（提交时父组件读取）
+ * - 三区管线：① 任务目标（模式卡+输出素材随模式展开） ② 文本获取与转录 ③ AI 加工
+ * - outputOptions 在 settingsStore（结果页下载素材过滤 + video→download_video 提交映射）
  * - 「AI 模型」手动选择时 emit('touch-model')，父组件据此停止按字数自动推荐
  */
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useModelStore } from '../stores/modelStore'
 import { modelDisplayName } from '../utils/modelDisplay'
@@ -13,8 +14,14 @@ import { modelDisplayName } from '../utils/modelDisplay'
 const settings = useSettingsStore()
 const modelStore = useModelStore()
 
-const outputOptions = defineModel('outputOptions', { type: Array, required: true })
 const emit = defineEmits(['touch-model'])
+
+// ★ 仅生成字幕模式下字幕是任务本体：输出素材强制包含 srt（结果页不可把它过滤掉）
+watch(() => settings.jobGoal, (goal) => {
+  if (goal === 'subtitle_only' && !settings.outputOptions.includes('srt')) {
+    settings.outputOptions = [...settings.outputOptions, 'srt']
+  }
+}, { immediate: true })
 
 // ── 校正模型选择器占位：展示后端配置的校正默认模型（留空时生效的那个） ──
 const correctModelPlaceholder = computed(() => {
@@ -60,31 +67,11 @@ const transcribeLanguageHint = computed(() => {
     </template>
 
     <div class="adv-body">
-      <!-- ① AI 模型 -->
+      <!-- ① 任务目标：模式卡 + 输出素材随模式展开（v4，2026-09-13）。
+           仅生成字幕 = do_summary=false（后端本就「拿完文本即收尾」），此处只做语义包装；
+           历史回填/提交 payload 直读 do_summary，无需新字段 -->
       <section class="adv-section">
-        <div class="adv-section-title">AI 模型</div>
-        <el-select
-          v-model="settings.selectedModel"
-          class="adv-model-select"
-          placeholder="选择模型"
-          filterable
-          @change="emit('touch-model')"
-        >
-          <el-option
-            v-for="m in modelStore.models"
-            :key="m.key"
-            :label="modelDisplayName(m)"
-            :value="m.key"
-          />
-        </el-select>
-      </section>
-
-      <!-- ② 处理流程开关 -->
-      <section class="adv-section">
-        <div class="adv-section-title">处理流程</div>
-        <!-- ★ 任务目标模式卡（v2，2026-09-13）：模式唯一控制点（原「AI 总结」tile 删除）。
-             仅生成字幕 = do_summary=false（后端本就「拿完文本即收尾」），此处只做语义包装；
-             历史回填/提交 payload 直读 do_summary，无需新字段 -->
+        <div class="adv-section-title">任务目标</div>
         <div class="mode-grid">
           <label class="mode-card" :class="{ on: settings.jobGoal === 'summary' }">
             <input v-model="settings.jobGoal" type="radio" value="summary" class="mode-input" />
@@ -106,11 +93,40 @@ const transcribeLanguageHint = computed(() => {
         <!-- ★ 具体提示：得到什么/不做什么/抽查仍开，选中即见，不留猜测 -->
         <p v-if="settings.jobGoal === 'subtitle_only'" class="adv-mode-hint">
           完成后得到 SRT 字幕 + 转录文本，可在结果页下载；不做 AI 总结、不打标签、不消耗总结 token。
-          B站字幕拿到后仍会做内容抽查（防旧字幕）；来源选「自动」时，平台字幕拿不到会自动转录。
+          B站字幕拿到后仍会做内容抽查（防旧字幕）；文本来源选「自动」时，平台字幕拿不到会自动转录。
         </p>
-        <!-- ★ 字幕来源子选项：仅字幕模式显示，复用 force_transcribe（与总结模式的「强制转录」同一选项） -->
-        <div v-if="settings.jobGoal === 'subtitle_only'" class="src-row">
-          <span class="adv-field-label">字幕来源</span>
+        <!-- ★ 输出素材随模式展开（用户原意）：勾选 = 结果页「下载素材」实际展示该产物；
+             「视频」勾选在提交时映射为既有 options.download_video（链接任务真实下载视频原件） -->
+        <div class="adv-output-block">
+          <div class="adv-field-label">输出素材</div>
+          <el-checkbox-group v-model="settings.outputOptions" class="adv-output-group">
+            <el-checkbox
+              v-if="settings.jobGoal === 'summary'"
+              value="result_md"
+              border
+              class="adv-output-item"
+            >AI 总结 (.md)</el-checkbox>
+            <el-checkbox
+              value="srt"
+              border
+              class="adv-output-item"
+              :disabled="settings.jobGoal === 'subtitle_only'"
+            >字幕 (.srt)</el-checkbox>
+            <el-checkbox value="txt" border class="adv-output-item">转录文本 (.txt)</el-checkbox>
+            <el-checkbox value="audio" border class="adv-output-item">纯音频 (.m4a)</el-checkbox>
+            <el-checkbox value="video" border class="adv-output-item">视频 (.mp4)</el-checkbox>
+          </el-checkbox-group>
+          <p class="adv-output-hint">
+            勾选 = 结果页「下载素材」中展示该产物；「视频」勾选时链接任务会下载视频原件（较大，仅在发生下载时生效）
+          </p>
+        </div>
+      </section>
+
+      <!-- ② 文本获取与转录：文本来源常显（吸收原「强制转录」tile——同一 force_transcribe 选项单一控制点） -->
+      <section class="adv-section">
+        <div class="adv-section-title">文本获取与转录</div>
+        <div class="src-row src-row--lead">
+          <span class="adv-field-label">文本来源</span>
           <label class="src-chip" :class="{ on: settings.subtitleSource === 'auto' }">
             <input v-model="settings.subtitleSource" type="radio" value="auto" class="mode-input" />
             <span class="mode-dot" aria-hidden="true"></span>自动：优先平台字幕，没有就转录
@@ -119,80 +135,8 @@ const transcribeLanguageHint = computed(() => {
             <input v-model="settings.subtitleSource" type="radio" value="transcribe" class="mode-input" />
             <span class="mode-dot" aria-hidden="true"></span>直接转录生成
           </label>
+          <span class="src-hint">仅视频链接生效，本地文件自动转录</span>
         </div>
-        <!-- 流程开关：2 列宽卡网格（窄窗口自动降 1 列） -->
-        <div class="adv-switch-grid">
-          <!-- 转录预览仅在总结成文模式有意义（仅字幕模式后端本就跳过预览） -->
-          <label v-if="settings.doSummary" class="adv-switch-tile" :class="{ on: settings.previewBeforeSummary }">
-            <el-switch v-model="settings.previewBeforeSummary" size="small" />
-            <span class="adv-switch-meta">
-              <span class="adv-switch-name">转录预览</span>
-            </span>
-          </label>
-          <label class="adv-switch-tile" :class="{ on: settings.advancedOptions.speaker_diarization }">
-            <el-switch v-model="settings.advancedOptions.speaker_diarization" size="small" />
-            <span class="adv-switch-meta">
-              <span class="adv-switch-name">说话人分离</span>
-              <span class="adv-switch-desc">{{ speakerDiarizationDesc }}</span>
-            </span>
-          </label>
-          <!-- ★ 强制转录仅总结模式显示：仅字幕模式下字幕来源已由上方 radio 接管（同一 force_transcribe 选项） -->
-          <label
-            v-if="settings.doSummary"
-            class="adv-switch-tile"
-            :class="{ on: settings.advancedOptions.force_transcribe }"
-          >
-            <el-switch v-model="settings.advancedOptions.force_transcribe" size="small" />
-            <span class="adv-switch-meta">
-              <span class="adv-switch-name">强制转录</span>
-              <span class="adv-switch-desc">跳过视频字幕，直接转录音频</span>
-            </span>
-          </label>
-          <!-- ★ AI 校正：对所有文本来源生效（B站/平台字幕、云端/本地转录、文本输入）；
-               文案明示代价——校正=全文逐字重新生成，慢且费 token，避免用户误以为"秒级小修" -->
-          <label class="adv-switch-tile" :class="{ on: settings.advancedOptions.ai_correct }">
-            <el-switch v-model="settings.advancedOptions.ai_correct" size="small" />
-            <span class="adv-switch-meta">
-              <span class="adv-switch-name">AI 校正</span>
-              <span class="adv-switch-desc">代价大：全文重新生成，耗时数分钟、token 消耗多；字幕/转录均适用</span>
-            </span>
-          </label>
-        </div>
-        <!-- ★ 校正子选项：仅开启 AI 校正时显示（跟在处理流程开关后，不再塞进语音转录栏） -->
-        <div v-if="settings.advancedOptions.ai_correct" class="adv-field-grid adv-correct-grid">
-          <div class="adv-field">
-            <div class="adv-field-label">校正领域</div>
-            <el-select
-              v-model="settings.advancedOptions.ai_correct_domain"
-              class="adv-field-control"
-            >
-              <el-option label="通用" value="default" />
-              <el-option label="中医 / 针灸" value="tcm" />
-            </el-select>
-          </div>
-          <div class="adv-field">
-            <div class="adv-field-label">校正模型</div>
-            <el-select
-              v-model="settings.advancedOptions.ai_correct_model"
-              class="adv-field-control"
-              :placeholder="correctModelPlaceholder"
-              clearable
-              filterable
-            >
-              <el-option
-                v-for="m in modelStore.models"
-                :key="m.key"
-                :label="modelDisplayName(m)"
-                :value="m.key"
-              />
-            </el-select>
-          </div>
-        </div>
-      </section>
-
-      <!-- ③ 语音转录 -->
-      <section class="adv-section">
-        <div class="adv-section-title">语音转录</div>
         <div class="adv-field-grid">
           <div class="adv-field">
             <div class="adv-field-label">转录引擎</div>
@@ -237,18 +181,87 @@ const transcribeLanguageHint = computed(() => {
             <p v-if="transcribeLanguageHint" class="adv-field-hint">{{ transcribeLanguageHint }}</p>
           </div>
         </div>
+        <!-- 说话人分离：转录域配置归位（仅本地 Whisper 生效） -->
+        <label
+          class="adv-switch-tile adv-switch-tile--single"
+          :class="{ on: settings.advancedOptions.speaker_diarization }"
+        >
+          <el-switch v-model="settings.advancedOptions.speaker_diarization" size="small" />
+          <span class="adv-switch-meta">
+            <span class="adv-switch-name">说话人分离</span>
+            <span class="adv-switch-desc">{{ speakerDiarizationDesc }}</span>
+          </span>
+        </label>
       </section>
 
-      <!-- ④ 输出素材 -->
+      <!-- ③ AI 加工：总结/校正共用模型 + 文本加工开关 -->
       <section class="adv-section adv-section--last">
-        <div class="adv-section-title">输出素材</div>
-        <el-checkbox-group v-model="outputOptions" class="adv-output-group">
-          <el-checkbox value="result_md" border class="adv-output-item">AI 总结 (.md)</el-checkbox>
-          <el-checkbox value="srt" border class="adv-output-item">字幕 (.srt)</el-checkbox>
-          <el-checkbox value="txt" border class="adv-output-item">转录文本 (.txt)</el-checkbox>
-          <el-checkbox value="audio" border class="adv-output-item">纯音频 (.m4a)</el-checkbox>
-          <el-checkbox value="video" border class="adv-output-item">视频 (.mp4)</el-checkbox>
-        </el-checkbox-group>
+        <div class="adv-section-title">AI 加工</div>
+        <div class="adv-field adv-model-field">
+          <div class="adv-field-label">AI 模型（总结 / 校正共用）</div>
+          <el-select
+            v-model="settings.selectedModel"
+            class="adv-model-select"
+            placeholder="选择模型"
+            filterable
+            @change="emit('touch-model')"
+          >
+            <el-option
+              v-for="m in modelStore.models"
+              :key="m.key"
+              :label="modelDisplayName(m)"
+              :value="m.key"
+            />
+          </el-select>
+        </div>
+        <div class="adv-switch-grid">
+          <!-- ★ AI 校正：对所有文本来源生效（B站/平台字幕、云端/本地转录、文本输入）；
+               文案明示代价——校正=全文逐字重新生成，慢且费 token，避免用户误以为"秒级小修" -->
+          <label class="adv-switch-tile" :class="{ on: settings.advancedOptions.ai_correct }">
+            <el-switch v-model="settings.advancedOptions.ai_correct" size="small" />
+            <span class="adv-switch-meta">
+              <span class="adv-switch-name">AI 校正</span>
+              <span class="adv-switch-desc">代价大：全文重新生成，耗时数分钟、token 消耗多；字幕/转录均适用</span>
+            </span>
+          </label>
+          <!-- 转录预览仅在总结成文模式有意义（仅字幕模式后端本就跳过预览） -->
+          <label v-if="settings.doSummary" class="adv-switch-tile" :class="{ on: settings.previewBeforeSummary }">
+            <el-switch v-model="settings.previewBeforeSummary" size="small" />
+            <span class="adv-switch-meta">
+              <span class="adv-switch-name">转录预览</span>
+            </span>
+          </label>
+        </div>
+        <!-- ★ 校正子选项：仅开启 AI 校正时显示（跟在处理开关后） -->
+        <div v-if="settings.advancedOptions.ai_correct" class="adv-field-grid adv-correct-grid">
+          <div class="adv-field">
+            <div class="adv-field-label">校正领域</div>
+            <el-select
+              v-model="settings.advancedOptions.ai_correct_domain"
+              class="adv-field-control"
+            >
+              <el-option label="通用" value="default" />
+              <el-option label="中医 / 针灸" value="tcm" />
+            </el-select>
+          </div>
+          <div class="adv-field">
+            <div class="adv-field-label">校正模型</div>
+            <el-select
+              v-model="settings.advancedOptions.ai_correct_model"
+              class="adv-field-control"
+              :placeholder="correctModelPlaceholder"
+              clearable
+              filterable
+            >
+              <el-option
+                v-for="m in modelStore.models"
+                :key="m.key"
+                :label="modelDisplayName(m)"
+                :value="m.key"
+              />
+            </el-select>
+          </div>
+        </div>
       </section>
     </div>
   </el-card>
@@ -279,6 +292,9 @@ const transcribeLanguageHint = computed(() => {
   color: var(--app-text-secondary);
   margin-bottom: 10px;
 }
+.adv-model-field {
+  margin-bottom: 12px;
+}
 .adv-model-select {
   width: 100%;
 }
@@ -300,6 +316,9 @@ const transcribeLanguageHint = computed(() => {
   background: var(--app-hover-bg, transparent);
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+.adv-switch-tile--single {
+  margin-top: 12px;
 }
 .adv-switch-tile:hover {
   border-color: rgba(var(--app-accent-1-rgb), 0.45);
@@ -327,7 +346,7 @@ const transcribeLanguageHint = computed(() => {
   line-height: 1.35;
 }
 
-/* 任务目标模式卡：与流程方块同视觉语言，置顶处理流程区（2 列宽卡） */
+/* 任务目标模式卡：与流程方块同视觉语言，置顶（2 列宽卡） */
 .mode-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
@@ -393,15 +412,29 @@ const transcribeLanguageHint = computed(() => {
   color: var(--app-text-secondary);
   line-height: 1.55;
 }
-/* 字幕来源子选项行：样式对齐校正子选项（虚线分隔） */
+/* 输出素材块：随模式展开在任务目标区内 */
+.adv-output-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.adv-output-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--app-text-secondary);
+  line-height: 1.4;
+}
+/* 字幕来源子选项行：lead 变体作为区块首行不带虚线分隔 */
 .src-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px 10px;
   margin-bottom: 12px;
-  padding-top: 12px;
-  border-top: 1px dashed var(--app-border);
+}
+.src-row--lead {
+  padding-bottom: 12px;
+  border-bottom: 1px dashed var(--app-border);
 }
 .src-chip {
   display: inline-flex;
@@ -424,6 +457,10 @@ const transcribeLanguageHint = computed(() => {
 .src-chip.on {
   border-color: rgba(var(--app-accent-1-rgb), 0.55);
   background: var(--app-chip-active-soft);
+}
+.src-hint {
+  font-size: 11px;
+  color: var(--app-text-secondary);
 }
 
 /* 转录字段网格 */
@@ -457,7 +494,7 @@ const transcribeLanguageHint = computed(() => {
   color: var(--app-text-secondary);
   line-height: 1.4;
 }
-/* 校正子选项：跟在处理流程开关网格下方，留出一行呼吸空间 */
+/* 校正子选项：跟在开关网格下方，留出一行呼吸空间 */
 .adv-correct-grid {
   margin-top: 12px;
   padding-top: 12px;
