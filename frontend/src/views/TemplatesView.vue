@@ -458,7 +458,7 @@ async function applyLib(item) {
             <el-input v-model="editingRecipeDesc" placeholder="描述（可选）" style="flex: 1;" maxlength="100" />
           </div>
           <div class="recipe-editor-dims">
-            <DimensionSelector v-model="recipeDraft" :show-recipes="false" compact :show-preview="false" />
+            <DimensionSelector v-model="recipeDraft" :show-recipes="false" compact :show-preview="false" :show-custom-add="false" />
           </div>
           <div class="recipe-editor-tip">
             在下方各维度选择模块，点击「保存」即可作为「我的配方」保存到本地（浏览器）；内置配方仅可查看，可基于它「新建」。
@@ -495,8 +495,9 @@ async function applyLib(item) {
                   @click="selectModule(dim.key, m.key)"
                 >
                   <span class="module-tree-name" :title="m.name">{{ m.name }}</span>
-                  <el-tag v-if="m.is_custom" type="success" size="small">自定义</el-tag>
-                  <el-tag v-else-if="m.is_customized" type="warning" size="small">已覆盖</el-tag>
+                  <!-- 自定义模块标注走低调文本（2026-09-13 用户反馈：绿色 tag 太突兀） -->
+                  <span v-if="m.is_custom" class="module-flag">自定义</span>
+                  <el-tag v-else-if="m.is_customized" type="warning" size="small" effect="plain">已覆盖</el-tag>
                 </div>
               </div>
             </div>
@@ -512,7 +513,7 @@ async function applyLib(item) {
                     <span style="color: var(--app-text-secondary); font-weight: normal;">/</span>
                     {{ getSelectedModuleInfo()?.name || selectedModule }}
                   </span>
-                  <el-tag v-if="isCustomModule" type="success" size="small" style="margin-left: 8px;">自定义模块</el-tag>
+                  <el-tag v-if="isCustomModule" type="info" effect="plain" size="small" style="margin-left: 8px;">自定义模块</el-tag>
                   <el-tag v-else-if="isCustomized" type="warning" size="small" style="margin-left: 8px;">已覆盖默认</el-tag>
                   <el-tag v-else type="info" size="small" style="margin-left: 8px;">代码默认</el-tag>
                 </div>
@@ -845,6 +846,14 @@ async function applyLib(item) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.module-flag {
+  font-size: 11px;
+  color: var(--app-text-secondary);
+  flex-shrink: 0;
+}
+.module-tree-item.active .module-flag {
+  color: rgba(255, 255, 255, 0.75);
 }
 
 /* 右侧编辑区（透明卡片） */
