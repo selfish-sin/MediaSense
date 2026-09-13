@@ -28,6 +28,9 @@ const form = reactive({
   api_key: '',
   endpoint: '',
   model_id: '',
+  // auth_type 不在 UI 暴露（2026-09-13：移除表格「认证」列与表单「认证类型」项），
+  // 但提交时必须回传：后端 ModelConfigCreate.auth_type 默认 bearer，PUT 不带它
+  // 会把已有的 direct/none 模型悄悄改成 bearer。新建走默认 bearer，编辑回填原值。
   auth_type: 'bearer',
   temperature: 0.3,
   max_tokens: null,
@@ -328,7 +331,6 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
       </el-table-column>
       <el-table-column prop="endpoint" label="端点" min-width="240" show-overflow-tooltip />
       <el-table-column v-if="!isCompact" prop="model_id" label="模型ID" min-width="130" show-overflow-tooltip />
-      <el-table-column v-if="!isCompact" prop="auth_type" label="认证" min-width="64" show-overflow-tooltip />
       <el-table-column v-if="!isCompact" label="默认" min-width="60" align="center">
         <template #default="{ row }">
           <el-tag v-if="isDefaultModel(row)" type="success" size="small">默认</el-tag>
@@ -437,13 +439,6 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
               />
             </el-tooltip>
           </div>
-        </el-form-item>
-        <el-form-item label="认证类型">
-          <el-select v-model="form.auth_type">
-            <el-option label="Bearer Token" value="bearer" />
-            <el-option label="Direct Key" value="direct" />
-            <el-option label="无认证" value="none" />
-          </el-select>
         </el-form-item>
         <el-form-item label="温度">
           <el-slider v-model="form.temperature" :min="0" :max="2" :step="0.1" show-input />
