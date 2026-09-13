@@ -354,6 +354,9 @@ const transcribeLanguageHint = computed(() => {
   margin-bottom: 12px;
 }
 .mode-card {
+  /* ★ 必须相对定位：隐藏 radio(.mode-input) 是 absolute，没有定位祖先时会
+     飘到文档底部，label 点击聚焦触发 scrollIntoView，页面瞬间"飞"到底 */
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: 10px;
@@ -437,6 +440,7 @@ const transcribeLanguageHint = computed(() => {
   border-bottom: 1px dashed var(--app-border);
 }
 .src-chip {
+  position: relative; /* 同 .mode-card：锚住隐藏 radio，防点击后页面跳滚 */
   display: inline-flex;
   align-items: center;
   gap: 7px;
