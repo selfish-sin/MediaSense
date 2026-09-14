@@ -476,6 +476,7 @@ class TestCallAiEmptyChoicesChunk:
             yield 'data: [DONE]'
 
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.raise_for_status = MagicMock()
         mock_resp.aiter_lines = fake_aiter_lines
         stream_cm = MagicMock()
@@ -497,6 +498,7 @@ class TestCallAiEmptyChoicesChunk:
             yield 'data: [DONE]'
 
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.raise_for_status = MagicMock()
         mock_resp.aiter_lines = fake_aiter_lines
         stream_cm = MagicMock()
@@ -507,3 +509,33 @@ class TestCallAiEmptyChoicesChunk:
         with patch("httpx.AsyncClient", return_value=mock_client):
             content, _, _ = await _call_ai(self._mock_cfg(), "测试提示词")
         assert content == "后续内容"
+
+
+# ── 流式 4xx/5xx 错误透出真实原因（回归：403 被 ResponseNotRead 掩盖）──
+@pytest.mark.asyncio
+class TestCallAiStreamHttpError:
+    """流式请求返回 4xx/5xx 时，错误处理必须先读完整 body 再访问 response.text，
+    否则 httpx 抛 ResponseNotRead（"Attempted to access streaming response content,
+    without having called read()"），把服务端真实原因（如无权访问分组）掩盖掉"""
+
+    def _mock_cfg(self):
+        return MOCK_CFG
+
+    async def test_http_error_exposes_real_reason(self):
+        # 用真实 httpx.Response（流式 body）模拟 403，未读时访问 .text 会抛 ResponseNotRead
+        body = '{"error": {"message": "无权访问 gemini高级普通 分组"}}'.encode('utf-8')
+        stream_resp = httpx.Response(
+            403,
+            request=httpx.Request("POST", MOCK_CFG["endpoint"]),
+            stream=httpx.ByteStream(body),
+        )
+        stream_cm = MagicMock()
+        stream_cm.__aenter__ = AsyncMock(return_value=stream_resp)
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.stream = MagicMock(return_value=stream_cm)
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            content, _, _ = await _call_ai(self._mock_cfg(), "测试提示词")
+        # 必须透出服务端真实原因，而不是 httpx 的 ResponseNotRead 流错误
+        assert "无权访问 gemini高级普通 分组" in content
+        assert "Attempted to access streaming response content" not in content

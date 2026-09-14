@@ -448,7 +448,9 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
                                      verify=not bool(model_cfg.get('skip_ssl_verify'))) as client:
                 async with client.stream("POST", endpoint, json=payload, headers=headers) as resp:
                     if resp.status_code != 200:
-                        # ★ 透出服务端返回的真实原因（如 model_not_found），过滤 HTML 错误页
+                        # ★ 流式响应必须先读完整 body 才能读取 response.text 透出真实原因，
+                        #   否则 describe_http_response 访问未读流会抛 ResponseNotRead
+                        await resp.aread()
                         yield _sse({"type": "error", "message": f"模型调用失败 {describe_http_response(resp)}"})
                         return
                     async for line in resp.aiter_lines():

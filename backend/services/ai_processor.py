@@ -98,6 +98,12 @@ async def _call_ai(
 
             async with httpx.AsyncClient(timeout=timeout, verify=_client_verify(model_cfg)) as client:
                 async with client.stream("POST", model_cfg['endpoint'], headers=headers, json=payload) as resp:
+                    if resp.status_code >= 400:
+                        # ★ 流式响应必须先读完整 body，错误处理（describe_http_error）才能读取
+                        #   response.text 透出服务端真实原因；否则访问未读的流会抛
+                        #   ResponseNotRead（"Attempted to access streaming response content..."），
+                        #   把 4xx/5xx 真实原因（如无权访问分组）掩盖成莫名其妙的流错误
+                        await resp.aread()
                     resp.raise_for_status()
                     async for line in resp.aiter_lines():
                         if not line.startswith("data: "):
