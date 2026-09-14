@@ -802,10 +802,17 @@ async def generate_mindmap(
             _record_token_usage(model, in_tok, out_tok, job_id)
             return content or ''
     except httpx.HTTPStatusError as e:
-        logger.error(f'思维导图生成失败: {describe_http_error(e)}')
+        detail = describe_http_error(e)
+        logger.error(f'思维导图生成失败: {detail}')
+        if sio:
+            from socket_handlers import emit_log
+            await emit_log(sio, job_id, f'⚠ 思维导图生成失败: {detail}')
         return ''
     except Exception as e:
         logger.error(f'思维导图生成失败: {e}')
+        if sio:
+            from socket_handlers import emit_log
+            await emit_log(sio, job_id, f'⚠ 思维导图生成失败: {e}')
         return ''
 
 
@@ -855,10 +862,17 @@ async def generate_tags(
                 return [t for t in tags if isinstance(t, str)][:5]
             return []
     except httpx.HTTPStatusError as e:
-        logger.warning(f'自动打标签失败: {describe_http_error(e)}')
+        detail = describe_http_error(e)
+        logger.warning(f'自动打标签失败: {detail}')
+        if sio:
+            from socket_handlers import emit_log
+            await emit_log(sio, job_id, f'⚠ 打标签失败: {detail}')
         return []
     except Exception as e:
         logger.warning(f'自动打标签失败: {e}')
+        if sio:
+            from socket_handlers import emit_log
+            await emit_log(sio, job_id, f'⚠ 打标签失败: {e}')
         return []
 
 

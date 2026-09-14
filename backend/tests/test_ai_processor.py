@@ -132,6 +132,26 @@ class TestGenerateTags:
                 tags = await generate_tags("test")
                 assert tags == []
 
+    async def test_tags_http_error_emits_real_reason(self):
+        # 回归：打标签 4xx 时服务端错误文字必须推到前端（socket 日志），不能只进日志文件
+        with patch("services.ai_processor.get_model_by_key", return_value=self.mock_cfg):
+            # 构造 403 流式响应体（非流式 post 失败时 describe_http_error 要读到它）
+            req = httpx.Request("POST", MOCK_CFG["endpoint"])
+            resp = httpx.Response(403, request=req,
+                                  content='{"error": {"message": "无权访问 gemini高级普通 分组"}}'.encode('utf-8'))
+            mock_client = AsyncMock()
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.post.side_effect = httpx.HTTPStatusError(
+                "403 Forbidden", request=req, response=resp)
+            with patch("httpx.AsyncClient", return_value=mock_client):
+                with patch("socket_handlers.emit_log", new=AsyncMock()) as mock_emit:
+                    tags = await generate_tags("test", sio=object(), job_id="job-x")
+                    assert tags == []
+                    mock_emit.assert_awaited_once()
+                    msg = mock_emit.await_args.args[2]
+                    assert "无权访问 gemini高级普通 分组" in msg
+                    assert "Attempted to access streaming" not in msg
+
 
 @pytest.mark.asyncio
 class TestGenerateMindmap:
