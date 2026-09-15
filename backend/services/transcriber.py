@@ -141,6 +141,11 @@ def list_local_models() -> list:
     return models
 
 
+def any_whisper_ready() -> bool:
+    """本地是否有任意一档 Whisper 模型就绪（工作台引擎下拉用，不遍历目录大小）"""
+    return any(_model_complete(p) for p in LOCAL_MODEL_DIRS.values())
+
+
 def remove_local_model(size: str) -> dict:
     """删除本地 Whisper 指定档位模型目录，返回释放字节数（档位非法抛 ValueError）。"""
     path = LOCAL_MODEL_DIRS.get(size)
@@ -675,7 +680,11 @@ def write_clean_text(txt_path: str) -> Optional[str]:
 # - 'cloud'=MiMo（付费主力），'cloud_free'=XingChen Ultra（免费档，简单视频）
 # - cloud（付费）失败先落 cloud_free（免费）：云端之间互为梯队且成本只降不升；
 #   反向不成立——用户选免费档失败绝不转付费引擎
-# - firered 只在模型就绪时参与回退（兜底绝不触发 1.1GB 下载，见 _fallback_chain）
+# - 本地 ONNX 引擎（firered）只在**模型就绪**时参与兜底
+#   （下载只发生在用户显式选择该引擎的首次使用，绝不作为兜底的隐性副作用）
+# - 本地大模型**不进云端降级路径**：云端失败不擅自切到 1.5GB 的本地模型
+_LOCAL_ONNX_ENGINES = ('firered',)
+
 _FALLBACK_CHAINS = {
     'cloud': ('cloud', 'cloud_free', 'firered', 'local'),
     'cloud_free': ('cloud_free', 'firered', 'local'),
@@ -696,14 +705,22 @@ def engine_label(engine: str) -> str:
     return _ENGINE_LABELS.get(engine, _ENGINE_LABELS['cloud'])
 
 
+# 引擎值白名单（提交入口校验用）：单点，勿在 main.py 等处再抄一份字面量
+ENGINE_VALUES: Tuple[str, ...] = tuple(_ENGINE_LABELS)
+
+
 def _fallback_chain(engine: str) -> Tuple[str, ...]:
-    """用户选择的引擎 → 实际回退链。firered 模型未就绪时从链中剔除（下载只发生在
-    用户显式选 firered 的首次使用，不作为兜底的隐性副作用）。"""
+    """用户选择的引擎 → 实际回退链。
+
+    本地 ONNX 引擎模型未就绪时从**兜底**链路中剔除；用户自己选的那一档永远保留
+    （显式选择才允许触发按需下载）。
+    """
     chain = _FALLBACK_CHAINS.get(engine, _FALLBACK_CHAINS['cloud'])
-    if engine != 'firered':
-        from services.local_asr import firered_model_ready
-        chain = tuple(e for e in chain if e != 'firered' or firered_model_ready())
-    return chain
+    if engine in _LOCAL_ONNX_ENGINES:
+        return chain
+    from services import local_asr
+    return tuple(e for e in chain
+                 if e not in _LOCAL_ONNX_ENGINES or local_asr.engine_ready(e))
 
 
 def _transcribe_by_engine(
@@ -718,10 +735,12 @@ def _transcribe_by_engine(
     device: str,
 ) -> Tuple[str, str, int]:
     """单引擎尝试（不处理回退）。未知引擎一律按 cloud。"""
-    if engine == 'firered':
-        # 惰性导入避免循环依赖（local_asr → cloud_asr → 本模块）
+    if engine in _LOCAL_ONNX_ENGINES:
+        # 惰性导入避免循环依赖（local_asr → cloud_asr → 本模块）。
+        # 模型缺失时按需下载——只有用户显式选择该引擎才会走到这里
         from services import local_asr
-        return local_asr.transcribe_audio_firered(
+        return local_asr.transcribe_audio_local(
+            engine,
             audio_path,
             progress_callback=progress_callback,
             cancel_check=cancel_check,

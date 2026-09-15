@@ -1,26 +1,43 @@
 """
-本地 FireRedASR2-AED 转录服务（sherpa-onnx int8 / onnxruntime，CPU，不依赖 torch）
+本地 ASR 引擎（sherpa-onnx / onnxruntime，CPU，不依赖 torch）
 
-小红书 FireRedASR2-AED 的 ONNX int8 版（AISHELL-1 CER 0.57%，比云端 SenseVoice
-~3.0% 更准；实测中文长音频 RTF 0.271 ≈ 3.7x 实时，峰值内存 ~1.7GB）。
-本地无时间戳语义与云端相同：silero VAD 给出段级边界（精确到样本），段内文本
-复用 cloud_asr.split_sentences/distribute_times 句级化。
+## 新增通道（本模块的设计核心）
 
-契约与云端/Whisper 引擎一致：返回 (srt_path, txt_path, seg_count)。
+**加一个本地引擎 = 在 `LOCAL_ENGINES` 加一条声明 + 写一个 `transcribe_audio_<key>()`**。
+就绪判定 / 文件明细 / 磁盘占用 / 后台下载（含取消与进度）/ 删除 / 运行互斥 全部由
+通用生命周期按 key 分发，不需要改路由、前端或其它服务。
 
-错误语义（禁止静默吞错）：
-- 模型缺失 → 按需下载（进度可见）；下载/解包失败上抛，错误文案含手动下载指引
-- sherpa-onnx 未安装 → 上抛可行动错误
-- 识别/标点异常 → 上抛，由 transcriber 路由回退本地 Whisper（原因可见）
-- 用户取消 → TranscriptionCancelledError（不回退）
+## 已注册引擎
 
-并发内存：实测峰值 ~1.7GB，MAX_CONCURRENT_JOBS=2 下两个 firered 任务并发会
-翻倍——模块级 _FIRERED_LOCK 串行化本引擎（Whisper 不受影响）。
+| 引擎值 | 模型 | 说明 |
+|---|---|---|
+| `firered` | FireRedASR2-AED int8（~1.5GB） | 中英最准，实测 RTF≈0.21；**语义冻结** |
 
-sherpa-onnx API 坑点（实测踩出来的，勿"顺手重构"）：
-- VAD 必须 VadModel.create(config)，直接 VadModel(...) 报 "No constructor defined"
-- vad.window_size 是【方法】不是属性，写 vad.window_size 会报 unsupported operand
-- OfflinePunctuation 没有 from_* 工厂，直接 OfflinePunctuation(cfg)
+> 曾评估过两条 LLM 类路线（通义 Fun-ASR-Nano-2512、Qwen3-ASR ONNX），2026-09-15 实机横评后
+> **放弃**：同一段 90s 中文素材上，CPU int8 自回归解码 RTF 0.5~1.0（FireRed 仅 0.27，慢 2~4 倍），
+> 且出现成段重复循环幻觉（"those are the ones that are…"）、中英混出，调短 VAD 段长与显式
+> `language=zh` 都未能消除。结论：本地档继续只保留 FireRed，不再引入 LLM 解码类引擎。
+> 详见 task 09-15-local-asr-engine-registry 的横评记录。
+
+## 通用契约
+
+- 所有引擎返回 `(srt_path, txt_path, seg_count)`，与云端/Whisper 完全一致
+- 管线：ffmpeg 16k 单声道 wav → silero VAD 分段（+0.15s padding）→ 段间并行解码 → 句级写盘
+  （`cloud_asr.split_sentences/distribute_times`），再跑 CT-Transformer 标点
+- 错误语义（禁止静默吞错）：模型缺失 → 按需下载（进度可见，失败文案含手动指引）；
+  sherpa-onnx 未安装 → 可行动错误；识别异常 → 上抛由 transcriber 回退；用户取消 → 不回退
+- 占位不变量：**兜底链路绝不触发模型下载**（只有用户显式选择该引擎且模型缺失才下载）
+
+## 并发与内存
+
+实测 FireRed 峰值 ~1.7GB，`MAX_CONCURRENT_JOBS=2` 下并发会翻倍——按引擎模块级锁串行化
+（Whisper 不受影响）。
+
+## sherpa-onnx API 坑点（实测踩出来的，勿"顺手重构"）
+
+- VAD 必须 `VadModel.create(config)`，直接 `VadModel(...)` 报 "No constructor defined"
+- `vad.window_size` 是【方法】不是属性；`vad.front` 是方法不是属性
+- `OfflinePunctuation` 没有 `from_*` 工厂，直接 `OfflinePunctuation(cfg)`
 """
 import importlib.util
 import logging
@@ -33,6 +50,7 @@ import threading
 import time
 import wave
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -43,6 +61,7 @@ from config import (
     FIRERED_MODEL_DIR,
     FIRERED_PUNCT_MODEL_DIR,
     FIRERED_VAD_MODEL_PATH,
+    WHISPER_BASE,
 )
 from services.cloud_asr import (
     _ffmpeg_bin,
@@ -59,13 +78,41 @@ from services.transcriber import (
 
 logger = logging.getLogger(__name__)
 
-# 模型下载（GitHub release，需 follow_redirects；URL 已实测 200/302 可达）
-_URL_FIRERED = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
-                "sherpa-onnx-fire-red-asr2-zh_en-int8-2026-02-26.tar.bz2")
-_URL_PUNCT = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models/"
-              "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12.tar.bz2")
-_URL_VAD = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
-            "silero_vad.onnx")
+# ============ 模型下载源（2026-09-15 实测后定型，勿随手改顺序） ============
+# 实测结论：本机 **GitHub release 全部被 TLS 重置**（含 hf-mirror / ghproxy 类加速站），
+# 而 **ModelScope 稳定可用**。故一律 **ModelScope 优先、GitHub 兜底**：
+# 镜像里的 tar 与官方字节数一致（firered 838,589,068 / nano 750,635,863），
+# 逐文件源的清单也用 Range 请求核对过（punct model.onnx 294,372,519 = 本地原文件大小）。
+_MS = 'https://modelscope.cn/models/{repo}/resolve/master/{path}'
+_GH = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/{tag}/{file}'
+
+_MS_ASR_MODELS = 'csukuangfj/asr-models'
+_MS_PUNCT_REPO = 'csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12'
+# k2-fsa 版 silero_vad.onnx（629KB）没有国内镜像；manyeyes 的 snakers4 官方 v4 导出
+# （1.72MB，支持 16k/8k）国内可取，sherpa-onnx 官方文档列为受支持版本
+_MS_VAD_REPO = 'manyeyes/silero-vad-onnx'
+
+
+def _ms(repo: str, path: str) -> str:
+    return _MS.format(repo=repo, path=path)
+
+
+def _gh(tag: str, file: str) -> str:
+    return _GH.format(tag=tag, file=file)
+
+
+_URL_FIRERED = (
+    _ms(_MS_ASR_MODELS, 'sherpa-onnx-fire-red-asr2-zh_en-int8-2026-02-26.tar.bz2'),
+    _gh('asr-models', 'sherpa-onnx-fire-red-asr2-zh_en-int8-2026-02-26.tar.bz2'),
+)
+# 标点模型走「逐文件」：镜像仓库把 model.onnx 单独发布（字节数与本地原文件一致）
+_URL_PUNCT_MODEL = (
+    _ms(_MS_PUNCT_REPO, 'model.onnx'),
+)
+_URL_VAD = (
+    _ms(_MS_VAD_REPO, 'silero_vad.onnx'),
+    _gh('asr-models', 'silero_vad.onnx'),
+)
 
 # 识别参数（60s 样本实测扫参：threads=3 + 6 路并行解码 RTF≈0.21，
 # 比串行（RTF≈0.40）快 ~1.9x，文本逐字一致；threads 抬高反而劣化（16 线程 RTF 0.82）。
@@ -87,11 +134,125 @@ _VAD_PAD_SECONDS = 0.15
 _PROGRESS_MODEL_MAX = 8   # 0~8 模型下载
 _PROGRESS_RECOG_BASE = 10
 
-_FIRERED_LOCK = threading.Lock()
 
-# ── 模型文件生命周期状态（模型管理页「本地 ASR」用）──
-# 下载状态是进程内单例：下载失败/中断后可重试，重启后回到 idle（重试即可，不需持久化）
-_download_state: dict = {'status': 'idle', 'percent': 0, 'message': '', 'error': ''}
+# ============ 引擎注册表（新增通道：加引擎只改这里） ============
+
+@dataclass(frozen=True)
+class Resolver:
+    """文件解析器：`resolve()` 取实际命中的文件（缺则 None），`primary()` 取"期望路径"（用于展示缺失项）"""
+    resolve: Callable[[], Optional[Path]]
+    primary: Callable[[], Path]
+
+
+def _abs(path_fn: Callable[[], Path]) -> Resolver:
+    """绝对路径（模块级常量在调用时解析，保证运行时可替换/测试 monkeypatch 生效）"""
+    def _resolve() -> Optional[Path]:
+        p = path_fn()
+        return p if _file_ok(p) else None
+    return Resolver(_resolve, path_fn)
+
+
+@dataclass(frozen=True)
+class EnginePart:
+    """一个关键模型文件：就绪判定与「文件明细」的最小单元"""
+    key: str
+    label: str
+    resolver: Resolver
+
+
+@dataclass(frozen=True)
+class EngineArchive:
+    """下载包；urls 按顺序回退（GitHub 失败自动试 ModelScope 镜像）
+
+    `satisfied` 声明"这个包的内容是否已具备"：已具备则跳过下载；dest 已存在但又未具备
+    （残缺目录）时**拒绝自动覆盖**——那多半是用户手动放置的模型，直接删掉太危险。
+    """
+    urls: Tuple[str, ...]
+    label: str
+    dest: Callable[[], Path]
+    kind: str = 'tar'          # tar = 解包成目录（单一顶层目录改名为 dest）；file = 直接落位
+    satisfied: Optional[Callable[[], bool]] = None
+
+
+@dataclass(frozen=True)
+class LocalEngine:
+    key: str
+    name: str
+    languages: str
+    note: str
+    parts: Tuple[EnginePart, ...]
+    removable: Tuple[Callable[[], Path], ...]
+    archives: Tuple[EngineArchive, ...] = ()
+    size_hint: str = ''
+    fee: str = '免费'          # 本地引擎一律免费；单点字段，前端只显示不推断
+
+
+def _firered_core_ready() -> bool:
+    """FireRedASR 主包（三件套）是否已具备——决定主 tar 要不要重新下载"""
+    return all(_file_ok(p) for p in (
+        FIRERED_MODEL_DIR / 'encoder.int8.onnx',
+        FIRERED_MODEL_DIR / 'decoder.int8.onnx',
+        FIRERED_MODEL_DIR / 'tokens.txt',
+    ))
+
+
+def _firered_punct_ready() -> bool:
+    """FireRedASR 标点模型包是否已具备"""
+    return _file_ok(FIRERED_PUNCT_MODEL_DIR / 'model.onnx')
+
+
+LOCAL_ENGINES: dict = {
+    'firered': LocalEngine(
+        key='firered',
+        name='本地 FireRedASR',
+        languages='中文 / 英文',
+        note='FireRedASR2-AED（int8）中英最准，实测 RTF≈0.21；不支持说话人分离',
+        parts=(
+            EnginePart('encoder', '声学编码器', _abs(lambda: FIRERED_MODEL_DIR / 'encoder.int8.onnx')),
+            EnginePart('decoder', '声学解码器', _abs(lambda: FIRERED_MODEL_DIR / 'decoder.int8.onnx')),
+            EnginePart('tokens', '词表', _abs(lambda: FIRERED_MODEL_DIR / 'tokens.txt')),
+            EnginePart('punct', '标点模型', _abs(lambda: FIRERED_PUNCT_MODEL_DIR / 'model.onnx')),
+            EnginePart('vad', 'VAD 模型（静音检测）', _abs(lambda: FIRERED_VAD_MODEL_PATH)),
+        ),
+        removable=(
+            lambda: FIRERED_MODEL_DIR,
+            lambda: FIRERED_PUNCT_MODEL_DIR,
+            lambda: FIRERED_VAD_MODEL_PATH,
+        ),
+        archives=(
+            EngineArchive(_URL_FIRERED, 'FireRedASR 模型（838MB）',
+                          lambda: FIRERED_MODEL_DIR, satisfied=_firered_core_ready),
+            EngineArchive(_URL_PUNCT_MODEL, '标点模型（294MB）',
+                          lambda: FIRERED_PUNCT_MODEL_DIR / 'model.onnx',
+                          kind='file', satisfied=_firered_punct_ready),
+            EngineArchive(_URL_VAD, 'VAD 模型（1.7MB）',
+                          lambda: FIRERED_VAD_MODEL_PATH, kind='file'),
+        ),
+        size_hint='约 1.5GB',
+    ),
+}
+
+# 引擎值白名单（写进 job options 的值；'local'=Whisper 由 transcriber 管，不在此表）
+LOCAL_ENGINE_KEYS: Tuple[str, ...] = tuple(LOCAL_ENGINES)
+
+# 引擎级互斥锁：模型常驻内存且解码吃满 CPU（实测 FireRed 峰值 ~1.7GB），
+# MAX_CONCURRENT_JOBS=2 下并发会翻倍——按引擎串行化；Whisper 不受影响
+_ENGINE_LOCKS = {key: threading.Lock() for key in LOCAL_ENGINES}
+
+
+def engine_lock(key: str) -> threading.Lock:
+    """取引擎互斥锁（解码串行化 + 删除前忙碌判断共用同一把锁）"""
+    lock = _ENGINE_LOCKS.get(key)
+    if lock is None:
+        raise KeyError(f'未注册的本地引擎: {key}')
+    return lock
+
+# FireRed 的互斥锁沿用注册表里的同一把（firered_busy 与解码串行化共用，勿另建）
+_FIRERED_LOCK = _ENGINE_LOCKS['firered']
+
+# ── 模型下载状态（进程内单例：同一时刻只允许一个引擎在下载）──
+# 记 engine 是因为「本地 ASR」页要显示哪个引擎在下；失败/中断后可重试，重启回 idle
+_download_state: dict = {'status': 'idle', 'engine': '', 'percent': 0, 'message': '', 'error': ''}
 _download_lock = threading.Lock()
 _download_cancel = threading.Event()
 _download_thread: Optional[threading.Thread] = None
@@ -101,29 +262,23 @@ def _file_ok(p: Path) -> bool:
     return p.is_file() and p.stat().st_size > 0
 
 
-def firered_model_ready() -> bool:
-    """三件套（encoder/decoder/tokens）+ 标点模型 + VAD 模型全部就位。"""
-    parts = [
-        FIRERED_MODEL_DIR / "encoder.int8.onnx",
-        FIRERED_MODEL_DIR / "decoder.int8.onnx",
-        FIRERED_MODEL_DIR / "tokens.txt",
-        FIRERED_PUNCT_MODEL_DIR / "model.onnx",
-        FIRERED_VAD_MODEL_PATH,
-    ]
-    return all(_file_ok(p) for p in parts)
-
-
-# ============ 模型文件生命周期（模型管理页「本地 ASR」） ============
-# 就绪判定/下载/删除的唯一入口都在本模块——路由层只做参数校验与并发编排，
-# 不要绕过这些函数直接删/建模型文件（否则就绪判定会与实际文件漂移）。
-
-_MODEL_PARTS = (
-    ('encoder', '声学编码器', lambda: FIRERED_MODEL_DIR / 'encoder.int8.onnx'),
-    ('decoder', '声学解码器', lambda: FIRERED_MODEL_DIR / 'decoder.int8.onnx'),
-    ('tokens', '词表', lambda: FIRERED_MODEL_DIR / 'tokens.txt'),
-    ('punct', '标点模型', lambda: FIRERED_PUNCT_MODEL_DIR / 'model.onnx'),
-    ('vad', 'VAD 模型（静音检测）', lambda: FIRERED_VAD_MODEL_PATH),
-)
+def _dir_size(path: Path) -> int:
+    """文件/目录的字节数（不存在或无权访问按 0 计，不让状态接口整体失败）"""
+    if not path.exists():
+        return 0
+    if path.is_file():
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+    total = 0
+    for p in path.rglob('*'):
+        try:
+            if p.is_file():
+                total += p.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def sherpa_available() -> bool:
@@ -134,73 +289,127 @@ def sherpa_available() -> bool:
         return False
 
 
-def firered_busy() -> bool:
-    """是否有 FireRedASR 转录正在跑（模型文件删除前必须检查，避免删掉运行中的模型）"""
-    return _FIRERED_LOCK.locked()
+# ============ 通用引擎生命周期（新增通道：路由/前端只按 key 调用） ============
+# 就绪判定/下载/删除的唯一入口都在本模块——不要绕过这些函数直接删/建模型文件
+# （否则就绪判定会与实际文件漂移）。
+
+def engine_ready(key: str) -> bool:
+    """该引擎关键文件是否全部就位（缺任一即未就绪，禁止「文件在但残缺」当成可用）"""
+    spec = LOCAL_ENGINES.get(key)
+    if spec is None:
+        return False
+    return all(part.resolver.resolve() is not None for part in spec.parts)
 
 
-def model_file_status() -> dict:
-    """FireRedASR 五个模型文件逐项状态 + 总占用（磁盘字节）。"""
-    files = []
-    total = 0
-    for key, label, path_fn in _MODEL_PARTS:
-        path = path_fn()
-        size = path.stat().st_size if path.exists() else 0
-        total += size
-        files.append({
-            'key': key,
-            'label': label,
+def engine_busy(key: str) -> bool:
+    """该引擎是否正在解码（删除模型文件前必须检查）"""
+    lock = _ENGINE_LOCKS.get(key)
+    return bool(lock and lock.locked())
+
+
+def engine_part_status(key: str) -> List[dict]:
+    """文件明细：每个关键文件的期望路径 / 是否命中 / 大小"""
+    out: List[dict] = []
+    for part in LOCAL_ENGINES[key].parts:
+        hit = part.resolver.resolve()
+        path = hit if hit is not None else part.resolver.primary()
+        try:
+            size = path.stat().st_size if hit is not None else 0
+        except OSError:
+            size = 0
+        out.append({
+            'key': part.key,
+            'label': part.label,
             'path': str(path),
-            'ready': _file_ok(path),
+            'ready': hit is not None,
             'bytes': size,
         })
+    return out
+
+
+_IDLE_DOWNLOAD = {'status': 'idle', 'percent': 0, 'message': '', 'error': ''}
+
+
+def engine_status(key: str) -> dict:
+    """单个本地引擎的完整状态（模型管理页「本地 ASR」直接消费，前端不再自行推断）"""
+    spec = LOCAL_ENGINES[key]
+    removable = [fn() for fn in spec.removable]
+    state = get_download_state()
+    download = state if state.get('engine') == key else dict(_IDLE_DOWNLOAD, engine=key)
     return {
-        'ready': firered_model_ready(),
-        'files': files,
-        'bytes': total,
-        'dir': str(FIRERED_MODEL_DIR),
-        'punct_dir': str(FIRERED_PUNCT_MODEL_DIR),
-        'vad_path': str(FIRERED_VAD_MODEL_PATH),
-        'sherpa_available': sherpa_available(),
+        'key': key,
+        'name': spec.name,
+        'fee': spec.fee,
+        'languages': spec.languages,
+        'note': spec.note,
+        'size_hint': spec.size_hint,
+        'ready': engine_ready(key),
+        'busy': engine_busy(key),
+        'bytes': sum(_dir_size(p) for p in removable),
+        'dir': str(removable[0]) if removable else '',
+        'parts': engine_part_status(key),
+        'manual_hint': f'手动放置：{removable[0]}' if removable else '',
+        'download': download,
     }
 
 
+def list_engines_status() -> List[dict]:
+    """全部已注册本地引擎的完整状态（含未下载的；含磁盘遍历，较重）"""
+    return [engine_status(key) for key in LOCAL_ENGINES]
+
+
+def engines_ready_map() -> dict:
+    """{引擎值: 是否就绪}——只做文件存在性检查，不遍历磁盘大小。
+
+    供工作台轻量状态接口（/api/asr/status）用：那里只要"能不能选"，不要占用统计。
+    """
+    return {key: engine_ready(key) for key in LOCAL_ENGINES}
+
+
 def get_download_state() -> dict:
-    """当前模型下载状态快照：{status: idle|downloading|done|error, percent, message, error}"""
+    """当前下载状态快照：{status: idle|downloading|done|error, engine, percent, message, error}"""
     with _download_lock:
         return dict(_download_state)
 
 
-def start_model_download() -> bool:
-    """后台线程按需下载缺失的 FireRedASR 模型；已在下载中返回 False。
+def _set_download_state(**kwargs) -> None:
+    with _download_lock:
+        _download_state.update(kwargs)
+
+
+def start_engine_download(key: str) -> bool:
+    """后台线程按需下载指定引擎的模型；已有下载在跑时返回 False。
 
     进度写入 `_download_state` 供前端轮询（长任务不能占住 HTTP 请求）。
     """
     global _download_thread
+    if key not in LOCAL_ENGINES:
+        raise KeyError(f'未注册的本地引擎: {key}')
     with _download_lock:
         if _download_state['status'] == 'downloading':
             return False
-        _download_state.update({'status': 'downloading', 'percent': 0,
+        _download_state.update({'status': 'downloading', 'engine': key, 'percent': 0,
                                 'message': '准备下载...', 'error': ''})
     _download_cancel.clear()
 
     def _run() -> None:
         try:
-            _ensure_model_ready(
+            _ensure_engine_ready(
+                key,
                 progress_callback=lambda pct, msg: _set_download_state(
                     percent=max(0, min(int(pct), 100)), message=str(msg)),
                 cancel_check=_download_cancel.is_set,
             )
         except TranscriptionCancelledError:
-            logger.info('FireRedASR 模型下载被取消')
+            logger.info(f'{key} 模型下载被取消')
             _set_download_state(status='idle', percent=0, message='下载已取消')
         except Exception as e:
-            logger.error(f'FireRedASR 模型下载失败: {e}')
+            logger.error(f'{key} 模型下载失败: {e}')
             _set_download_state(status='error', message='下载失败', error=str(e))
         else:
             _set_download_state(status='done', percent=100, message='模型已就绪')
 
-    _download_thread = threading.Thread(target=_run, name='firered-model-download', daemon=True)
+    _download_thread = threading.Thread(target=_run, name=f'{key}-model-download', daemon=True)
     _download_thread.start()
     return True
 
@@ -214,27 +423,65 @@ def cancel_model_download() -> bool:
     return running
 
 
-def remove_model_files() -> dict:
-    """删除 FireRedASR 三件套 + 标点 + VAD，返回释放的字节数。
-
-    下载进行中拒绝删除（调用方转 409，避免与下载线程互相破坏文件）。
-    """
+def remove_engine(key: str) -> dict:
+    """删除指定引擎的模型文件，返回释放字节数（下载中 / 解码中拒绝删除）。"""
+    if key not in LOCAL_ENGINES:
+        raise KeyError(f'未注册的本地引擎: {key}')
     with _download_lock:
-        if _download_state['status'] == 'downloading':
+        if _download_state['status'] == 'downloading' and _download_state.get('engine') == key:
             raise Exception('模型正在下载中，请先取消下载或等待完成再删除')
-    freed = model_file_status()['bytes']
-    shutil.rmtree(FIRERED_MODEL_DIR, ignore_errors=True)
-    shutil.rmtree(FIRERED_PUNCT_MODEL_DIR, ignore_errors=True)
-    FIRERED_VAD_MODEL_PATH.unlink(missing_ok=True)
+    if engine_busy(key):
+        raise Exception(f'{LOCAL_ENGINES[key].name} 正在转录中，请等待当前任务结束再删除模型')
+    removable = [fn() for fn in LOCAL_ENGINES[key].removable]
+    freed = sum(_dir_size(p) for p in removable)
+    for path in removable:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
     with _download_lock:
-        _download_state.update({'status': 'idle', 'percent': 0, 'message': '', 'error': ''})
-    logger.info(f'已删除 FireRedASR 模型文件，释放 {freed} 字节')
-    return {'freed_bytes': freed, 'ready': firered_model_ready()}
+        if _download_state.get('engine') == key:
+            _download_state.update({'status': 'idle', 'engine': '', 'percent': 0,
+                                    'message': '', 'error': ''})
+    logger.info(f'已删除本地引擎 {key} 的模型文件，释放 {freed} 字节')
+    return {'freed_bytes': freed, 'ready': engine_ready(key)}
 
 
-def _set_download_state(**kwargs) -> None:
-    with _download_lock:
-        _download_state.update(kwargs)
+# ── FireRed 兼容包装（旧 API 名；路由/测试/其它服务沿用，语义与改造前一致）──
+
+def firered_model_ready() -> bool:
+    """三件套（encoder/decoder/tokens）+ 标点模型 + VAD 模型全部就位。"""
+    return engine_ready('firered')
+
+
+def firered_busy() -> bool:
+    """是否有 FireRedASR 转录正在跑（模型文件删除前必须检查）"""
+    return engine_busy('firered')
+
+
+def model_file_status() -> dict:
+    """FireRedASR 文件明细 + 占用（兼容旧契约：files/dir/punct_dir/vad_path）"""
+    parts = engine_part_status('firered')
+    return {
+        'ready': engine_ready('firered'),
+        'files': parts,
+        'parts': parts,
+        'bytes': sum(_dir_size(fn()) for fn in LOCAL_ENGINES['firered'].removable),
+        'dir': str(FIRERED_MODEL_DIR),
+        'punct_dir': str(FIRERED_PUNCT_MODEL_DIR),
+        'vad_path': str(FIRERED_VAD_MODEL_PATH),
+        'sherpa_available': sherpa_available(),
+    }
+
+
+def start_model_download() -> bool:
+    """（兼容旧名）下载 FireRedASR 模型"""
+    return start_engine_download('firered')
+
+
+def remove_model_files() -> dict:
+    """（兼容旧名）删除 FireRedASR 模型文件"""
+    return remove_engine('firered')
 
 
 def _manual_hint(url: str, target: Path) -> str:
@@ -244,39 +491,51 @@ def _manual_hint(url: str, target: Path) -> str:
     )
 
 
-def _download_file(url: str, dest: Path, label: str,
+def _download_file(urls, dest: Path, label: str,
                    progress_callback=None, cancel_check=None,
-                   pct_base: float = 0.0, pct_span: float = 1.0) -> None:
-    """流式下载单文件到 dest（带字节级进度），失败上抛并附手动指引。"""
+                   pct_base: float = 0.0, pct_span: float = 1.0,
+                   hint_target: Optional[Path] = None) -> None:
+    """流式下载单文件到 dest（带字节级进度）。
+
+    urls 可以是字符串或地址列表：多地址按顺序回退（ModelScope 优先、GitHub 兜底）。
+    全部失败时上抛，文案含每个地址的手动下载指引（`hint_target` 用于 tar 场景——
+    提示用户放到"解压后的目录"而不是那个临时 tar 路径）。
+    """
+    candidates = [urls] if isinstance(urls, str) else list(urls)
+    hint_path = hint_target or dest
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + '.part')
-    try:
-        with httpx.Client(follow_redirects=True, timeout=60.0) as client:
-            with client.stream('GET', url) as resp:
-                resp.raise_for_status()
-                total = int(resp.headers.get('content-length') or 0)
-                done = 0
-                with open(tmp, 'wb') as f:
-                    for chunk in resp.iter_bytes(1024 * 1024):
-                        if cancel_check and cancel_check():
-                            raise TranscriptionCancelledError('用户取消，模型下载中止')
-                        f.write(chunk)
-                        done += len(chunk)
-                        if progress_callback and total > 0:
-                            pct = pct_base + pct_span * min(done / total, 1.0)
-                            progress_callback(
-                                int(pct),
-                                f'下载 {label} {done // (1024 * 1024)}MB / {total // (1024 * 1024)}MB'
-                            )
-        tmp.replace(dest)
-    except TranscriptionCancelledError:
-        tmp.unlink(missing_ok=True)
-        raise
-    except Exception as e:
-        tmp.unlink(missing_ok=True)
-        raise Exception(
-            f'下载 {label} 失败（{type(e).__name__}: {e}）。{_manual_hint(url, dest)}'
-        ) from e
+    errors: List[str] = []
+    for url in candidates:
+        try:
+            with httpx.Client(follow_redirects=True, timeout=60.0) as client:
+                with client.stream('GET', url) as resp:
+                    resp.raise_for_status()
+                    total = int(resp.headers.get('content-length') or 0)
+                    done = 0
+                    with open(tmp, 'wb') as f:
+                        for chunk in resp.iter_bytes(1024 * 1024):
+                            if cancel_check and cancel_check():
+                                raise TranscriptionCancelledError('用户取消，模型下载中止')
+                            f.write(chunk)
+                            done += len(chunk)
+                            if progress_callback and total > 0:
+                                pct = pct_base + pct_span * min(done / total, 1.0)
+                                progress_callback(
+                                    int(pct),
+                                    f'下载 {label} {done // (1024 * 1024)}MB / {total // (1024 * 1024)}MB'
+                                )
+            tmp.replace(dest)
+            return
+        except TranscriptionCancelledError:
+            tmp.unlink(missing_ok=True)
+            raise
+        except Exception as e:
+            tmp.unlink(missing_ok=True)
+            logger.warning(f'下载 {label} 失败（{url}）: {type(e).__name__}: {e}')
+            errors.append(f'{type(e).__name__}: {e}')
+    hints = ' 或 '.join(_manual_hint(u, hint_path) for u in candidates)
+    raise Exception(f'下载 {label} 失败（{"; ".join(errors)}）。{hints}')
 
 
 def _extract_archive(archive: Path, expected_dir: Path, label: str) -> None:
@@ -303,40 +562,66 @@ def _extract_archive(archive: Path, expected_dir: Path, label: str) -> None:
         archive.unlink(missing_ok=True)
 
 
-def _ensure_model_ready(progress_callback=None, cancel_check=None) -> None:
-    """模型就绪检查；缺失部分按需下载（大→小），全就位时零开销直接返回。"""
-    if firered_model_ready():
+def _archive_satisfied(arc: EngineArchive) -> bool:
+    """该下载包的内容是否已具备。
+
+    - 有 `satisfied` 声明用它（可精确到"包内容"级别，多包引擎必需）
+    - 单文件包按 size>0 判断
+    - 目录包且未声明：一律判「未具备」——目录存在却没通过引擎就绪判定 = 残缺目录，
+      交给 `_ensure_engine_ready` 给出「请先删除或手动补全」的可行动提示（不静默覆盖）
+    """
+    if arc.satisfied is not None:
+        return arc.satisfied()
+    if arc.kind == 'file':
+        return _file_ok(arc.dest())
+    return False
+
+
+def _ensure_engine_ready(key: str, progress_callback=None, cancel_check=None) -> None:
+    """引擎模型就绪检查；缺失则按注册表 archives 依次下载（tar 解包 / 单文件落位）。
+
+    全就位时零开销直接返回。**兜底链路绝不调用本函数**——只有用户显式选择该引擎且
+    模型缺失时才触发下载（避免"回退"变成隐性 1GB 下载）。
+    """
+    if engine_ready(key):
         return
+    spec = LOCAL_ENGINES[key]
     if progress_callback:
-        progress_callback(1, '本地 FireRedASR 模型未就绪，开始按需下载（约 1.1GB，仅首次）...')
-    logger.info('FireRedASR 模型不完整，开始下载（firered/punct/vad 缺失项）')
+        progress_callback(1, f'{spec.name} 模型未就绪，开始按需下载（{spec.size_hint or "仅首次"}）...')
+    logger.info(f'{key} 模型不完整，开始下载（{len(spec.archives)} 个包）')
 
-    enc = FIRERED_MODEL_DIR / 'encoder.int8.onnx'
-    dec = FIRERED_MODEL_DIR / 'decoder.int8.onnx'
-    tok = FIRERED_MODEL_DIR / 'tokens.txt'
-    punct = FIRERED_PUNCT_MODEL_DIR / 'model.onnx'
-    vad = FIRERED_VAD_MODEL_PATH
+    total_archives = max(len(spec.archives), 1)
+    for idx, arc in enumerate(spec.archives):
+        dest = arc.dest()
+        if _archive_satisfied(arc):
+            continue
+        if arc.kind == 'tar' and dest.exists():
+            # 目录在但内容不齐：不擅自删除（可能是用户手动放置的第三方/更大版本导出）
+            raise Exception(
+                f'模型目录已存在但关键文件不完整：{dest}。'
+                f'请先删除该目录（或手动补全所需文件）后再点下载'
+            )
+        base = _PROGRESS_MODEL_MAX * idx / total_archives
+        span = _PROGRESS_MODEL_MAX / total_archives
+        if arc.kind == 'file':
+            _download_file(arc.urls, dest, arc.label, progress_callback, cancel_check, base, span)
+        else:
+            archive = dest.parent / f'{dest.name}.tar.bz2'
+            _download_file(arc.urls, archive, arc.label,
+                           progress_callback, cancel_check, base, span, hint_target=dest)
+            _extract_archive(archive, dest, arc.label)
 
-    # 下载份额： firered 0~6% / punct 6~7.5% / vad 7.5~8%（vad 极小可忽略）
-    if not (_file_ok(enc) and _file_ok(dec) and _file_ok(tok)):
-        archive = FIRERED_MODEL_DIR.parent / f'{FIRERED_MODEL_DIR.name}.tar.bz2'
-        _download_file(_URL_FIRERED, archive, 'FireRedASR 模型（838MB）',
-                       progress_callback, cancel_check, 1.0, 5.0)
-        _extract_archive(archive, FIRERED_MODEL_DIR, 'FireRedASR 模型')
-    if not _file_ok(punct):
-        archive = FIRERED_PUNCT_MODEL_DIR.parent / f'{FIRERED_PUNCT_MODEL_DIR.name}.tar.bz2'
-        _download_file(_URL_PUNCT, archive, '标点模型（266MB）',
-                       progress_callback, cancel_check, 6.0, 1.5)
-        _extract_archive(archive, FIRERED_PUNCT_MODEL_DIR, '标点模型')
-    if not _file_ok(vad):
-        _download_file(_URL_VAD, vad, 'VAD 模型（0.6MB）',
-                       progress_callback, cancel_check, 7.5, 0.5)
-
-    if not firered_model_ready():
+    if not engine_ready(key):
+        missing = [p['label'] for p in engine_part_status(key) if not p['ready']]
         raise Exception(
-            f'模型下载完成但完整性校验未通过（{FIRERED_MODEL_DIR} / {FIRERED_PUNCT_MODEL_DIR}），'
-            f'请检查磁盘空间或手动放置模型'
+            f'模型下载完成但完整性校验未通过（缺失：{"、".join(missing) or "未知"}），'
+            f'请检查磁盘空间或手动放置模型到 {spec.removable[0]()}'
         )
+
+
+def _ensure_model_ready(progress_callback=None, cancel_check=None) -> None:
+    """（兼容旧名）确保 FireRedASR 模型就绪"""
+    _ensure_engine_ready('firered', progress_callback, cancel_check)
 
 
 def _load_sherpa():
@@ -598,3 +883,14 @@ def transcribe_audio_firered(
         _report(99, done_msg)
         _report(100, '转录完成！')
         return srt_path, txt_path, seg_count
+
+
+def transcribe_audio_local(engine: str, audio_path: str, **kwargs) -> Tuple[str, str, int]:
+    """本地引擎**统一入口**（transcriber 只调这一个）。
+
+    目前注册表里只有 `firered`（AED 管线：VAD + CT-Transformer 标点）。保留这层签名是为了
+    job options 里的引擎值是通用 key，将来加引擎时 transcriber 侧零改动。
+    """
+    if engine == 'firered':
+        return transcribe_audio_firered(audio_path, **kwargs)
+    raise KeyError(f'未注册的本地引擎: {engine}')

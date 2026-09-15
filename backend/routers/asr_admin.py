@@ -228,34 +228,55 @@ async def update_settings_api(body: AsrSettingsUpdate):
     }
 
 
-# ============ 本地模型生命周期 ============
+# ============ 本地模型生命周期（按引擎 key 通用；engine ∈ local_asr.LOCAL_ENGINES） ============
+# 引擎清单是单一事实源（services/local_asr.LOCAL_ENGINES）：新增本地引擎无需改本文件。
+# 旧路径 /local/firered/* 天然被 {engine} 通配命中，前端与外部脚本无需改动。
 
-@router.get("/local/firered/download")
-async def firered_download_state():
+def _require_engine(engine: str):
+    """校验引擎已注册（未注册 → 404 并列出可选值）"""
+    from services import local_asr
+    spec = local_asr.LOCAL_ENGINES.get(engine)
+    if spec is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"未注册的本地引擎「{engine}」"
+                   f"（可选 {' / '.join(local_asr.LOCAL_ENGINE_KEYS)}）")
+    return spec
+
+
+@router.get("/local/{engine}/download")
+async def engine_download_state(engine: str):
     """下载状态（轻量轮询端点；总览含磁盘遍历，轮询请用这个）"""
     from services import local_asr
+    _require_engine(engine)
     return {
-        "download": local_asr.get_download_state(),
-        "ready": local_asr.firered_model_ready(),
-        "busy": local_asr.firered_busy(),
+        "engine": engine,
+        "download": local_asr.engine_status(engine)['download'],
+        "ready": local_asr.engine_ready(engine),
+        "busy": local_asr.engine_busy(engine),
     }
 
 
-@router.post("/local/firered/download")
-async def start_firered_download():
-    """开始后台下载缺失的 FireRedASR 模型（约 1.1GB，进度轮询上面那个端点）"""
+@router.post("/local/{engine}/download")
+async def start_engine_download_api(engine: str):
+    """开始后台下载该引擎缺失的模型（进度轮询上面那个端点；不占 HTTP 长连接）"""
     from services import local_asr
-    if local_asr.firered_model_ready():
-        return {"started": False, "message": "模型已就绪，无需下载"}
-    if not local_asr.start_model_download():
-        raise HTTPException(status_code=409, detail='模型正在下载中，请等待完成或先取消')
-    return {"started": True, "message": "已开始后台下载（约 1.1GB，仅首次），可在本页查看进度"}
+    spec = _require_engine(engine)
+    if local_asr.engine_ready(engine):
+        return {"started": False, "message": f"{spec.name} 模型已就绪，无需下载"}
+    if not local_asr.start_engine_download(engine):
+        raise HTTPException(status_code=409, detail='已有模型正在下载中，请等待完成或先取消')
+    return {
+        "started": True,
+        "message": f"已开始后台下载 {spec.name}（{spec.size_hint or '首次下载'}），可在本页查看进度",
+    }
 
 
-@router.post("/local/firered/cancel")
-async def cancel_firered_download():
+@router.post("/local/{engine}/cancel")
+async def cancel_engine_download_api(engine: str):
     """请求取消下载（在下一个数据块边界生效）"""
     from services import local_asr
+    _require_engine(engine)
     cancelled = local_asr.cancel_model_download()
     return {
         "success": True,
@@ -264,22 +285,19 @@ async def cancel_firered_download():
     }
 
 
-@router.delete("/local/firered")
-async def delete_firered_model():
-    """删除本地 FireRedASR 模型文件（释放磁盘；转录进行中拒绝删除）"""
+@router.delete("/local/{engine}")
+async def delete_engine_model(engine: str):
+    """删除该引擎的模型文件（释放磁盘；下载中 / 转录中一律拒绝）"""
     from services import local_asr
-    if local_asr.firered_busy():
-        raise HTTPException(
-            status_code=409,
-            detail='FireRedASR 正在转录中，请等待当前任务结束再删除模型')
+    spec = _require_engine(engine)
     try:
-        result = await asyncio.to_thread(local_asr.remove_model_files)
+        result = await asyncio.to_thread(local_asr.remove_engine, engine)
     except Exception as e:
         raise HTTPException(status_code=409, detail=f'删除失败：{e}')
     return {
         "success": True,
         "freed_bytes": result['freed_bytes'],
-        "message": f"已删除本地 FireRedASR 模型，释放 {_human_bytes(result['freed_bytes'])}",
+        "message": f"已删除 {spec.name} 模型，释放 {_human_bytes(result['freed_bytes'])}",
     }
 
 

@@ -264,24 +264,27 @@ class TestExtractAsrTextPosture:
 # ============ 3. 路由层 ============
 
 def _stub_local(monkeypatch, *, firered_ready=False, download=None, busy=False):
-    """本地模型状态替身：不读真实磁盘，保证用例与机器上的模型文件无关。"""
+    """本地引擎状态替身：不读真实磁盘 / 不跑真实文件检查，用例与机器上的模型文件无关。"""
     import services.local_asr as la
     import services.transcriber as tr
 
+    idle = {'status': 'idle', 'percent': 0, 'message': '', 'error': ''}
+    dl = download or idle
     monkeypatch.setattr(tr, 'list_local_models', lambda: [
         {'size': 'base', 'path': 'X:/models/whisper_base', 'ready': True, 'partial': False, 'bytes': 150_000_000},
         {'size': 'medium', 'path': 'X:/models/whisper_medium', 'ready': False, 'partial': False, 'bytes': 0},
     ])
-    monkeypatch.setattr(la, 'model_file_status', lambda: {
-        'ready': firered_ready, 'files': [{'key': 'encoder', 'label': '声学编码器',
-                                           'path': 'X:/m/encoder.int8.onnx', 'ready': firered_ready, 'bytes': 1}],
-        'bytes': 1, 'dir': 'X:/m', 'punct_dir': 'X:/p', 'vad_path': 'X:/v/vad.onnx',
-        'sherpa_available': True,
-    })
-    monkeypatch.setattr(la, 'firered_busy', lambda: busy)
-    monkeypatch.setattr(la, 'firered_model_ready', lambda: firered_ready)
-    monkeypatch.setattr(la, 'get_download_state',
-                        lambda: download or {'status': 'idle', 'percent': 0, 'message': '', 'error': ''})
+    monkeypatch.setattr(tr, 'any_whisper_ready', lambda: True)
+    monkeypatch.setattr(la, 'sherpa_available', lambda: True)
+    monkeypatch.setattr(la, 'engine_ready', lambda k: firered_ready if k == 'firered' else False)
+    monkeypatch.setattr(la, 'list_engines_status', lambda: [
+        {'key': 'firered', 'name': '本地 FireRedASR', 'fee': '免费', 'languages': '中文 / 英文',
+         'note': '中英最准', 'size_hint': '约 1.5GB', 'ready': firered_ready, 'busy': busy,
+         'bytes': 1, 'dir': 'X:/m/firered',
+         'parts': [{'key': 'encoder', 'label': '声学编码器', 'path': 'X:/m/encoder.int8.onnx',
+                    'ready': firered_ready, 'bytes': 1}],
+         'manual_hint': '手动放置：X:/m/firered', 'download': dl},
+    ])
 
 
 class TestOverviewRouter:
@@ -305,11 +308,36 @@ class TestOverviewRouter:
         assert p['runtime'] is True          # 唯一 provider → 就是槽位当前使用者
         assert p['is_builtin'] is True
 
+        # 本地段 = 引擎列表（含免费标识与就绪态）+ Whisper 档位明细（不混在引擎列表里）
+        engines = {e['key']: e for e in data['local']['engines']}
+        assert set(engines) == {'local', 'firered'}
+        assert engines['local']['name'] == '本地 Whisper'
+        assert {e['fee'] for e in engines.values()} == {'免费'}
+        assert engines['firered']['ready'] is False
+        assert engines['firered']['download']['status'] == 'idle'
         assert [m['size'] for m in data['local']['whisper']['models']] == ['base', 'medium']
-        assert data['local']['firered']['ready'] is False
-        assert data['local']['firered']['download']['status'] == 'idle'
+        assert data['local']['whisper']['device'] == 'auto'
+        assert data['local']['sherpa_available'] is True
         assert data['settings']['whisper_device'] == 'auto'
         assert data['recommended_engine'] in ('cloud', 'cloud_free', 'firered', 'local')
+
+    def test_cloud_provider_fee_label(self, client, monkeypatch):
+        """云端 provider 的收费标识单点在后端：cloud=收费 / cloud_free=免费。"""
+        _clear_providers()
+        _stub_local(monkeypatch)
+        asr_repo.add_provider(key='paid', name='付费', engine='cloud', endpoint='https://p.com')
+        asr_repo.add_provider(key='free', name='免费', engine='cloud_free', endpoint='https://f.com')
+        fees = {p['engine']: p['fee'] for p in client.get('/api/asr/overview').json()['providers']}
+        assert fees == {'cloud': '收费', 'cloud_free': '免费'}
+
+    def test_status_lists_local_engines_for_workbench_dropdown(self, client, monkeypatch):
+        import services.local_asr as la
+        _clear_providers()
+        _stub_local(monkeypatch, firered_ready=True)
+        engines = {e['key']: e for e in client.get('/api/asr/status').json()['local_engines']}
+        # Whisper + 注册表里的全部本地引擎（新增引擎自动出现在下拉里，无需改前端）
+        assert set(engines) == {'local', *la.LOCAL_ENGINE_KEYS}
+        assert engines['firered']['ready'] is True
 
     def test_overview_flags_broken_key(self, client, monkeypatch):
         """历史污染的脱敏串（含 ****）必须标 key_broken，让用户重新粘贴真密钥。"""
@@ -542,55 +570,76 @@ class TestSettingsRouter:
 
 
 class TestLocalModelRouter:
-    def test_firered_download_started(self, client, monkeypatch):
+    """本地引擎生命周期端点（按 engine key 通用：`/local/{engine}/*`）
+
+    路径参数是通用 key，未知 key 一律 404（不再硬编码 firered）。
+    """
+
+    def test_engine_download_started(self, client, monkeypatch):
         import services.local_asr as la
-        monkeypatch.setattr(la, 'firered_model_ready', lambda: False)
-        monkeypatch.setattr(la, 'start_model_download', lambda: True)
+        monkeypatch.setattr(la, 'engine_ready', lambda k: False)
+        monkeypatch.setattr(la, 'start_engine_download', lambda k: True)
         data = client.post('/api/asr/local/firered/download').json()
         assert data['started'] is True
+        assert 'FireRed' in data['message']
 
-    def test_firered_download_skipped_when_ready(self, client, monkeypatch):
+    def test_engine_download_skipped_when_ready(self, client, monkeypatch):
         import services.local_asr as la
-        monkeypatch.setattr(la, 'firered_model_ready', lambda: True)
+        monkeypatch.setattr(la, 'engine_ready', lambda k: True)
         data = client.post('/api/asr/local/firered/download').json()
         assert data['started'] is False
         assert '无需下载' in data['message']
 
-    def test_firered_download_conflict_409(self, client, monkeypatch):
+    def test_engine_download_conflict_409(self, client, monkeypatch):
         import services.local_asr as la
-        monkeypatch.setattr(la, 'firered_model_ready', lambda: False)
-        monkeypatch.setattr(la, 'start_model_download', lambda: False)
+        monkeypatch.setattr(la, 'engine_ready', lambda k: False)
+        monkeypatch.setattr(la, 'start_engine_download', lambda k: False)
         assert client.post('/api/asr/local/firered/download').status_code == 409
 
-    def test_firered_cancel(self, client, monkeypatch):
+    def test_download_state_reports_engine_key(self, client, monkeypatch):
+        """轮询态带 engine 字段：管理页据此判断「在下的是不是我看的这个引擎」。"""
+        import services.local_asr as la
+        monkeypatch.setattr(la, 'engine_ready', lambda k: False)
+        monkeypatch.setattr(la, 'start_engine_download', lambda k: True)
+        assert client.post('/api/asr/local/firered/download').json()['started'] is True
+        state = client.get('/api/asr/local/firered/download').json()
+        assert state['engine'] == 'firered'
+
+    def test_unknown_engine_404(self, client):
+        resp = client.post('/api/asr/local/ghost_engine/download')
+        assert resp.status_code == 404
+        assert '未注册的本地引擎' in resp.json()['detail']
+        assert client.delete('/api/asr/local/ghost_engine').status_code == 404
+
+    def test_engine_cancel(self, client, monkeypatch):
         import services.local_asr as la
         monkeypatch.setattr(la, 'cancel_model_download', lambda: True)
         data = client.post('/api/asr/local/firered/cancel').json()
         assert data['cancel_requested'] is True
 
-    def test_firered_delete_blocked_while_busy(self, client, monkeypatch):
+    def test_engine_delete_blocked_while_busy(self, client, monkeypatch):
         import services.local_asr as la
-        monkeypatch.setattr(la, 'firered_busy', lambda: True)
+        monkeypatch.setattr(la, 'engine_ready', lambda k: True)
+        monkeypatch.setattr(la, 'remove_engine',
+                            lambda k: (_ for _ in ()).throw(Exception(f'{k} 正在转录中，请等待')))
         resp = client.delete('/api/asr/local/firered')
         assert resp.status_code == 409
         assert '转录中' in resp.json()['detail']
 
-    def test_firered_delete_ok(self, client, monkeypatch):
+    def test_engine_delete_ok(self, client, monkeypatch):
         import services.local_asr as la
-        monkeypatch.setattr(la, 'firered_busy', lambda: False)
-        monkeypatch.setattr(la, 'remove_model_files',
-                            lambda: {'freed_bytes': 1_200_000_000, 'ready': False})
+        monkeypatch.setattr(la, 'remove_engine',
+                            lambda k: {'freed_bytes': 1_200_000_000, 'ready': False})
         data = client.delete('/api/asr/local/firered').json()
         assert data['success'] is True and data['freed_bytes'] == 1_200_000_000
         assert 'GB' in data['message']
 
-    def test_firered_delete_conflict_when_downloading(self, client, monkeypatch):
+    def test_engine_delete_conflict_when_downloading(self, client, monkeypatch):
         import services.local_asr as la
-        monkeypatch.setattr(la, 'firered_busy', lambda: False)
 
-        def _boom():
+        def _boom(k):
             raise Exception('模型正在下载中，请先取消下载或等待完成再删除')
-        monkeypatch.setattr(la, 'remove_model_files', _boom)
+        monkeypatch.setattr(la, 'remove_engine', _boom)
         resp = client.delete('/api/asr/local/firered')
         assert resp.status_code == 409
         assert '下载中' in resp.json()['detail']
@@ -705,8 +754,8 @@ class TestFireredLifecycle:
         monkeypatch.setattr(la, '_download_state',
                             {'status': 'idle', 'percent': 0, 'message': '', 'error': ''})
         monkeypatch.setattr(la, '_download_cancel', __import__('threading').Event())
-        monkeypatch.setattr(la, '_ensure_model_ready',
-                            lambda progress_callback=None, cancel_check=None:
+        monkeypatch.setattr(la, '_ensure_engine_ready',
+                            lambda key, progress_callback=None, cancel_check=None:
                             progress_callback and progress_callback(100, '完成'))
         monkeypatch.setattr(la, 'firered_model_ready', lambda: True)
         assert la.start_model_download() is True
@@ -724,9 +773,9 @@ class TestFireredLifecycle:
                             {'status': 'idle', 'percent': 0, 'message': '', 'error': ''})
         monkeypatch.setattr(la, '_download_cancel', threading.Event())
 
-        def _boom(progress_callback=None, cancel_check=None):
+        def _boom(key, progress_callback=None, cancel_check=None):
             raise Exception('网络不通')
-        monkeypatch.setattr(la, '_ensure_model_ready', _boom)
+        monkeypatch.setattr(la, '_ensure_engine_ready', _boom)
         assert la.start_model_download() is True
         la._download_thread.join(timeout=5)
         state = la.get_download_state()
@@ -741,8 +790,10 @@ class TestFireredLifecycle:
 
     def test_remove_model_files_refused_while_downloading(self, monkeypatch):
         import services.local_asr as la
+        # 下载态带 engine 字段：只有「正在下载的就是这个引擎」才拒绝删除
         monkeypatch.setattr(la, '_download_state',
-                            {'status': 'downloading', 'percent': 10, 'message': '', 'error': ''})
+                            {'status': 'downloading', 'engine': 'firered',
+                             'percent': 10, 'message': '', 'error': ''})
         with pytest.raises(Exception) as ei:
             la.remove_model_files()
         assert '下载' in str(ei.value)

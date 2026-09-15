@@ -10,7 +10,8 @@ from unittest.mock import patch, MagicMock, AsyncMock
 from services.transcriber import (
     _model_complete, _select_model, _format_srt_time, _format_mmss,
     _format_duration, _is_cuda_runtime_missing, _get_audio_duration_seconds,
-    _resolve_device, _transcribe_sync,
+    _resolve_device, _transcribe_sync, _fallback_chain,
+    ENGINE_VALUES, engine_label,
     TranscriptionCancelledError,
 )
 
@@ -249,7 +250,13 @@ class TestEngineRouting:
         return m
 
     def _patch_firered_ready(self, monkeypatch, ready=False):
+        """firered 就绪态 + 转录替身。
+
+        就绪态走注册表单点 `engine_ready`（`firered_model_ready` 只是它的兼容别名）——
+        回退链是否收录 firered 由它决定，不再由 firered_model_ready 决定。
+        """
         import services.local_asr as la
+        monkeypatch.setattr(la, 'engine_ready', lambda key: ready if key == 'firered' else False)
         monkeypatch.setattr(la, 'firered_model_ready', lambda: ready)
         m = MagicMock()
         m.return_value = ('f.srt', 'f.txt', 4)
@@ -485,3 +492,35 @@ class TestEngineLabel:
         log_msgs = ' '.join(str(c.args[2]) for c in mel.call_args_list)
         assert expected in prog_msgs
         assert expected in log_msgs
+
+
+# ============ 引擎值与回退链（新增本地引擎的语义边界） ============
+
+class TestEngineValuesAndChains:
+    def test_engine_values_single_source(self):
+        assert set(ENGINE_VALUES) == {'cloud', 'cloud_free', 'firered', 'local'}
+
+    def test_every_engine_value_has_label(self):
+        for engine in ENGINE_VALUES:
+            assert engine_label(engine)
+        assert engine_label('bogus') == '云端 MiMo'      # 未知值仍按 cloud（旧行为不变）
+
+    def test_user_selected_local_engine_chain_is_kept_verbatim(self):
+        """用户显式选的本地引擎永远在链首（显式选择才允许触发按需下载）。"""
+        assert _fallback_chain('firered') == ('firered', 'local')
+
+    def test_cloud_chain_drops_unready_local_engines(self, monkeypatch):
+        """本地 ONNX 引擎未就绪 → 从兜底链剔除（下载绝不作为兜底副作用）。"""
+        import services.local_asr as la
+        monkeypatch.setattr(la, 'engine_ready', lambda key: False)
+        assert _fallback_chain('cloud') == ('cloud', 'cloud_free', 'local')
+        assert _fallback_chain('cloud_free') == ('cloud_free', 'local')
+
+    def test_cloud_chain_keeps_ready_firered(self, monkeypatch):
+        import services.local_asr as la
+        monkeypatch.setattr(la, 'engine_ready', lambda key: key == 'firered')
+        assert _fallback_chain('cloud') == ('cloud', 'cloud_free', 'firered', 'local')
+
+    def test_local_whisper_is_always_chain_tail(self):
+        for engine in ENGINE_VALUES:
+            assert _fallback_chain(engine)[-1] == 'local'

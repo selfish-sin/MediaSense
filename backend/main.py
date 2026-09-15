@@ -792,11 +792,12 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
         whisper_device = options.get('whisper_device', 'auto')
         if whisper_device not in ('auto', 'cuda', 'cpu'):
             whisper_device = 'auto'
-        # ★ 转录引擎（cloud/cloud_free/firered/local）：cloud=MiMo（付费主力），
-        #   cloud_free=XingChen Ultra（免费档，简单视频）；非法值按 cloud 处理；
-        #   云端失败自动回退 firered/Whisper（原因可见）
+        # ★ 转录引擎：白名单单点在 transcriber.ENGINE_VALUES（cloud/cloud_free/
+        #   firered/local），非法值按 cloud 处理；
+        #   失败按回退链自动降级（本地 ONNX 引擎只在模型就绪时参与兜底，原因可见）
+        from services.transcriber import ENGINE_VALUES
         transcribe_engine = options.get('transcribe_engine', 'cloud')
-        if transcribe_engine not in ('cloud', 'cloud_free', 'firered', 'local'):
+        if transcribe_engine not in ENGINE_VALUES:
             transcribe_engine = 'cloud'
         # ★ 转录语言默认中文（Whisper自动识别会把中文误判为英文）
         #   前端 settingsStore 默认 'zh'，这里做兜底：None → 'zh'
