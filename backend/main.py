@@ -195,6 +195,7 @@ from routers.jobs_ai import router as jobs_ai_router
 from routers.jobs_batch import router as jobs_batch_router
 from routers.models import router as models_router
 from routers.asr import router as asr_router
+from routers.asr_admin import router as asr_admin_router
 from routers.summary import router as summary_router
 from routers.export import router as export_router
 from routers.bilibili import router as bilibili_router
@@ -212,6 +213,9 @@ app.include_router(jobs_ai_router, prefix="/api/jobs",     tags=["jobs-ai"])
 app.include_router(jobs_batch_router, prefix="/api/jobs",  tags=["jobs-batch"])
 app.include_router(models_router,  prefix="/api/models",    tags=["models"])
 app.include_router(asr_router,    prefix="/api/asr",       tags=["asr"])
+# ★ ASR 管理写操作（providers CRUD / 测试连接 / 默认设置 / 本地模型生命周期）同域同前缀，
+#   只读状态与写操作分文件（routers/asr.py 与 routers/asr_admin.py），对外路径不变
+app.include_router(asr_admin_router, prefix="/api/asr",    tags=["asr-admin"])
 app.include_router(summary_router, prefix="/api/summary",   tags=["summary"])
 app.include_router(export_router,  prefix="/api/export",    tags=["export"])
 app.include_router(bilibili_router, prefix="/api/bilibili", tags=["bilibili"])
