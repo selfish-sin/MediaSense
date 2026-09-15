@@ -34,7 +34,10 @@
 ### 待实测（若要推进）
 
 - [ ] Groq whisper-large-v3-turbo 中文术语/标点质量（同素材 10min 对比 mimo/XingChen）
-- [ ] Qwen3-ASR-1.7B 本地部署横评（vs FireRedASR 的 RTF / 术语）
+- [x] ~~Qwen3-ASR-1.7B 本地部署横评（vs FireRedASR 的 RTF / 术语）~~ → **2026-09-15 已实测，结论：不采用**
+      （同素材 90s 中文，CPU int8：FireRed 18s/RTF 0.27/无幻觉；Fun-ASR-Nano 36~82s/RTF 0.5~1.0 +
+      成段重复循环幻觉 + 中英混出；Qwen3-ASR 只下到一半即放弃。两者模型与代码均已删除，
+      详见 `.trellis/spec/backend/transcription-chain.md` §5.1 与 task 09-15-local-asr-engine-registry）
 - [ ] XingChen Diarize 版说话人分离效果
 
 ### 来源

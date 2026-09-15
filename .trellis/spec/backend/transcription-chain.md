@@ -3,7 +3,9 @@
 > 2026-09-12 定稿。汇聚 09-11/09-12 三个任务的全部实测结论，是转录链路的单一事实源；
 > 改动链路任何环节前先读本文，改完必须同步本文（spec 规则）。
 > 2026-09-15 更新：云端 provider 配置改「DB（asr_providers 表）优先 + config.py 兜底」、
-> 槽位化 provider 解析、默认引擎用户设置优先（只降不升）、ASR 配置管理 API（§8）与坑点 11-13。
+> 槽位化 provider 解析、默认引擎用户设置优先（只降不升）、ASR 配置管理 API（§8）与坑点 11-15；
+> 本地档改**引擎注册表**（`LOCAL_ENGINES`，本地端点按 `{engine}` 通用化、管理页本地段改引擎列表
+> 且收费标识单点在后端）；LLM 解码类本地引擎（Fun-ASR-Nano / Qwen3-ASR）实机横评后**放弃**（§5.1）。
 > 实测证据：`archive/2026-09/09-11-asr-chain-quality-fix/compare*`、`archive/2026-09/09-12-cloud-latency-routing/`、`archive/2026-09/09-12-asr-vendor-compare/`。
 
 ## 0. 一图总览
@@ -113,10 +115,27 @@ provider，运行时取「该槽位 enabled 且 sort_order 最小」者：单点
   `chat` 取 `choices[0].message.content`（空数组/None 必须防越界）。**不要改回按 provider 名分支**，
   否则自定义 provider 会解析错响应取到空文本。
 
-### 3.2 本地 FireRedASR2-AED（local_asr.py，sherpa-onnx int8/CPU，不依赖 torch）
+### 3.2 本地引擎注册表 + FireRedASR2-AED（local_asr.py，sherpa-onnx int8/CPU，不依赖 torch）
 
-`firered_model_ready()`（三件套+标点+VAD 文件级校验）→ 缺失则按需下载（GitHub release，
-`follow_redirects=True`，tar `filter='data'`；手动放置 `models/` 兜底）→ **模块级锁串行**
+**注册表是本地引擎的单一事实源**（`local_asr.LOCAL_ENGINES`）：每个引擎一条声明
+（key / 显示名 / 语言 / 说明 / 文件明细 `parts` / 可删路径 `removable` / 下载包 `archives` /
+体积提示 / `fee`），**就绪判定、文件明细、磁盘占用、后台下载（含取消与进度）、删除、
+引擎级互斥锁全部按 key 自动生效**——加引擎只改注册表 + 写一个 `transcribe_audio_<key>()`，
+路由/前端/其它服务零改动。当前**只注册 `firered`**（Whisper 不在此表：它是独立模型族，
+四档明细见 §3.3，链尾语义不可改）。
+
+- 生命周期：`engine_ready/engine_status/list_engines_status/engine_busy` +
+  `start_engine_download/cancel_model_download/remove_engine`；`_ensure_engine_ready(key)`
+  在用户显式选择该引擎且模型缺失时按需下载（**兜底链绝不触发下载**）。
+- 分发入口 `transcribe_audio_local(engine, ...)`：transcriber 只调这一个；未知 key 抛 KeyError。
+- 实测横评（2026-09-15，见 §5 与 task `09-15-local-asr-engine-registry` 报告）：通义
+  **Fun-ASR-Nano**（800M）与 **Qwen3-ASR**（ONNX）两条 LLM 解码路线**已放弃**——
+  同一段 90s 中文素材上 RTF 0.5~1.0（FireRed 0.27，慢 2~4 倍）且出现成段重复循环幻觉、
+  中英混出、原生标点不稳；调短 VAD 段上限、显式 `language=zh` 均未消除，故**不再引入
+  LLM 自回归解码类本地引擎**。本地档 = FireRed（主力）+ Whisper（兜底）。
+
+FireRedASR2-AED 内部管线：文件级校验（三件套+标点+VAD）→ 缺失则按需下载（GitHub release，
+`follow_redirects=True`，tar `filter='data'`；手动放置 `models/` 兜底）→ **引擎级锁串行**
 （峰值 1.7GB×并发 2 会翻倍）→ ffmpeg 16k 单声道 wav → silero VAD 分段（**必须 512/块喂
 accept_waveform**，整段喂只报尾部；段首尾 +0.15s padding 防吞字）→ **段间并行解码**
 （threads=3 + 6 workers，RTF 0.40→0.21，env `FIRERED_NUM_THREADS`/`FIRERED_DECODE_WORKERS`；
@@ -164,6 +183,21 @@ XingChen（`transcribe_file(provider='xingchen')`，**免费云端先行**：主
 **SenseVoice 已退役**（慢 90 倍+唯一幻觉）；mimo 为付费主力，XingChen Ultra（限时免费）为免费档；
 FireRedASR 免费离线保留。XingChen 未参与 10min 全量横评（单片实测 1.7s 稳定、TTS 样本质量与 mimo 同档）。
 
+### 5.1 本地 LLM 解码类引擎：实测后放弃（2026-09-15）
+
+曾评估并接入两条 sherpa-onnx LLM 路线（同素材：齐泽克中配 90s 16k 单声道，CPU）：
+
+| | 段数 | 转换耗时/RTF | 文本字数 | 质量 |
+|---|---|---|---|---|
+| FireRedASR2-AED int8 | 18 | **18s / 0.27** | 686 | 标点自然、无幻觉 |
+| Fun-ASR-Nano-2512 int8（800M） | 68~130 | 36~82s / 0.5~1.0 | 3265~6444 | **成段重复循环幻觉**（"those are the ones that are…"）、中英混出、人名听成英文串 |
+
+- 已试无效的修法：VAD 段上限 20s→12s（更碎片化、反而更慢）、显式 `language=zh`、
+  `max_total_len/max_new_tokens` 放大、tokenizer 传目录（这条是**真 bug**，修了才跑起来）。
+- **结论：本地档不再引入 LLM 自回归解码引擎**（CPU 上既慢又不可靠）；模型目录与相关代码已删除，
+  只保留注册表基础设施（加引擎仍是"一条声明 + 一个解码函数"）。若将来换 GPU 重试，
+  先按本表口径复测再决定。
+
 ## 6. 参数与环境变量速查
 
 | 变量/常量 | 默认 | 说明 |
@@ -209,6 +243,13 @@ FireRedASR 免费离线保留。XingChen 未参与 10min 全量横评（单片�
    provider 由 `preferred_provider()` 选（免费槽位优先）。省略该参数会落到默认 `'mimo'`
    付费档——2026-09-15 实测 MiMo 欠费（HTTP 402）时，每个 B站字幕任务白重试 3 次退避
    （≈11s）后才回退本地 Whisper，前端只看到「云端抽查失败（CloudASRUnavailableError）」。
+15. **测试必须隔离模型目录，且 `LOCAL_MODEL_DIRS` 只能就地改不能换对象**（2026-09-15 真实事故）：
+   ①删除模型端点的用例若没隔离目录，会**真的删掉 `models/` 下的模型**（当时删掉了 FireRedASR
+   三件套+标点+VAD ≈1.5GB，只表现为一条 "DID NOT RAISE"）；`tests/conftest.py` 的
+   session 级 `_isolate_model_dirs` 把 FireRed 三个路径 + `LOCAL_MODEL_DIRS` 全部重定向到
+   临时目录，并在会话开始自检「没有任何模型路径仍指向真实 `models/`」。
+   ②`LOCAL_MODEL_DIRS` **必须 `clear()+update()` 就地改**：`routers/asr_admin.py` 在 import 时
+   就绑定了同一个 dict 对象，替换成新对象会让路由仍按真实路径删（测试以为在删 tmp 路径）。
 
 ## 8. ASR 配置管理 API（模型管理页「ASR 模型」域，2026-09-15）
 
@@ -216,14 +257,18 @@ FireRedASR 免费离线保留。XingChen 未参与 10min 全量横评（单片�
 
 | Method | Path | 说明 |
 |---|---|---|
-| GET | `/api/asr/status` | 工作台单点：`cloud_configured`/`free_configured`/`firered_ready`/`recommended_engine`/`default_engine` |
-| GET | `/api/asr/overview` | 管理页总览：providers（脱敏+`configured`/`runtime`）+ local（whisper 各档 + firered 文件明细与下载态）+ settings |
+| GET | `/api/asr/status` | 工作台单点：`cloud_configured`/`free_configured`/`firered_ready`/`recommended_engine`/`default_engine`/`local_engines`（下拉用轻量清单：key+名+就绪，不遍历磁盘） |
+| GET | `/api/asr/overview` | 管理页总览：providers（脱敏+`configured`/`runtime`/`fee`）+ **local.engines（本地引擎列表：名称/免费标识/语言/说明/体积/就绪/占用/文件明细/下载态）** + local.whisper 档位明细 + `sherpa_available` + settings |
 | POST/PUT/DELETE | `/api/asr/providers[/{key}]` | provider CRUD（内置不可删可停用；密钥脱敏展示，编辑留空/含 `****` = 不修改） |
 | POST | `/api/asr/providers/{key}/test` | 真实调用一次（2s 正弦探测音频，`_PROBE_SECONDS`）；HTTP 200 + `success` 字段承载成功/失败 |
 | POST | `/api/asr/settings` | 默认引擎（空串=清除→自动推荐）/ Whisper 档位 / 转录设备 |
-| GET/POST | `/api/asr/local/firered/download` | 下载状态轻量轮询 / 启动后台下载（daemon 线程 + 内存态，重启回 idle 可重试） |
-| POST | `/api/asr/local/firered/cancel` · DELETE `/api/asr/local/firered` | 取消下载 / 删除模型文件 |
+| GET/POST | `/api/asr/local/{engine}/download` | **按引擎 key 通用**：下载状态轻量轮询 / 启动后台下载（daemon 线程 + 内存态，重启回 idle 可重试）；未注册 key → 404 并列出可选值 |
+| POST | `/api/asr/local/{engine}/cancel` · DELETE `/api/asr/local/{engine}` | 取消下载 / 删除该引擎模型文件（下载中与转录中一律 409） |
 | DELETE | `/api/asr/local/whisper/{size}` | 删除某档 Whisper 模型目录 |
+
+> 本地端点用 `{engine}` 通配（不再硬编码 `firered`）：旧路径 `/local/firered/*` 天然命中，
+> 前端与外部脚本无需改动；**收费标识单点在后端**（provider `fee`=收费/免费、本地引擎恒定免费），
+> 前端只显示不推断。
 
 - 测试连接**不返回 HTTP 错误码承载业务失败**（与 AI 模型测试连接同契约），前端按 `success` 分支。
 - 探测音频用 ffmpeg 生成正弦波：仓库不存媒体；无人声返回空文本属正常，`note` 字段会说明。

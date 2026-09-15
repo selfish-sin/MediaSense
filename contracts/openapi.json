@@ -1673,20 +1673,41 @@
         }
       }
     },
-    "/api/asr/local/firered/download": {
+    "/api/asr/local/{engine}/download": {
       "get": {
         "tags": [
           "asr-admin"
         ],
-        "summary": "Firered Download State",
+        "summary": "Engine Download State",
         "description": "下载状态（轻量轮询端点；总览含磁盘遍历，轮询请用这个）",
-        "operationId": "firered_download_state_api_asr_local_firered_download_get",
+        "operationId": "engine_download_state_api_asr_local__engine__download_get",
+        "parameters": [
+          {
+            "name": "engine",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Engine"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
               }
             }
           }
@@ -1696,9 +1717,20 @@
         "tags": [
           "asr-admin"
         ],
-        "summary": "Start Firered Download",
-        "description": "开始后台下载缺失的 FireRedASR 模型（约 1.1GB，进度轮询上面那个端点）",
-        "operationId": "start_firered_download_api_asr_local_firered_download_post",
+        "summary": "Start Engine Download Api",
+        "description": "开始后台下载该引擎缺失的模型（进度轮询上面那个端点；不占 HTTP 长连接）",
+        "operationId": "start_engine_download_api_api_asr_local__engine__download_post",
+        "parameters": [
+          {
+            "name": "engine",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Engine"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -1707,18 +1739,39 @@
                 "schema": {}
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
           }
         }
       }
     },
-    "/api/asr/local/firered/cancel": {
+    "/api/asr/local/{engine}/cancel": {
       "post": {
         "tags": [
           "asr-admin"
         ],
-        "summary": "Cancel Firered Download",
+        "summary": "Cancel Engine Download Api",
         "description": "请求取消下载（在下一个数据块边界生效）",
-        "operationId": "cancel_firered_download_api_asr_local_firered_cancel_post",
+        "operationId": "cancel_engine_download_api_api_asr_local__engine__cancel_post",
+        "parameters": [
+          {
+            "name": "engine",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Engine"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -1727,24 +1780,55 @@
                 "schema": {}
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
           }
         }
       }
     },
-    "/api/asr/local/firered": {
+    "/api/asr/local/{engine}": {
       "delete": {
         "tags": [
           "asr-admin"
         ],
-        "summary": "Delete Firered Model",
-        "description": "删除本地 FireRedASR 模型文件（释放磁盘；转录进行中拒绝删除）",
-        "operationId": "delete_firered_model_api_asr_local_firered_delete",
+        "summary": "Delete Engine Model",
+        "description": "删除该引擎的模型文件（释放磁盘；下载中 / 转录中一律拒绝）",
+        "operationId": "delete_engine_model_api_asr_local__engine__delete",
+        "parameters": [
+          {
+            "name": "engine",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Engine"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
               }
             }
           }

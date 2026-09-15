@@ -2,7 +2,7 @@
 
 前后端契约的落盘快照目录（AGENTS.md §11.4）。
 
-- `openapi.json` — 后端 FastAPI 自动生成的 OpenAPI 3.1 契约（68 个端点）。
+- `openapi.json` — 后端 FastAPI 自动生成的 OpenAPI 3.1 契约（76 个路径）。
   权威来源是 `backend/main.py` + `backend/routers/` 的 pydantic schema，本文件只是快照。
 - 在线交互文档（服务运行时）：`http://localhost:7001/docs`
 
