@@ -40,7 +40,7 @@ const engineHint = computed(() => {
   }
   if (engine === 'local') return ''
   if (engine === 'cloud_free') {
-    return settings.freeCloudAvailable ? '' : '免费档未配置（config.py 缺 ASR_FREE_API_KEY）'
+    return settings.freeCloudAvailable ? '' : '免费引擎未配置（config.py 缺 ASR_FREE_API_KEY）'
   }
   return settings.cloudAsrAvailable ? '' : '云端未配置（config.py 缺 ASR_CLOUD_API_KEY）'
 })

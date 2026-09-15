@@ -87,7 +87,7 @@ export const useSettingsStore = defineStore('settings', () => {
   // 云端 ASR 可用性（/api/asr/status 同步；未配置时云端选项禁用并回落 local）
   const cloudAsrAvailable = ref(false)
   const cloudAsrModel = ref('')
-  // 免费档云端（engine=cloud_free，XingChen Ultra）；本地 FireRedASR 模型就绪状态
+  // 免费云端（engine=cloud_free，XingChen Ultra）；本地 FireRedASR 模型就绪状态
   const freeCloudAvailable = ref(false)
   const fireredReady = ref(false)
 

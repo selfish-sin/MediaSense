@@ -26,17 +26,22 @@ const testResult = ref(null)
 // 默认引擎下拉：'' = 未手动指定（后端按可用性自动推荐，免费优先）
 const engineChoice = ref('')
 
-const ENGINE_OPTIONS = [
+// 本地档选项来自后端引擎列表（registry 驱动：新增本地引擎无需改这里）；
+// Whisper 恒定排在链尾，与后端回退链语义一致
+const ENGINE_OPTIONS = computed(() => [
   { label: '自动（免费优先）', value: '' },
-  { label: '云端免费档（cloud_free）', value: 'cloud_free' },
-  { label: '云端付费档（cloud）', value: 'cloud' },
-  { label: '本地 FireRedASR（firered）', value: 'firered' },
-  { label: '本地 Whisper（local）', value: 'local' },
-]
+  { label: '云端（免费）', value: 'cloud_free' },
+  { label: '云端（收费）', value: 'cloud' },
+  ...(asrStore.local.engines || [])
+    .slice()
+    .sort((a, b) => (a.key === 'local' ? 1 : 0) - (b.key === 'local' ? 1 : 0))
+    .map((e) => ({ label: `${e.name}（${e.key}）${e.ready ? '' : ' · 未就绪'}`, value: e.key })),
+])
 
+// 云端的两个槽位（费用标识由后端给：cloud=收费 / cloud_free=免费）
 const ENGINE_SLOTS = [
-  { label: '云端付费档（cloud）', value: 'cloud' },
-  { label: '云端免费档（cloud_free）', value: 'cloud_free' },
+  { label: '收费槽位（cloud）', value: 'cloud' },
+  { label: '免费槽位（cloud_free）', value: 'cloud_free' },
 ]
 
 const API_POSTURES = [
@@ -275,8 +280,8 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
         <span v-else class="card-head-hint">未手动指定，按可用性自动推荐</span>
       </div>
       <p class="adv-field-hint" style="margin-top: 8px;">
-        任一引擎失败会按回退链自动降级（云端付费 → 云端免费 → 本地 FireRedASR → 本地 Whisper），
-        成本只降不升：免费档失败绝不会自动转付费引擎。
+        任一引擎失败会按回退链自动降级（云端收费 → 云端免费 → 本地 FireRedASR → 本地 Whisper），
+        成本只降不升：免费引擎失败绝不会自动转收费引擎。
       </p>
     </el-card>
 
@@ -316,10 +321,11 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="槽位" min-width="90">
+        <el-table-column label="槽位" min-width="110">
           <template #default="{ row }">
-            <el-tag :type="row.engine === 'cloud' ? 'warning' : 'success'" size="small" effect="plain">
-              {{ row.engine === 'cloud' ? '付费档' : '免费档' }}
+            <!-- 收费标识单点在后端（provider.fee）：前端只显示，不按 engine 名推断 -->
+            <el-tag :type="row.fee === '免费' ? 'success' : 'warning'" size="small" effect="plain">
+              {{ row.fee === '免费' ? '免费槽位' : '收费槽位' }}
             </el-tag>
           </template>
         </el-table-column>
@@ -400,7 +406,7 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
           <el-select v-model="form.engine" style="width: 100%;">
             <el-option v-for="o in ENGINE_SLOTS" :key="o.value" :label="o.label" :value="o.value" />
           </el-select>
-          <p class="adv-field-hint">决定它在回退链中的位置：付费档（cloud）失败可降免费档；免费档绝不升级付费。</p>
+          <p class="adv-field-hint">决定它在回退链中的位置：收费槽位（cloud）失败可降免费槽位；免费槽位绝不升级收费。</p>
         </el-form-item>
         <el-form-item label="请求姿势">
           <el-select v-model="form.api" style="width: 100%;">

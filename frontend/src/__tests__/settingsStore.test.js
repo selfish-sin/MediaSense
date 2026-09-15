@@ -24,7 +24,7 @@ describe('settingsStore 默认转录引擎（消费后端 recommended_engine）'
     consoleSpy.mockRestore()
   })
 
-  it('免费优先：免费档可用时默认引擎落 cloud_free（不再强制 local）', async () => {
+  it('免费优先：免费引擎可用时默认引擎落 cloud_free（不再强制 local）', async () => {
     apiMocks.status.mockResolvedValue({
       cloud_configured: true, free_configured: true, firered_ready: false,
       recommended_engine: 'cloud_free', model: 'mimo',

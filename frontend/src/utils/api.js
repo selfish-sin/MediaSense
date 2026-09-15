@@ -91,10 +91,11 @@ export const asrApi = {
   testProvider: (key) => api.post(`/asr/providers/${encodeURIComponent(key)}/test`),
   // 默认引擎（default_engine 传空串 = 清除用户设置，恢复自动推荐）/ Whisper 档位 / 设备
   saveSettings: (data) => api.post('/asr/settings', data),
-  fireredDownloadState: () => api.get('/asr/local/firered/download'),
-  startFireredDownload: () => api.post('/asr/local/firered/download'),
-  cancelFireredDownload: () => api.post('/asr/local/firered/cancel'),
-  removeFirered: () => api.delete('/asr/local/firered'),
+  // 本地引擎生命周期：路径按引擎 key 通用（引擎清单来自 overview.local.engines）
+  engineDownloadState: (engine) => api.get(`/asr/local/${encodeURIComponent(engine)}/download`),
+  startEngineDownload: (engine) => api.post(`/asr/local/${encodeURIComponent(engine)}/download`),
+  cancelEngineDownload: (engine) => api.post(`/asr/local/${encodeURIComponent(engine)}/cancel`),
+  removeEngine: (engine) => api.delete(`/asr/local/${encodeURIComponent(engine)}`),
   removeWhisper: (size) => api.delete(`/asr/local/whisper/${encodeURIComponent(size)}`),
 }
 

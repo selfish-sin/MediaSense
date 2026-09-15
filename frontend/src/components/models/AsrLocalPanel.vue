@@ -4,7 +4,9 @@
  *
  * 两块：
  * 1) 本地 Whisper 四档（tiny/base/small/medium）：就绪状态、磁盘占用、默认档位与转录设备
- * 2) 本地 FireRedASR（sherpa-onnx int8，约 1.1GB）：文件明细、后台下载（进度轮询）、删除
+ * 2) 本地引擎列表：**由后端注册表驱动**（overview.local.engines），每条列出
+ *    名称 / 免费标识 / 语言 / 说明 / 体积 / 就绪 / 占用 / 文件明细 / 下载 / 删除
+ *    —— 后端新增本地引擎时本页零改动（filter 掉 key==='local' 的 Whisper 条目，它由上面那块展示）
  *
  * 视觉沿用 app-card / card-head-* / row-more-btn 全局类；不引入新风格。
  */
@@ -17,8 +19,8 @@ import { isDialogCancel } from '../../utils/errorNotice'
 const asrStore = useAsrStore()
 
 const savingSettings = ref(false)
-const downloading = ref(false)
-const removing = ref(false)
+const downloadingEngine = ref('')
+const removingEngine = ref('')
 
 const WHISPER_SIZES = [
   { value: 'tiny', label: 'tiny（最快，精度最低）' },
@@ -34,12 +36,17 @@ const DEVICES = [
 ]
 
 const whisper = computed(() => asrStore.local.whisper || { models: [], default_model: '', device: 'auto' })
-const firered = computed(() => asrStore.local.firered || {
-  ready: false, files: [], bytes: 0, busy: false, sherpa_available: false,
-  download: { status: 'idle', percent: 0, message: '', error: '' },
-})
-const download = computed(() => firered.value.download || { status: 'idle', percent: 0, message: '', error: '' })
-const isDownloading = computed(() => download.value.status === 'downloading')
+const sherpaAvailable = computed(() => asrStore.local.sherpa_available === true)
+// 引擎列表去掉 Whisper（key='local'）：它有自己的档位块，避免同一引擎出现两次
+const engines = computed(() => (asrStore.local.engines || []).filter((e) => e.key !== 'local'))
+
+const IDLE_DOWNLOAD = { status: 'idle', percent: 0, message: '', error: '' }
+function engineDownload(eng) {
+  return eng.download || IDLE_DOWNLOAD
+}
+function isDownloading(eng) {
+  return engineDownload(eng).status === 'downloading'
+}
 
 // 可写 computed：显示值来自后端已保存状态，写入即保存——
 // 保存失败时显示值自动回到后端真值（不会出现"UI 已改、后端没改"的假成功）
@@ -84,27 +91,29 @@ async function handleRemoveWhisper(row) {
       `确认删除本地 Whisper（${row.size}）模型？将释放 ${humanBytes(row.bytes)}，删除后该档位需重新放置模型文件。`,
       '提示', { type: 'warning' },
     )
-    removing.value = true
+    removingEngine.value = 'local'
     const res = await asrStore.removeWhisper(row.size)
     ElMessage.success(`已删除，释放 ${humanBytes(res.freed_bytes)}`)
   } catch (err) {
     if (!isDialogCancel(err)) ElMessage.error(err?.message || err)
   } finally {
-    removing.value = false
+    removingEngine.value = ''
   }
 }
 
 // ── 下载进度轮询（仅下载中启动；离开页面/完成即停止，不留残留定时器）──
 let pollTimer = null
-function startPolling() {
+let pollingEngine = ''
+function startPolling(engine) {
   if (pollTimer) return
+  pollingEngine = engine
   pollTimer = setInterval(async () => {
     try {
-      const res = await asrStore.refreshDownloadState()
+      const res = await asrStore.refreshDownloadState(pollingEngine)
       if (res.download?.status !== 'downloading') {
         stopPolling()
         if (res.download?.status === 'done') {
-          ElMessage.success('FireRedASR 模型下载完成')
+          ElMessage.success('模型下载完成')
           await asrStore.loadOverview()
         }
       }
@@ -119,14 +128,15 @@ function stopPolling() {
     clearInterval(pollTimer)
     pollTimer = null
   }
+  pollingEngine = ''
 }
 
-async function handleStartDownload() {
-  downloading.value = true
+async function handleStartDownload(eng) {
+  downloadingEngine.value = eng.key
   try {
-    const res = await asrStore.startFireredDownload()
+    const res = await asrStore.startEngineDownload(eng.key)
     if (res.started) {
-      startPolling()
+      startPolling(eng.key)
       ElMessage.success(res.message)
     } else {
       ElMessage.info(res.message)
@@ -134,39 +144,41 @@ async function handleStartDownload() {
   } catch (err) {
     ElMessage.error(err.message)
   } finally {
-    downloading.value = false
+    downloadingEngine.value = ''
   }
 }
 
-async function handleCancelDownload() {
+async function handleCancelDownload(eng) {
   try {
-    await asrStore.cancelFireredDownload()
+    await asrStore.cancelEngineDownload(eng.key)
     ElMessage.info('已请求取消下载')
   } catch (err) {
     ElMessage.error(err.message)
   }
 }
 
-async function handleRemoveFirered() {
+async function handleRemoveEngine(eng) {
   try {
     await ElMessageBox.confirm(
-      `确认删除本地 FireRedASR 模型？将释放 ${humanBytes(firered.value.bytes)}，删除后可再次下载。`,
+      `确认删除${eng.name} 模型？将释放 ${humanBytes(eng.bytes)}，删除后可再次下载。`,
       '提示', { type: 'warning' },
     )
-    removing.value = true
-    const res = await asrStore.removeFirered()
+    removingEngine.value = eng.key
+    const res = await asrStore.removeEngine(eng.key)
     ElMessage.success(res.message)
   } catch (err) {
     if (!isDialogCancel(err)) ElMessage.error(err?.message || err)
   } finally {
-    removing.value = false
+    removingEngine.value = ''
   }
 }
 
 async function reload() {
   await asrStore.loadOverview()
   if (asrStore.error) ElMessage.error(`加载失败：${asrStore.error}`)
-  if (isDownloading.value) startPolling()
+  // 刷新后若仍有引擎在下载，恢复轮询
+  const active = engines.value.find((e) => isDownloading(e))
+  if (active) startPolling(active.key)
 }
 
 function handleWhisperCommand(cmd, row) {
@@ -175,7 +187,8 @@ function handleWhisperCommand(cmd, row) {
 
 onMounted(async () => {
   await asrStore.loadOverview()
-  if (isDownloading.value) startPolling()
+  const active = engines.value.find((e) => isDownloading(e))
+  if (active) startPolling(active.key)
 })
 onUnmounted(stopPolling)
 </script>
@@ -186,6 +199,7 @@ onUnmounted(stopPolling)
     <el-card class="app-card" shadow="never" style="margin-bottom: 16px;">
       <div class="card-head-row">
         <span class="wb-card-title">本地 Whisper</span>
+        <el-tag type="success" size="small" effect="plain">免费</el-tag>
         <span class="card-head-hint">末位兜底引擎，任何云端/本地引擎失败都可回退到它</span>
         <div class="card-head-actions">
           <el-button size="small" :icon="RefreshCcw" :loading="asrStore.loading" @click="reload">刷新</el-button>
@@ -250,47 +264,59 @@ onUnmounted(stopPolling)
       </p>
     </el-card>
 
-    <!-- 本地 FireRedASR -->
-    <el-card class="app-card" shadow="never">
+    <!-- 本地引擎列表（注册表驱动：后端加引擎，本页自动出现） -->
+    <el-card
+      v-for="eng in engines"
+      :key="eng.key"
+      class="app-card" shadow="never" style="margin-bottom: 16px;"
+    >
       <div class="card-head-row">
-        <span class="wb-card-title">本地 FireRedASR</span>
-        <span class="card-head-hint">中英识别，RTF≈0.21，CPU 即可，不依赖 torch</span>
+        <span class="wb-card-title">{{ eng.name }}</span>
+        <el-tag :type="eng.fee === '免费' ? 'success' : 'warning'" size="small" effect="plain">
+          {{ eng.fee }}
+        </el-tag>
+        <span class="card-head-hint">{{ eng.languages }}</span>
         <div class="card-head-actions">
-          <el-tag v-if="firered.ready" type="success" size="small" effect="plain">已就绪</el-tag>
+          <el-tag v-if="eng.ready" type="success" size="small" effect="plain">已就绪</el-tag>
           <el-tag v-else type="info" size="small" effect="plain">未就绪</el-tag>
-          <el-tag v-if="firered.busy" type="warning" size="small" effect="plain">转录中</el-tag>
+          <el-tag v-if="eng.busy" type="warning" size="small" effect="plain">转录中</el-tag>
         </div>
       </div>
 
-      <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px;">
-        <span class="card-head-hint">占用磁盘：{{ humanBytes(firered.bytes) }}</span>
+      <p class="adv-field-hint" style="margin-top: 6px;">{{ eng.note }}</p>
+
+      <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 8px;">
+        <span class="card-head-hint">占用磁盘：{{ humanBytes(eng.bytes) }}</span>
+        <span class="card-head-hint" v-if="eng.size_hint">模型体积：{{ eng.size_hint }}</span>
         <span class="card-head-hint">
-          sherpa-onnx 依赖：{{ firered.sherpa_available ? '已安装' : '未安装（pip install sherpa-onnx）' }}
+          sherpa-onnx 依赖：{{ sherpaAvailable ? '已安装' : '未安装（pip install sherpa-onnx）' }}
         </span>
         <el-button
-          v-if="!firered.ready && !isDownloading"
-          size="small" type="primary" :loading="downloading"
-          @click="handleStartDownload"
-        >下载模型（约 1.1GB）</el-button>
-        <el-button v-if="isDownloading" size="small" @click="handleCancelDownload">取消下载</el-button>
+          v-if="!eng.ready && !isDownloading(eng)"
+          size="small" type="primary" :loading="downloadingEngine === eng.key"
+          @click="handleStartDownload(eng)"
+        >下载模型{{ eng.size_hint ? `（${eng.size_hint}）` : '' }}</el-button>
+        <el-button v-if="isDownloading(eng)" size="small" @click="handleCancelDownload(eng)">取消下载</el-button>
         <el-button
-          v-if="firered.ready && !isDownloading"
-          size="small" type="danger" plain :loading="removing"
-          @click="handleRemoveFirered"
+          v-if="eng.ready && !isDownloading(eng)"
+          size="small" type="danger" plain :loading="removingEngine === eng.key"
+          @click="handleRemoveEngine(eng)"
         >删除模型</el-button>
       </div>
 
-      <div v-if="isDownloading || download.status === 'error'" style="margin-top: 12px;">
+      <div v-if="isDownloading(eng) || engineDownload(eng).status === 'error'" style="margin-top: 12px;">
         <el-progress
-          :percentage="download.percent"
-          :status="download.status === 'error' ? 'exception' : undefined"
+          :percentage="engineDownload(eng).percent"
+          :status="engineDownload(eng).status === 'error' ? 'exception' : undefined"
         />
         <p class="adv-field-hint" style="margin-top: 6px;">
-          {{ download.status === 'error' ? `下载失败：${download.error}` : download.message }}
+          {{ engineDownload(eng).status === 'error'
+            ? `下载失败：${engineDownload(eng).error}`
+            : engineDownload(eng).message }}
         </p>
       </div>
 
-      <el-table :data="firered.files" v-loading="asrStore.loading" size="small" style="width: 100%; margin-top: 12px;">
+      <el-table :data="eng.parts" v-loading="asrStore.loading" size="small" style="width: 100%; margin-top: 12px;">
         <el-table-column prop="label" label="模型文件" min-width="150" show-overflow-tooltip />
         <el-table-column label="状态" min-width="90">
           <template #default="{ row }">
@@ -306,7 +332,7 @@ onUnmounted(stopPolling)
       </el-table>
 
       <p class="adv-field-hint" style="margin-top: 8px;">
-        下载失败时可按上表路径手动放置模型（GitHub release）后点「刷新」。
+        {{ eng.manual_hint }}；下载失败时可按上表路径手动放置模型后点「刷新」。
         删除模型前请确认没有正在进行的转录（转录中会拒绝删除）。
       </p>
     </el-card>
