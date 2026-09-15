@@ -246,10 +246,10 @@ def get_default_engine() -> str:
 
 
 def set_default_engine(engine: str) -> bool:
-    """设置默认转录引擎（非法值拒绝，返回 False）"""
-    if engine not in VALID_TRANSCRIBE_ENGINES:
+    """设置默认转录引擎；**空串 = 清除设置**（恢复"免费优先"自动推荐）。非法值拒绝返回 False。"""
+    if engine and engine not in VALID_TRANSCRIBE_ENGINES:
         return False
-    return _set_setting(SETTING_DEFAULT_ENGINE, engine)
+    return _set_setting(SETTING_DEFAULT_ENGINE, engine or '')
 
 
 def get_whisper_model() -> str:

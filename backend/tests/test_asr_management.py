@@ -187,6 +187,13 @@ class TestSettings:
         assert asr_repo.get_default_engine() == ''
         assert asr_repo.get_whisper_device() == 'auto'
 
+    def test_empty_engine_clears_to_auto_recommend(self):
+        """空串 = 清除用户设置，恢复后端"免费优先"自动推荐。"""
+        assert asr_repo.set_default_engine('local')
+        assert asr_repo.get_default_engine() == 'local'
+        assert asr_repo.set_default_engine('') is True
+        assert asr_repo.get_default_engine() == ''
+
 
 # ============ 2. cloud_asr 读取单点（DB 优先 → config 兜底） ============
 
