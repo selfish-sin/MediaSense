@@ -57,6 +57,7 @@ describe('settingsStore 默认转录引擎（消费后端 recommended_engine）'
 
   it('用户已手选引擎（firered）：不被推荐覆盖', async () => {
     const store = useSettingsStore()
+    store.touchEngine()
     store.advancedOptions.transcribe_engine = 'firered'
     apiMocks.status.mockResolvedValue({
       cloud_configured: true, free_configured: true, firered_ready: true,
@@ -66,13 +67,30 @@ describe('settingsStore 默认转录引擎（消费后端 recommended_engine）'
     expect(store.advancedOptions.transcribe_engine).toBe('firered')
   })
 
-  it('旧后端缺 recommended_engine 字段：保持默认 cloud（不误降 local）', async () => {
+  it('用户主动选了付费档 cloud：状态刷新也不被推荐覆盖', async () => {
+    const store = useSettingsStore()
+    store.touchEngine()
+    store.advancedOptions.transcribe_engine = 'cloud'
+    apiMocks.status.mockResolvedValue({
+      cloud_configured: true, free_configured: true, firered_ready: false,
+      recommended_engine: 'cloud_free',
+    })
+    await store.loadCloudAsrStatus()
+    expect(store.advancedOptions.transcribe_engine).toBe('cloud')
+  })
+
+  it('引擎占位值是免费档（不是付费 cloud）', () => {
+    const store = useSettingsStore()
+    expect(store.advancedOptions.transcribe_engine).toBe('cloud_free')
+  })
+
+  it('旧后端缺 recommended_engine 字段：保持占位（免费档），不误降 local 也不落付费档', async () => {
     apiMocks.status.mockResolvedValue({
       cloud_configured: true, free_configured: false, firered_ready: false,
     })
     const store = useSettingsStore()
     await store.loadCloudAsrStatus()
-    expect(store.advancedOptions.transcribe_engine).toBe('cloud')
+    expect(store.advancedOptions.transcribe_engine).toBe('cloud_free')
   })
 
   it('status 请求失败：保守落 local 兜底', async () => {

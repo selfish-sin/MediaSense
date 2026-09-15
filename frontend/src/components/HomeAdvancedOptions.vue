@@ -5,6 +5,7 @@
  * - 三区管线：① 任务目标（模式卡+输出素材随模式展开） ② 文本获取与转录 ③ AI 加工
  * - outputOptions 在 settingsStore（结果页下载素材过滤 + video→download_video 提交映射）
  * - 「AI 模型」手动选择时 emit('touch-model')，父组件据此停止按字数自动推荐
+ * - 「转录引擎」手动选择时调 settingsStore.touchEngine()，之后不再被后端推荐值覆盖
  */
 import { computed, watch } from 'vue'
 import { useSettingsStore } from '../stores/settingsStore'
@@ -140,7 +141,11 @@ const transcribeLanguageHint = computed(() => {
         <div class="adv-field-grid">
           <div class="adv-field">
             <div class="adv-field-label">转录引擎</div>
-            <el-select v-model="settings.advancedOptions.transcribe_engine" class="adv-field-control">
+            <el-select
+              v-model="settings.advancedOptions.transcribe_engine"
+              class="adv-field-control"
+              @change="settings.touchEngine()"
+            >
               <el-option label="云端 MiMo-ASR" value="cloud" :disabled="!settings.cloudAsrAvailable" />
               <el-option label="云端 XingChen（免费）" value="cloud_free" :disabled="!settings.freeCloudAvailable" />
               <el-option label="本地 FireRedASR" value="firered" />

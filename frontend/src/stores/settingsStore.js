@@ -71,9 +71,10 @@ export const useSettingsStore = defineStore('settings', () => {
     model_size: 'medium',
     // ★ 转录引擎：cloud_free=云端 XingChen（免费，后端推荐优先）/ cloud=云端 MiMo-ASR（付费）/
     //   firered=本地 FireRedASR2（中英最准）/ local=本地 Whisper；
-    //   初始 'cloud' 为占位——loadCloudAsrStatus 按 /api/asr/status 的 recommended_engine
-    //   替换默认值（免费优先）；运行时失败自动回退本地，原因可见
-    transcribe_engine: 'cloud',
+    //   ★ 占位值是**免费档**（不是付费 cloud）：loadCloudAsrStatus 在用户未触碰过引擎时按
+    //   /api/asr/status 的 recommended_engine 替换（免费优先）；付费档只能由用户显式选择
+    //   （历史泄漏：占位 'cloud' 让"还没加载完就提交"落到付费档）。运行时失败自动回退本地。
+    transcribe_engine: 'cloud_free',
     // ★ 转录设备：auto=自动探测（有GPU用GPU）/ cuda=强制CUDA(不可用回退CPU) / cpu=强制CPU（仅本地引擎）
     whisper_device: 'auto',
     // ★ 默认中文：Whisper自动识别会把中文误判成英文，强制中文避免误识别
@@ -84,6 +85,11 @@ export const useSettingsStore = defineStore('settings', () => {
     // ★ 校正领域提示词模板：default=通用 / tcm=中医（保护经典引文与用量观点不被改写）
     ai_correct_domain: 'default',
   })
+  // ★ 用户是否手动动过「转录引擎」下拉：动过之后 loadCloudAsrStatus 不再用推荐值覆盖它。
+  //   用显式标记而非"当前值 === 占位值"判断——后者无法把"用户主动选了付费档"与"仍是占位"分开。
+  const engineTouched = ref(false)
+  function touchEngine() { engineTouched.value = true }
+
   // 云端 ASR 可用性（/api/asr/status 同步；未配置时云端选项禁用并回落 local）
   const cloudAsrAvailable = ref(false)
   const cloudAsrModel = ref('')
@@ -146,16 +152,16 @@ export const useSettingsStore = defineStore('settings', () => {
       freeCloudAvailable.value = !!res.free_configured
       fireredReady.value = !!res.firered_ready
       // ★ 默认引擎策略单点在后端（routers/asr.py recommended_engine）：
-      //   前端只消费者——用户仍停留在默认 'cloud' 时替换为推荐值，手选不被覆盖
+      //   前端只消费者——用户未手动动过引擎时才消费推荐值（免费优先），手选不被覆盖
       const recommended = res.recommended_engine
-      if (recommended && advancedOptions.value.transcribe_engine === 'cloud') {
+      if (recommended && !engineTouched.value) {
         advancedOptions.value.transcribe_engine = recommended
       }
     } catch (err) {
       console.error('加载云端 ASR 状态失败:', err)
       cloudAsrAvailable.value = false
-      // 状态不可用（后端未起/网络异常）：保守落 local，不猜云端
-      if (advancedOptions.value.transcribe_engine === 'cloud') {
+      // 状态不可用（后端未起/网络异常）：保守落 local，不猜云端（更不猜付费档）
+      if (!engineTouched.value) {
         advancedOptions.value.transcribe_engine = 'local'
       }
     }
@@ -277,6 +283,8 @@ export const useSettingsStore = defineStore('settings', () => {
     recommendModel,
     selectedSummaryType,
     advancedOptions,
+    engineTouched,
+    touchEngine,
     cloudAsrAvailable,
     cloudAsrModel,
     freeCloudAvailable,
