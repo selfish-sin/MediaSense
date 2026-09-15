@@ -6,8 +6,12 @@ import { useModelStore } from '../stores/modelStore'
 import { modelsApi } from '../utils/api'
 import { modelDisplayName } from '../utils/modelDisplay'
 import { isDialogCancel } from '../utils/errorNotice'
+import AsrPanel from '../components/models/AsrPanel.vue'
 
 const modelStore = useModelStore()
+
+// 一级分域：llm = 文本模型（原页面内容）/ asr = 转录引擎（云端 + 本地）
+const activeDomain = ref('llm')
 
 const dialogVisible = ref(false)
 const dialogMode = ref('add')  // add / edit
@@ -312,14 +316,22 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
 <template>
   <div class="page-container">
     <el-card class="app-card" shadow="never" style="margin-bottom: 16px;">
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <h2 style="margin: 0;">AI模型管理</h2>
-        <el-button type="primary" @click="openAddDialog">添加模型</el-button>
+      <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
+        <h2 style="margin: 0;">模型管理</h2>
+        <el-button v-if="activeDomain === 'llm'" type="primary" @click="openAddDialog">添加模型</el-button>
       </div>
     </el-card>
 
-    <el-card class="app-card" shadow="never">
-      <el-table :data="modelStore.models" v-loading="modelStore.loading" stripe style="width: 100%;">
+    <!-- 一级分域：LLM 文本模型 / ASR 语音模型。两者配置、密钥、默认值完全独立 -->
+    <el-tabs v-model="activeDomain">
+      <el-tab-pane name="llm">
+        <template #label>LLM 模型</template>
+        <el-card class="app-card" shadow="never">
+          <div class="card-head-row" style="margin-bottom: 12px;">
+            <span class="wb-card-title">LLM 文本模型</span>
+            <span class="card-head-hint">用于总结、AI 校正、打标签、思维导图与追问</span>
+          </div>
+          <el-table :data="modelStore.models" v-loading="modelStore.loading" stripe style="width: 100%;">
       <!-- 列宽一律 min-width：容器变窄时由 Element Plus 触发横向滚动（固定 width 会被裁切） -->
       <el-table-column label="名称" min-width="200" show-overflow-tooltip>
         <template #default="{ row }">
@@ -354,8 +366,16 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
           </el-dropdown>
         </template>
       </el-table-column>
-    </el-table>
-    </el-card>
+          </el-table>
+        </el-card>
+      </el-tab-pane>
+
+      <!-- ASR 域内部再小分「云端 / 本地」（AsrPanel 内二级分段）；
+           lazy：未点开 ASR 页签前不挂载，避免无谓请求与本地磁盘遍历 -->
+      <el-tab-pane label="ASR 模型" name="asr" lazy>
+        <AsrPanel />
+      </el-tab-pane>
+    </el-tabs>
 
     <!-- 添加/编辑模型弹窗 -->
     <el-dialog v-model="dialogVisible" :title="dialogMode === 'add' ? '添加模型' : '编辑模型'" width="500px">

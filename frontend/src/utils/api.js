@@ -78,9 +78,24 @@ export const storageCleanupApi = {
   audit: (limit = 100) => api.get('/storage-cleanup/audit', { params: { limit } }),
 }
 
-// ============ 云端 ASR API ============
+// ============ ASR（转录）API ============
+// status：工作台消费的引擎可用性/默认值（轻量，不含本地磁盘信息）
+// overview：模型管理「ASR 模型」页总览（provider 列表 + 本地模型 + 设置，一次拿全）
 export const asrApi = {
   status: () => api.get('/asr/status'),
+  overview: () => api.get('/asr/overview'),
+  addProvider: (data) => api.post('/asr/providers', data),
+  updateProvider: (key, data) => api.put(`/asr/providers/${encodeURIComponent(key)}`, data),
+  deleteProvider: (key) => api.delete(`/asr/providers/${encodeURIComponent(key)}`),
+  // 真实调用一次云端 ASR 验证端点/密钥/模型链路（HTTP 200 + success 字段）
+  testProvider: (key) => api.post(`/asr/providers/${encodeURIComponent(key)}/test`),
+  // 默认引擎（default_engine 传空串 = 清除用户设置，恢复自动推荐）/ Whisper 档位 / 设备
+  saveSettings: (data) => api.post('/asr/settings', data),
+  fireredDownloadState: () => api.get('/asr/local/firered/download'),
+  startFireredDownload: () => api.post('/asr/local/firered/download'),
+  cancelFireredDownload: () => api.post('/asr/local/firered/cancel'),
+  removeFirered: () => api.delete('/asr/local/firered'),
+  removeWhisper: (size) => api.delete(`/asr/local/whisper/${encodeURIComponent(size)}`),
 }
 
 // ============ 模型管理 API ============
