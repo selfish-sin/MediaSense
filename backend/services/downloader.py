@@ -670,13 +670,19 @@ def _text_similarity(text_a: str, text_b: str) -> float:
     return SequenceMatcher(None, na, nb).ratio()
 
 
+def _short_error(err: BaseException, limit: int = 160) -> str:
+    """异常 → 单行短文案（推给前端的告警用；完整原文仍进后端日志）。"""
+    text = re.sub(r'\s+', ' ', str(err)).strip()
+    return text if len(text) <= limit else text[:limit] + '…'
+
+
 async def verify_subtitle_against_audio(txt_path, audio_path, sio=None, job_id: str = '',
                                         max_seconds: float = 90.0, threshold: float = 0.3,
                                         language: Optional[str] = None) -> Tuple[bool, str]:
     """校验字幕内容与音频开头是否一致（防 B站 返回旧/错误字幕）。
 
-    转写引擎云端优先（SenseVoice 中文准确率高，且无 base 模型
-    把中文幻觉成英文的老毛病），云端失败回退本地 Whisper base，
+    转写引擎云端优先——provider 由 `cloud_asr.preferred_provider()` 单点挑选
+    （免费槽位优先，免费档不可用才用付费档），云端失败回退本地 Whisper base，
     双失败按现行语义保留字幕（不让校验本身拖垮任务）。
     字幕与音频是两个独立来源，内容对不上即说明字幕不是当前视频的。
     返回 (是否保留字幕, 说明)。
@@ -687,22 +693,30 @@ async def verify_subtitle_against_audio(txt_path, audio_path, sio=None, job_id: 
         asr_text: Optional[str] = None
         engine_used = 'local'
 
-        # ★ 云端抽查（已配置才走）：90s 片段一次 API 调用
+        # ★ 云端抽查（provider 已配置才走）：90s 片段一次 API 调用
+        #   provider 选择单点 = cloud_asr.preferred_provider()（免费槽位优先，与转录默认
+        #   引擎的「免费优先」同口径）——抽查只是校验手段，不该烧付费额度。此前硬编码默认
+        #   provider（mimo 付费档）导致付费档欠费（402）时每个任务白重试 3 次退避。
         try:
             from services import cloud_asr
-            if cloud_asr.cloud_asr_configured():
+            provider = cloud_asr.preferred_provider()
+            if provider:
                 sample_mp3 = await asyncio.to_thread(
                     cloud_asr.extract_sample, str(audio_path), max_seconds)
                 try:
-                    asr_text = await asyncio.to_thread(cloud_asr.transcribe_file, sample_mp3)
+                    asr_text = await asyncio.to_thread(
+                        cloud_asr.transcribe_file, sample_mp3, provider=provider)
                     engine_used = 'cloud'
                 finally:
                     Path(sample_mp3).unlink(missing_ok=True)
         except Exception as cloud_e:
+            reason = _short_error(cloud_e)
             logger.warning(f'云端字幕抽查失败，回退本地 Whisper base: {cloud_e}')
             if sio:
                 from socket_handlers import emit_log
-                await emit_log(sio, job_id, f'  ⚠ 云端抽查失败（{type(cloud_e).__name__}），回退本地转写')
+                await emit_log(
+                    sio, job_id,
+                    f'  ⚠ 云端抽查失败（{type(cloud_e).__name__}：{reason}），回退本地转写')
 
         if asr_text is None:
             zh_prompt = '以下是简体中文。' if language == 'zh' else None

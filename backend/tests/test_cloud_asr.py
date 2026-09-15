@@ -21,6 +21,7 @@ from services.cloud_asr import (
     distribute_times,
     parse_silences,
     plan_cuts,
+    preferred_provider,
     split_sentences,
     strip_rich_tags,
     transcribe_file,
@@ -166,6 +167,29 @@ class TestConfigured:
         assert cloud_asr_configured() is False
 
 
+# ============ preferred_provider（一次性调用的槽位选择单点） ============
+
+class TestPreferredProvider:
+    """B站字幕抽查等一次性云端调用的 provider 选择：免费槽位优先，其次付费槽位。"""
+
+    def test_free_slot_first(self, monkeypatch):
+        monkeypatch.setattr(cloud_asr, 'cloud_asr_configured', lambda key: True)
+        assert preferred_provider() == 'xingchen'
+
+    def test_paid_when_free_unavailable(self, monkeypatch):
+        """免费档缺密钥/停用 → 落到付费档（有可用云端就比本地 Whisper 强）"""
+        monkeypatch.setattr(cloud_asr, 'cloud_asr_configured', lambda key: key == 'mimo')
+        assert preferred_provider() == 'mimo'
+
+    def test_none_when_nothing_configured(self, monkeypatch):
+        monkeypatch.setattr(cloud_asr, 'cloud_asr_configured', lambda key: False)
+        assert preferred_provider() is None
+
+    def test_none_when_slots_empty(self, monkeypatch):
+        monkeypatch.setattr('db.asr_repo.get_provider_for_engine', lambda engine: None)
+        assert preferred_provider() is None
+
+
 # ============ transcribe_file（mock _do_request，MiMo chat 响应形态） ============
 
 def _resp(status, text='', json_body=None):
@@ -257,6 +281,21 @@ class TestTranscribeFile:
                             lambda cfg, p, t: _resp(400, json_body={'message': 'bad request'}))
         with pytest.raises(CloudASRUnavailableError, match='400'):
             transcribe_file('a.mp3', max_retries=2)
+
+    def test_402_balance_is_config_error_no_retry(self, asr_enabled, monkeypatch):
+        """402 余额不足是计费类错误：立即抛 ConfigError，不做 3 次无意义重试
+        （当日实测付费档欠费时，每个任务白等 3 次退避 ≈11s）。"""
+        calls = []
+
+        def fake(cfg, p, t):
+            calls.append(p)
+            return _resp(402, json_body={'error': {'code': '402',
+                                                   'message': 'Insufficient account balance'}})
+
+        monkeypatch.setattr(cloud_asr, '_do_request', fake)
+        with pytest.raises(CloudASRConfigError, match='余额不足'):
+            transcribe_file('a.mp3')
+        assert calls == ['a.mp3']  # 只发一次请求，无重试
 
     def test_429_then_success(self, asr_enabled, monkeypatch, no_sleep):
         responses = [_resp(429, 'rate limited'), _resp(429, 'rate limited'),

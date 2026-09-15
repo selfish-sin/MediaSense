@@ -13,9 +13,11 @@
 契约与本地 Whisper 引擎一致：返回 (srt_path, txt_path, seg_count)。
 
 错误语义（必须可见可行动，禁止静默吞错）：
-- CloudASRConfigError：401/403/404 配置类错误，不重试，立即抛给调用方回退本地并给修复指引
+- CloudASRConfigError：401/402/403/404 配置与计费类错误（401 密钥无效、402 余额不足、
+  403 无权限、404 模型不存在），重试无意义，立即抛给调用方回退并给修复指引
 - CloudASRUnavailableError：400/429/5xx/网络错误退避重试耗尽（400 可能是单片内容问题，
   重试耗尽后跳过交给本地补录，不能上升为整体配置失败）
+- 一次性调用（B站字幕抽查等）的 provider 选择走 `preferred_provider()` 单点（免费槽位优先）
 分片级韧性（长视频数百片，单片抖动不应整体回退本地）：
 - 单片 Unavailable 失败 → 备用引擎补录（XingChen 免费 → firered → Whisper，
   _rescue_failed_chunks），补不回才留空洞
@@ -157,6 +159,23 @@ def provider_for_engine(engine: str) -> Optional[str]:
     """
     from db import asr_repo
     return asr_repo.get_provider_for_engine(engine)
+
+
+def preferred_provider() -> Optional[str]:
+    """**一次性**云端调用（B站字幕抽查等）的 provider 选择单点：免费槽位优先，其次付费槽位。
+
+    与转录默认引擎推荐（`routers.asr.recommended_engine`）的「免费优先」分支同口径：
+    抽查只是校验手段，不该消耗付费额度；免费档不可用时才用付费档。
+    两者都没配置（或都停用/缺密钥）→ 返回 None，调用方直接走本地 Whisper。
+
+    注意：这是**槽位选择**，不做用户默认引擎判定——抽查是随时可能发生的一次调用，
+    最便宜且可用的云端 provider 即最优；要彻底禁用某档就在 ASR 管理页停用它。
+    """
+    for engine in ('cloud_free', 'cloud'):
+        key = provider_for_engine(engine)
+        if key and cloud_asr_configured(key):
+            return key
+    return None
 
 
 def provider_label(provider: str) -> str:
@@ -545,7 +564,7 @@ def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int
                     provider: str = 'mimo') -> str:
     """单文件一次云端转写，返回清洗后的纯文本。
 
-    401/403/404 配置类错误立即抛 CloudASRConfigError（重试无意义）；
+    401/402/403/404 配置与计费类错误立即抛 CloudASRConfigError（重试无意义）；
     400/429/5xx/网络错误指数退避重试，耗尽抛 CloudASRUnavailableError。
     供完整转录与 B站字幕抽查共用。
     """
@@ -575,10 +594,14 @@ def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int
                     logger.warning(f'云端 ASR 响应异常: {last_reason}')
                 else:
                     return strip_rich_tags(text)
-            elif resp.status_code in (401, 403, 404):
+            elif resp.status_code in (401, 402, 403, 404):
                 detail = resp.text[:200]
                 if resp.status_code == 401:
                     hint = f'ASR 密钥无效，请在「模型管理 → ASR 模型」中检查 {label} 的 API Key'
+                elif resp.status_code == 402:
+                    # 计费类错误：重试永远不可能成功（当日实测每任务白等 3 次退避 ≈11s）
+                    hint = (f'{label} 账户余额不足/欠费（计费类错误，重试无意义）——'
+                            f'请为该 provider 充值，或在「模型管理 → ASR 模型」中停用它')
                 elif resp.status_code == 403:
                     hint = 'ASR 密钥无权限（可能未开通服务或余额不足）'
                 else:

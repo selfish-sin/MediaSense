@@ -411,16 +411,18 @@ class TestSubtitleContentCheck:
 
     @pytest.mark.asyncio
     async def test_verify_cloud_first_skips_local(self, tmp_path, monkeypatch):
-        """云端已配置且成功 → 直接用云端结果，本地 Whisper 不参与"""
+        """云端可用且成功 → 直接用云端结果，本地 Whisper 不参与"""
         txt = tmp_path / "sub.txt"
         txt.write_text("[00:00 - 00:05] 芯片简史第一集，我们开讲\n", encoding="utf-8")
         sample = tmp_path / "s.mp3"
         sample.write_bytes(b"x")
-        monkeypatch.setattr("services.cloud_asr.cloud_asr_configured", lambda: True)
+        used = []
+        monkeypatch.setattr("services.cloud_asr.preferred_provider", lambda: "xingchen")
         monkeypatch.setattr("services.cloud_asr.extract_sample",
                             lambda p, m: str(sample))
-        monkeypatch.setattr("services.cloud_asr.transcribe_file",
-                            lambda p, **kw: "芯片简史第一集，我们开讲")
+        monkeypatch.setattr(
+            "services.cloud_asr.transcribe_file",
+            lambda p, **kw: (used.append(kw.get("provider")), "芯片简史第一集，我们开讲")[1])
         local_calls = []
 
         def fake_local(path, max_seconds, language, prompt):
@@ -433,6 +435,7 @@ class TestSubtitleContentCheck:
         assert ok is True
         assert "云端" in detail
         assert local_calls == []
+        assert used == ["xingchen"]  # 抽查用槽位选择单点给的 provider（免费档优先）
         assert not sample.exists()  # 云端抽查临时片段已清理
 
     @pytest.mark.asyncio
@@ -440,7 +443,7 @@ class TestSubtitleContentCheck:
         """云端抽查失败 → 回退本地 Whisper base"""
         txt = tmp_path / "sub.txt"
         txt.write_text("[00:00 - 00:05] 芯片简史第一集，我们开讲\n", encoding="utf-8")
-        monkeypatch.setattr("services.cloud_asr.cloud_asr_configured", lambda: True)
+        monkeypatch.setattr("services.cloud_asr.preferred_provider", lambda: "xingchen")
         monkeypatch.setattr(
             "services.cloud_asr.extract_sample",
             lambda p, m: (_ for _ in ()).throw(RuntimeError("ffmpeg gone")))
@@ -454,10 +457,10 @@ class TestSubtitleContentCheck:
 
     @pytest.mark.asyncio
     async def test_verify_cloud_not_configured_goes_local(self, tmp_path, monkeypatch):
-        """云端未配置 → 本地抽查，日志说明走本地"""
+        """云端无可用 provider → 本地抽查，日志说明走本地"""
         txt = tmp_path / "sub.txt"
         txt.write_text("[00:00 - 00:05] 芯片简史第一集，我们开讲\n", encoding="utf-8")
-        monkeypatch.setattr("services.cloud_asr.cloud_asr_configured", lambda: False)
+        monkeypatch.setattr("services.cloud_asr.preferred_provider", lambda: None)
         monkeypatch.setattr(
             "services.transcriber.transcribe_audio_sample",
             lambda path, max_seconds, language, prompt: "芯片简史第一集，我们开讲")
@@ -465,6 +468,35 @@ class TestSubtitleContentCheck:
         ok, detail = await verify_subtitle_against_audio(txt, "audio.m4a")
         assert ok is True
         assert "本地" in detail
+
+    @pytest.mark.asyncio
+    async def test_verify_cloud_failure_reason_visible_to_user(self, tmp_path, monkeypatch):
+        """抽查失败必须把失败原因推给前端（此前只给异常类名，402 余额不足用户看不到）"""
+        from services.cloud_asr import CloudASRConfigError
+
+        txt = tmp_path / "sub.txt"
+        txt.write_text("[00:00 - 00:05] 芯片简史第一集，我们开讲\n", encoding="utf-8")
+        logs = []
+
+        async def fake_emit_log(_sio, _job_id, message):
+            logs.append(message)
+
+        monkeypatch.setattr("services.cloud_asr.preferred_provider", lambda: "mimo")
+        monkeypatch.setattr(
+            "services.cloud_asr.extract_sample",
+            lambda p, m: (_ for _ in ()).throw(
+                CloudASRConfigError("云端 ASR 402: MiMo-ASR 账户余额不足/欠费（计费类错误，重试无意义）")))
+        monkeypatch.setattr("socket_handlers.emit_log", fake_emit_log)
+        monkeypatch.setattr(
+            "services.transcriber.transcribe_audio_sample",
+            lambda path, max_seconds, language, prompt: "芯片简史第一集，我们开讲")
+
+        ok, _detail = await verify_subtitle_against_audio(
+            txt, "audio.m4a", sio=object(), job_id="j1")
+
+        assert ok is True                      # 抽查本身失败不拖垮任务（保留字幕）
+        failure_log = next(m for m in logs if "云端抽查失败" in m)
+        assert "CloudASRConfigError" in failure_log and "余额不足" in failure_log
 
 
 class TestDownloadVideoSections:
