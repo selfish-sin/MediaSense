@@ -6,6 +6,9 @@
 > 槽位化 provider 解析、默认引擎用户设置优先（只降不升）、ASR 配置管理 API（§8）与坑点 11-15；
 > 本地档改**引擎注册表**（`LOCAL_ENGINES`，本地端点按 `{engine}` 通用化、管理页本地段改引擎列表
 > 且收费标识单点在后端）；LLM 解码类本地引擎（Fun-ASR-Nano / Qwen3-ASR）实机横评后**放弃**（§5.1）。
+> 2026-09-15 补（付费档污染清理，task `09-15-asr-paid-default-cleanup`）：
+> **付费档（槽位 `cloud`=MiMo）只能由用户显式选择触发**——自动路径（抽查）只挑免费槽位、
+> `_provider_cfg`/默认引擎/默认 provider 一律去付费化、前端引擎占位值与 `engineTouched` 语义收紧（§2、§7 坑点 16）。
 > 实测证据：`archive/2026-09/09-11-asr-chain-quality-fix/compare*`、`archive/2026-09/09-12-cloud-latency-routing/`、`archive/2026-09/09-12-asr-vendor-compare/`。
 
 ## 0. 一图总览
@@ -33,11 +36,12 @@
   （`download_video(max_seconds=90)` → `--download-sections`，实测加固姿势 3.3s/6.9MB；
   片段放 `job_dir/_subtitle_check/` 子目录防断点续传误当完整音频复用；片段下载失败自动
   回退整段且日志可见），转写后与字幕头相似度 <0.3 判错位 → 弃字幕转全量转录。
-  抽查转写**云端优先**——provider 走 `cloud_asr.preferred_provider()` 单点
-  （`cloud_free` 槽位优先，免费档不可用才用 `cloud`；都不可用直接本地），
+  抽查转写**云端优先（只走免费档）**——provider 走 `cloud_asr.preferred_provider()` 单点
+  （**只返回 `cloud_free` 槽位的可用 provider**；免费档不可用返回 None → 直接本地），
   `extract_sample` + `transcribe_file(provider=...)`；失败回退本地 `transcribe_audio_sample`
   （**固定 CPU Whisper base**，采样语言跟随任务转录语言 + 简中提示词防幻觉）。
-  **勿用 `transcribe_file` 的默认 provider**（那是 mimo 付费档，欠费时会白重试 3 次）。
+  **抽查绝不消耗付费额度**：provider 必须显式传（`transcribe_file` 的缺省值已是"免费优先/无免费则报错"，
+  不再是 mimo 付费档）。
   片段**不作转录输入与素材**：校验失败时转录由 `_acquire_audio` 重新下载完整音频。
 - **YouTube**：`extract_youtube_subtitles` 拿平台字幕，逻辑同上（无抽查）。
 - 其他平台：直接下载 → 引擎路由。
@@ -68,6 +72,19 @@ provider，运行时取「该槽位 enabled 且 sort_order 最小」者：单点
 否则付费档 → `cloud`；都不可用 → `local`（firered 不参与**自动**推荐，避免默认触发 1.1GB
 下载；用户显式设为默认则尊重其选择）。前端 `settingsStore` 只消费推荐值（用户手选不覆盖），
 不再自行降级。
+**付费档只能显式选择（2026-09-15 立，勿放宽）**：槽位 `cloud`（MiMo，¥0.5/h）**只能由用户在
+工作台「转录引擎」里显式选择**触发。所有"缺省/兜底/自动"入口都必须是免费档：
+
+| 入口 | 行为 |
+|---|---|
+| `options['transcribe_engine']` 缺省/非法 | `main.resolve_transcribe_engine()`（单点）→ `recommended_engine()`（免费优先） |
+| `transcriber._transcribe_sync` / `transcribe_audio` 的 `engine` 缺省/未知值 | 落 `cloud_free` 链（`_fallback_chain` 未命中 → `cloud_free` 链，**永不回付费**） |
+| `cloud_asr.transcribe_file` / `transcribe_audio_cloud` 的 `provider` 缺省 | `preferred_provider()`（**只挑免费槽位**）；无免费档 → 抛 `CloudASRConfigError`，不静默付费 |
+| 前端工作台引擎占位值 | `cloud_free`（不是付费 `cloud`）；`engineTouched` 标记用户手选，之后不再被推荐值覆盖 |
+
+历史教训：抽查此前漏传 `provider` → 落到 `transcribe_file` 旧默认 `'mimo'`（付费档），
+**每个 B站 任务静默消耗一次付费额度**，且不落在 jobs.options 里（查库查不出来）。
+
 **引擎显示名**：`transcriber.engine_label()`（唯一事实源；日志/UI/文案勿再复制映射表）。
 
 **回退链（递归降级，每级失败原因经 progress_callback 可见）：**
@@ -198,6 +215,21 @@ FireRedASR 免费离线保留。XingChen 未参与 10min 全量横评（单片�
   只保留注册表基础设施（加引擎仍是"一条声明 + 一个解码函数"）。若将来换 GPU 重试，
   先按本表口径复测再决定。
 
+### 5.2 中医术语素材横评（2026-09-15，免费档 vs 本地；付费档欠费未参与）
+
+素材：BV1Av4y1A796 p41《中药学·柴胡》前 90s（术语密集）；基准 = B站字幕头 231 字。
+
+| 引擎 | 耗时 | 字数 | 相似度 | 术语表现 |
+|---|---|---|---|---|
+| 云端 XingChen（免费，现默认） | **10.3s** | 203 | 0.837 | 辛凉解表药/伞形科 对；「狭叶柴胡」→夏叶柴胡（同音错） |
+| 本地 FireRedASR2-AED | 44.2s | **255** | **0.932** | 术语几乎全对、文本最完整（比 B站字幕还准：字幕把「饮片」写成「影片」） |
+| Whisper base（本地，链尾兜底默认档） | 20.0s | 223 | 0.713 | 柴胡→柴糊、辛凉解表药→新两节表药、伞形科→散心克植物 |
+| Whisper medium（本地，已下载未默认使用） | 37.4s | 241 | 0.866 | 伞形科→陕西科植物、辛凉→心良节 |
+
+结论：**质量最高的是本地 FireRed（免费离线，慢 4 倍）**，免费云端 XingChen 是速度/性价比最优；
+Whisper **base 是链路里最弱一环**（`asr_whisper_model` 未设置时即是它）——术语密集素材不建议走 base。
+付费 MiMo 未参与（账户欠费 402，不可用），故此表不构成"要不要充值"的证据。
+
 ## 6. 参数与环境变量速查
 
 | 变量/常量 | 默认 | 说明 |
@@ -211,6 +243,8 @@ FireRedASR 免费离线保留。XingChen 未参与 10min 全量横评（单片�
 | `download_video(max_seconds)` | 无 | 只取开头 N 秒片段（抽查用 90s；失败自动回退完整下载） |
 | `transcribe_language`（options） | 'zh' | 云端忽略但影响本地兜底与字幕抽查 |
 | `asr_default_engine`（app_settings） | 空 | 用户设置的默认转录引擎（空=按免费优先自动推荐）；可用性不足时只降不升 |
+| `transcribe_engine`（options） | 无 | 任务级引擎；**缺省/非法值 → 推荐引擎（免费优先），绝不落付费档**（`main.resolve_transcribe_engine` 单点） |
+| `provider`（云端调用） | 无 | **缺省 → 只挑免费槽位**；无免费档即抛 ConfigError（付费档必须显式传入） |
 | `asr_whisper_model`（app_settings） | base | 默认 Whisper 档位（模型管理页可改；未设置回退 config.DEFAULT_WHISPER_MODEL） |
 | `asr_whisper_device`（app_settings） | auto | 转录设备（auto/cuda/cpu；任务 options 仍可逐任务覆盖） |
 
@@ -240,9 +274,9 @@ FireRedASR 免费离线保留。XingChen 未参与 10min 全量横评（单片�
    ②FireRedASR 转录进行中禁删（`firered_busy()` = `_FIRERED_LOCK.locked()`）。Whisper 档位删除
    还必须清 `_model_cache`（不清则下次转录仍用内存旧实例，「删了还在跑」被误判为删除无效）。
 14. **一次性云端调用（字幕抽查）必须显式带 provider**：`transcribe_file(path, provider=...)`，
-   provider 由 `preferred_provider()` 选（免费槽位优先）。省略该参数会落到默认 `'mimo'`
-   付费档——2026-09-15 实测 MiMo 欠费（HTTP 402）时，每个 B站字幕任务白重试 3 次退避
-   （≈11s）后才回退本地 Whisper，前端只看到「云端抽查失败（CloudASRUnavailableError）」。
+   provider 由 `preferred_provider()` 选（**只挑免费槽位**，免费档不可用返回 None → 本地 Whisper）。
+   函数缺省值已改为"免费优先/无免费则报错"，不再是 `'mimo'` 付费档——但调用方仍应显式传，
+   否则语义依赖函数内部默认（见坑点 16）。
 15. **测试必须隔离模型目录，且 `LOCAL_MODEL_DIRS` 只能就地改不能换对象**（2026-09-15 真实事故）：
    ①删除模型端点的用例若没隔离目录，会**真的删掉 `models/` 下的模型**（当时删掉了 FireRedASR
    三件套+标点+VAD ≈1.5GB，只表现为一条 "DID NOT RAISE"）；`tests/conftest.py` 的
@@ -250,6 +284,14 @@ FireRedASR 免费离线保留。XingChen 未参与 10min 全量横评（单片�
    临时目录，并在会话开始自检「没有任何模型路径仍指向真实 `models/`」。
    ②`LOCAL_MODEL_DIRS` **必须 `clear()+update()` 就地改**：`routers/asr_admin.py` 在 import 时
    就绑定了同一个 dict 对象，替换成新对象会让路由仍按真实路径删（测试以为在删 tmp 路径）。
+16. **默认值不许是付费档**（2026-09-15 付费额度泄漏）：漏传 `provider` / `transcribe_engine`
+   落到函数默认值 `'mimo'` / `'cloud'`，就是"用户没选、系统却花钱"。规矩是——
+   ①功能函数（`transcribe_file` / `transcribe_audio_cloud`）的 provider 缺省 = **免费优先**，
+   无免费档就抛可行动错误；②引擎类缺省值（`main.resolve_transcribe_engine`、
+   `transcriber._transcribe_sync`/`transcribe_audio`、`_fallback_chain` 未命中）**一律落免费档链**；
+   ③前端占位值也必须是免费档，并用显式 `engineTouched` 标记区分"用户主动选了付费档"与"仍是占位"。
+   回归锁：`tests/test_cloud_asr.py::TestNoPaidDefault`、`tests/test_main.py::TestResolveTranscribeEngine`、
+   `tests/test_transcriber.py::TestEngineValuesAndChains::test_unknown_engine_falls_back_to_free_chain_not_paid`。
 
 ## 8. ASR 配置管理 API（模型管理页「ASR 模型」域，2026-09-15）
 
