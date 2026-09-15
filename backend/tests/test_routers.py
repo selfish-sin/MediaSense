@@ -915,6 +915,15 @@ class TestChatRouter:
 
 # ── ASR 状态 ──
 class TestAsrStatusRouter:
+    @pytest.fixture(autouse=True)
+    def _config_only_providers(self, monkeypatch):
+        """本类验证 config.py 兜底语义与默认引擎推荐策略 → 屏蔽 DB provider 层，
+        保持确定行为；「DB 优先 / 槽位解析 / 管理页写操作」由 test_asr_management.py 覆盖。"""
+        monkeypatch.setattr('db.asr_repo.get_provider', lambda key: None)
+        monkeypatch.setattr('db.asr_repo.get_provider_for_engine',
+                            lambda engine: {'cloud': 'mimo', 'cloud_free': 'xingchen'}.get(engine))
+        monkeypatch.setattr('db.asr_repo.get_default_engine', lambda: '')
+
     def test_status_configured(self, client, monkeypatch):
         monkeypatch.setattr('config.ASR_CLOUD_ENABLED', True, raising=False)
         monkeypatch.setattr(

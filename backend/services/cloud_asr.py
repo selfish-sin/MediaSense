@@ -94,12 +94,19 @@ class CloudASRUnavailableError(Exception):
 
 _DEFAULT_FREE_ENDPOINT = 'https://api.siliconflow.cn/v1/audio/transcriptions'
 _DEFAULT_FREE_MODEL = 'XingChenAGI/XingChenASR-V3.2-Ultra'
+_DEFAULT_PAID_ENDPOINT = 'https://api.xiaomimimo.com/v1/chat/completions'
+_DEFAULT_PAID_MODEL = 'mimo-v2.5-asr'
 
+# 内置 provider 的简短运行时标签（日志/进度条用；自定义 provider 取 DB 里的名称）
 _PROVIDER_LABELS = {'mimo': 'MiMo-ASR', 'xingchen': 'XingChen-ASR'}
 
 
-def _provider_cfg(provider: str = 'mimo') -> dict:
-    """读取指定云端 provider 的配置（getattr 容错，便于测试 monkeypatch config 属性）。"""
+def _config_provider_cfg(provider: str = 'mimo') -> dict:
+    """纯 config.py 读取（不查库）。
+
+    两个用途：①DB 无该 provider 时的读取兜底；②内置 provider 首次播种的初始值。
+    不查库是为了避免 db → services 的循环导入。getattr 容错便于测试 monkeypatch。
+    """
     import config as _config
     if provider == 'xingchen':
         return {
@@ -111,17 +118,59 @@ def _provider_cfg(provider: str = 'mimo') -> dict:
         }
     return {
         'enabled': bool(getattr(_config, 'ASR_CLOUD_ENABLED', False)),
-        'endpoint': getattr(_config, 'ASR_CLOUD_ENDPOINT',
-                            'https://api.xiaomimimo.com/v1/chat/completions'),
+        'endpoint': getattr(_config, 'ASR_CLOUD_ENDPOINT', _DEFAULT_PAID_ENDPOINT),
         'api_key': getattr(_config, 'ASR_CLOUD_API_KEY', ''),
-        'model': getattr(_config, 'ASR_CLOUD_MODEL', 'mimo-v2.5-asr'),
+        'model': getattr(_config, 'ASR_CLOUD_MODEL', _DEFAULT_PAID_MODEL),
         'api': 'chat',
     }
 
 
+def _provider_cfg(provider: str = 'mimo') -> dict:
+    """云端 provider 配置的**唯一读取点**：DB 优先，未命中回退 config.py。
+
+    - DB（`asr_providers` 表，模型管理页可改）命中即返回，改配置无需重启服务；
+    - 未命中（表未初始化/回滚到旧版本）回退 config.py，行为与改造前一致。
+
+    返回结构固定：enabled / endpoint / api_key / model / api / name。
+    """
+    from db import asr_repo
+    row = asr_repo.get_provider(provider)
+    if row:
+        return {
+            'enabled': bool(row['enabled']),
+            'endpoint': row['endpoint'] or '',
+            'api_key': row['api_key'] or '',
+            'model': row['model'] or '',
+            # 请求姿势决定请求体构造与响应解析分支（见 _do_request / _extract_asr_text）
+            'api': 'multipart' if row['api'] == 'multipart' else 'chat',
+            'name': row['name'] or provider,
+        }
+    cfg = _config_provider_cfg(provider)
+    cfg['name'] = _PROVIDER_LABELS.get(provider, provider)
+    return cfg
+
+
+def provider_for_engine(engine: str) -> Optional[str]:
+    """引擎槽位（cloud / cloud_free）→ 运行时首选 provider key；槽位无可用 provider 返回 None。
+
+    单点：transcriber 的引擎路由与分片补录链都经此取 provider，不要在别处硬编码 provider 名。
+    """
+    from db import asr_repo
+    return asr_repo.get_provider_for_engine(engine)
+
+
+def provider_label(provider: str) -> str:
+    """运行时显示名：内置用简短标签（进度条/日志），自定义 provider 用其名称。"""
+    if provider in _PROVIDER_LABELS:
+        return _PROVIDER_LABELS[provider]
+    from db import asr_repo
+    row = asr_repo.get_provider(provider)
+    return (row or {}).get('name') or provider
+
+
 def _asr_cfg() -> dict:
-    """默认云端 provider（mimo）配置，供 /api/asr/status 等使用。"""
-    return _provider_cfg('mimo')
+    """默认云端 provider（mimo 槽位的首选 provider）配置，供 /api/asr/status 等使用。"""
+    return _provider_cfg(provider_for_engine('cloud') or 'mimo')
 
 
 def cloud_asr_configured(provider: str = 'mimo') -> bool:
@@ -452,11 +501,16 @@ def _request_multipart(cfg: dict, path: str, timeout: float) -> httpx.Response:
             )
 
 
-def _extract_asr_text(provider: str, payload: dict) -> str:
-    """按 provider 从响应取转写文本（choices 可能为空数组，取值必须防越界）。"""
-    if provider == 'xingchen':
+def _extract_asr_text(api: str, payload: dict) -> str:
+    """按**请求姿势**从响应取转写文本（勿改回按 provider 名分支——自定义 provider 会错分支）。
+
+    multipart（OpenAI /audio/transcriptions）→ ``{'text': ...}``；
+    chat（chat/completions 音频多模态）→ ``choices[0].message.content``
+    （choices 可能为空数组/null，取值必须防越界）。
+    """
+    if api == 'multipart':
         return (payload or {}).get('text', '') or ''
-    choices = payload.get('choices') or []
+    choices = (payload or {}).get('choices') or []
     if not choices:
         return ''
     msg = choices[0].get('message') or {}
@@ -497,10 +551,14 @@ def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int
     """
     cfg = _provider_cfg(provider)
     if not (cfg['enabled'] and bool(cfg['endpoint']) and bool(cfg['api_key'])):
-        raise CloudASRConfigError('云端 ASR 未配置（config.py 缺 endpoint/api_key 或未启用）')
+        raise CloudASRConfigError(
+            f'云端 ASR「{cfg.get("name", provider)}」未配置（endpoint/api_key 缺失或已停用）'
+            f'——请在「模型管理 → ASR 模型 → 云端 ASR」中补全'
+        )
     if timeout is None:
         timeout = _call_timeout()
 
+    label = provider_label(provider)
     last_reason = ''
     for attempt in range(max_retries):
         try:
@@ -511,7 +569,7 @@ def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int
         else:
             if resp.status_code == 200:
                 try:
-                    text = _extract_asr_text(provider, resp.json() or {})
+                    text = _extract_asr_text(cfg.get('api', 'chat'), resp.json() or {})
                 except ValueError:
                     last_reason = f'响应非 JSON: {resp.text[:200]}'
                     logger.warning(f'云端 ASR 响应异常: {last_reason}')
@@ -520,11 +578,11 @@ def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int
             elif resp.status_code in (401, 403, 404):
                 detail = resp.text[:200]
                 if resp.status_code == 401:
-                    hint = 'ASR 密钥无效，请检查 config.py 的 ASR_CLOUD_API_KEY'
+                    hint = f'ASR 密钥无效，请在「模型管理 → ASR 模型」中检查 {label} 的 API Key'
                 elif resp.status_code == 403:
                     hint = 'ASR 密钥无权限（可能未开通服务或余额不足）'
                 else:
-                    hint = f'ASR 模型不存在（model={cfg["model"]}），请检查 ASR_CLOUD_MODEL'
+                    hint = f'ASR 模型不存在（model={cfg["model"]}），请检查该 provider 的模型名'
                 raise CloudASRConfigError(f'云端 ASR {resp.status_code}: {hint} | 响应: {detail}')
             else:
                 last_reason = f'HTTP {resp.status_code}: {resp.text[:200]}'
@@ -553,10 +611,15 @@ def _rescue_failed_chunks(
     from services import local_asr
     from services.transcriber import transcribe_audio_sample
 
-    free_ok = primary_provider != 'xingchen' and cloud_asr_configured('xingchen')
+    # 免费档 provider 由 cloud_free 槽位解析（勿硬编码 provider 名）：
+    # 与主 provider 同一家时跳过这一级——不拿同一家被限流的接口重试
+    free_provider = provider_for_engine('cloud_free')
+    free_ok = bool(free_provider) and free_provider != primary_provider \
+        and cloud_asr_configured(free_provider)
+    free_label = f'免费档({provider_label(free_provider)})' if free_provider else '免费档'
     use_firered = local_asr.firered_model_ready()
     chain_label = '、'.join(label for label, ok in (
-        ('XingChen（免费）', free_ok), ('FireRedASR', use_firered), ('Whisper(base)', True)) if ok)
+        (free_label, free_ok), ('FireRedASR', use_firered), ('Whisper(base)', True)) if ok)
     if progress_callback:
         progress_callback(
             90, f'{len(failed_chunks)} 片云端失败，改用备用引擎（{chain_label}）补录...')
@@ -571,12 +634,12 @@ def _rescue_failed_chunks(
         text = None
         if free_ok:
             try:
-                text = transcribe_file(cp, provider='xingchen')
-                if text and 'XingChen（免费）' not in used:
-                    used.append('XingChen（免费）')
+                text = transcribe_file(cp, provider=free_provider)
+                if text and free_label not in used:
+                    used.append(free_label)
             except Exception as e:
                 logger.warning(
-                    f'XingChen（免费）补录失败（{Path(cp).name}: {type(e).__name__}: {e}），改用本地引擎')
+                    f'{free_label}补录失败（{Path(cp).name}: {type(e).__name__}: {e}），改用本地引擎')
                 text = None
         if not text and use_firered:
             try:
@@ -625,7 +688,7 @@ def transcribe_audio_cloud(
     src = Path(audio_path)
     duration = _get_audio_duration_seconds(audio_path) or 0.0
     if progress_callback:
-        progress_callback(2, f'云端转录（{_PROVIDER_LABELS.get(provider, provider)}）| 时长 {_format_duration(duration)} | 静音探测中...')
+        progress_callback(2, f'云端转录（{provider_label(provider)}）| 时长 {_format_duration(duration)} | 静音探测中...')
 
     silences = detect_silences(audio_path, duration)
     midpoints = [(s + e) / 2 for s, e in silences]
@@ -759,7 +822,7 @@ def transcribe_audio_cloud(
         lat_sorted = sorted(chunk_latencies)
         n = len(lat_sorted)
         logger.info(
-            f'[{_PROVIDER_LABELS.get(provider, provider)}] 云端分片延迟画像: n={n} '
+            f'[{provider_label(provider)}] 云端分片延迟画像: n={n} '
             f'min={lat_sorted[0]:.1f}s 中位={lat_sorted[n // 2]:.1f}s '
             f'p90={lat_sorted[min(int(n * 0.9), n - 1)]:.1f}s max={lat_sorted[-1]:.1f}s '
             f'（并发 {_concurrency()}，总耗时 {time.time() - transcribe_start:.1f}s）'

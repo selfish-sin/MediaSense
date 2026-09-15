@@ -110,6 +110,55 @@ def _select_model(model_size: str, platform: str = '') -> Tuple[str, str, bool]:
     )
 
 
+# ============ 本地 Whisper 模型清单与删除（模型管理页「本地 ASR」） ============
+
+def _dir_size(path: Path) -> int:
+    """目录递归字节数（不存在/无权限的项按 0 计，不让状态接口整体失败）"""
+    if not path.exists():
+        return 0
+    total = 0
+    for p in path.rglob('*'):
+        try:
+            if p.is_file():
+                total += p.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def list_local_models() -> list:
+    """本地 Whisper 各档就绪状态与磁盘占用（模型管理页用；含"残缺模型"提示）"""
+    models = []
+    for size, path in LOCAL_MODEL_DIRS.items():
+        models.append({
+            'size': size,
+            'path': str(path),
+            'ready': _model_complete(path),
+            # 目录存在但未通过完整性校验 = 残缺（缺 tokenizer.json / model.bin 过小），UI 需能区分
+            'partial': path.exists() and not _model_complete(path),
+            'bytes': _dir_size(path),
+        })
+    return models
+
+
+def remove_local_model(size: str) -> dict:
+    """删除本地 Whisper 指定档位模型目录，返回释放字节数（档位非法抛 ValueError）。"""
+    path = LOCAL_MODEL_DIRS.get(size)
+    if path is None:
+        raise ValueError(f'未知的 Whisper 档位: {size}')
+    freed = _dir_size(path)
+    if path.exists():
+        shutil.rmtree(path, ignore_errors=True)
+    # 进程级模型缓存按 model_path 键控：删完必须清缓存，否则下一次转录仍用内存里的旧实例，
+    # 「删了还在跑」会被误判成删除无效（缓存实例只影响本进程，重启自然消失）
+    with _model_cache_lock:
+        stale = [k for k in _model_cache if k[0] == str(path)]
+        for k in stale:
+            _model_cache.pop(k, None)
+    logger.info(f'已删除本地 Whisper 档位 {size}（释放 {freed} 字节，清理 {len(stale)} 个缓存实例）')
+    return {'size': size, 'freed_bytes': freed, 'ready': _model_complete(path)}
+
+
 def _format_srt_time(seconds: float) -> str:
     """格式化SRT时间戳"""
     if seconds is None:
@@ -693,11 +742,15 @@ def _transcribe_by_engine(
             audio_path, model_size, platform, speaker_diarization, language, progress_callback,
             cancel_check=cancel_check, device=device,
         )
-    # cloud / cloud_free：未配置视为该引擎失败，交给回退链
+    # cloud / cloud_free：槽位 → 运行时首选 provider（模型管理页可增删/启停）；
+    # 无可用 provider 或未配置密钥即视为该引擎失败，交给回退链（勿硬编码 provider 名）
     from services import cloud_asr
-    provider = 'xingchen' if engine == 'cloud_free' else 'mimo'
-    if not cloud_asr.cloud_asr_configured(provider):
-        raise Exception('云端 ASR 未配置（config.py 缺 ASR_CLOUD_* 配置）')
+    provider = cloud_asr.provider_for_engine(engine)
+    if not provider or not cloud_asr.cloud_asr_configured(provider):
+        raise Exception(
+            f'{engine_label(engine)} 无可用 provider（未配置或已停用）——'
+            f'可在「模型管理 → ASR 模型 → 云端 ASR」中补全端点与密钥'
+        )
     return cloud_asr.transcribe_audio_cloud(
         audio_path,
         progress_callback=progress_callback,

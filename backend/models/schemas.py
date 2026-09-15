@@ -125,6 +125,30 @@ class ModelTestResponse(BaseModel):
     latency_ms: Optional[int] = None
 
 
+# ============ 云端 ASR provider 配置（模型管理页「ASR 模型」域） ============
+class AsrProviderUpsert(BaseModel):
+    """新增/编辑云端 ASR provider 请求体"""
+    key: str = Field("", description="唯一标识（仅新增时使用；编辑走路径参数，可留空）")
+    name: str = Field(..., description="显示名称")
+    engine: str = Field("cloud", description="引擎槽位: cloud（付费档）/ cloud_free（免费档）")
+    api: str = Field("chat", description="请求姿势: chat（chat/completions 音频多模态）/ multipart（/audio/transcriptions）")
+    endpoint: str = Field("", description="API 端点")
+    api_key: Optional[str] = Field(None, description="API密钥（编辑时留空或含 **** = 不修改）")
+    model: str = Field("", description="模型名")
+    enabled: bool = Field(True, description="是否启用（停用后该 provider 不参与引擎路由）")
+    concurrency: Optional[int] = Field(None, description="并发路数（留空=用全局默认）")
+    timeout: Optional[int] = Field(None, description="单次调用超时秒（留空=用全局默认）")
+    sort_order: int = Field(100, description="槽位内优先级，小者先用")
+    remark: str = Field("", description="备注（如密钥获取地址）")
+
+
+class AsrSettingsUpdate(BaseModel):
+    """转录默认设置（只提交要改的字段）"""
+    default_engine: Optional[str] = Field(None, description="默认转录引擎: cloud/cloud_free/firered/local")
+    whisper_model: Optional[str] = Field(None, description="默认 Whisper 档位: tiny/base/small/medium")
+    whisper_device: Optional[str] = Field(None, description="转录设备: auto/cuda/cpu")
+
+
 # ============ 总结相关模型 ============
 class SummaryTypeResponse(BaseModel):
     """总结类型响应"""

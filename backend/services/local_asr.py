@@ -22,6 +22,7 @@ sherpa-onnx API 坑点（实测踩出来的，勿"顺手重构"）：
 - vad.window_size 是【方法】不是属性，写 vad.window_size 会报 unsupported operand
 - OfflinePunctuation 没有 from_* 工厂，直接 OfflinePunctuation(cfg)
 """
+import importlib.util
 import logging
 import os
 import shutil
@@ -88,6 +89,13 @@ _PROGRESS_RECOG_BASE = 10
 
 _FIRERED_LOCK = threading.Lock()
 
+# ── 模型文件生命周期状态（模型管理页「本地 ASR」用）──
+# 下载状态是进程内单例：下载失败/中断后可重试，重启后回到 idle（重试即可，不需持久化）
+_download_state: dict = {'status': 'idle', 'percent': 0, 'message': '', 'error': ''}
+_download_lock = threading.Lock()
+_download_cancel = threading.Event()
+_download_thread: Optional[threading.Thread] = None
+
 
 def _file_ok(p: Path) -> bool:
     return p.is_file() and p.stat().st_size > 0
@@ -103,6 +111,130 @@ def firered_model_ready() -> bool:
         FIRERED_VAD_MODEL_PATH,
     ]
     return all(_file_ok(p) for p in parts)
+
+
+# ============ 模型文件生命周期（模型管理页「本地 ASR」） ============
+# 就绪判定/下载/删除的唯一入口都在本模块——路由层只做参数校验与并发编排，
+# 不要绕过这些函数直接删/建模型文件（否则就绪判定会与实际文件漂移）。
+
+_MODEL_PARTS = (
+    ('encoder', '声学编码器', lambda: FIRERED_MODEL_DIR / 'encoder.int8.onnx'),
+    ('decoder', '声学解码器', lambda: FIRERED_MODEL_DIR / 'decoder.int8.onnx'),
+    ('tokens', '词表', lambda: FIRERED_MODEL_DIR / 'tokens.txt'),
+    ('punct', '标点模型', lambda: FIRERED_PUNCT_MODEL_DIR / 'model.onnx'),
+    ('vad', 'VAD 模型（静音检测）', lambda: FIRERED_VAD_MODEL_PATH),
+)
+
+
+def sherpa_available() -> bool:
+    """sherpa-onnx 是否可导入（只查 spec，不真正 import，避免拖慢状态接口）"""
+    try:
+        return importlib.util.find_spec('sherpa_onnx') is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def firered_busy() -> bool:
+    """是否有 FireRedASR 转录正在跑（模型文件删除前必须检查，避免删掉运行中的模型）"""
+    return _FIRERED_LOCK.locked()
+
+
+def model_file_status() -> dict:
+    """FireRedASR 五个模型文件逐项状态 + 总占用（磁盘字节）。"""
+    files = []
+    total = 0
+    for key, label, path_fn in _MODEL_PARTS:
+        path = path_fn()
+        size = path.stat().st_size if path.exists() else 0
+        total += size
+        files.append({
+            'key': key,
+            'label': label,
+            'path': str(path),
+            'ready': _file_ok(path),
+            'bytes': size,
+        })
+    return {
+        'ready': firered_model_ready(),
+        'files': files,
+        'bytes': total,
+        'dir': str(FIRERED_MODEL_DIR),
+        'punct_dir': str(FIRERED_PUNCT_MODEL_DIR),
+        'vad_path': str(FIRERED_VAD_MODEL_PATH),
+        'sherpa_available': sherpa_available(),
+    }
+
+
+def get_download_state() -> dict:
+    """当前模型下载状态快照：{status: idle|downloading|done|error, percent, message, error}"""
+    with _download_lock:
+        return dict(_download_state)
+
+
+def start_model_download() -> bool:
+    """后台线程按需下载缺失的 FireRedASR 模型；已在下载中返回 False。
+
+    进度写入 `_download_state` 供前端轮询（长任务不能占住 HTTP 请求）。
+    """
+    global _download_thread
+    with _download_lock:
+        if _download_state['status'] == 'downloading':
+            return False
+        _download_state.update({'status': 'downloading', 'percent': 0,
+                                'message': '准备下载...', 'error': ''})
+    _download_cancel.clear()
+
+    def _run() -> None:
+        try:
+            _ensure_model_ready(
+                progress_callback=lambda pct, msg: _set_download_state(
+                    percent=max(0, min(int(pct), 100)), message=str(msg)),
+                cancel_check=_download_cancel.is_set,
+            )
+        except TranscriptionCancelledError:
+            logger.info('FireRedASR 模型下载被取消')
+            _set_download_state(status='idle', percent=0, message='下载已取消')
+        except Exception as e:
+            logger.error(f'FireRedASR 模型下载失败: {e}')
+            _set_download_state(status='error', message='下载失败', error=str(e))
+        else:
+            _set_download_state(status='done', percent=100, message='模型已就绪')
+
+    _download_thread = threading.Thread(target=_run, name='firered-model-download', daemon=True)
+    _download_thread.start()
+    return True
+
+
+def cancel_model_download() -> bool:
+    """请求取消下载（下载线程在下一个数据块边界退出）；未在下载返回 False。"""
+    with _download_lock:
+        running = _download_state['status'] == 'downloading'
+    if running:
+        _download_cancel.set()
+    return running
+
+
+def remove_model_files() -> dict:
+    """删除 FireRedASR 三件套 + 标点 + VAD，返回释放的字节数。
+
+    下载进行中拒绝删除（调用方转 409，避免与下载线程互相破坏文件）。
+    """
+    with _download_lock:
+        if _download_state['status'] == 'downloading':
+            raise Exception('模型正在下载中，请先取消下载或等待完成再删除')
+    freed = model_file_status()['bytes']
+    shutil.rmtree(FIRERED_MODEL_DIR, ignore_errors=True)
+    shutil.rmtree(FIRERED_PUNCT_MODEL_DIR, ignore_errors=True)
+    FIRERED_VAD_MODEL_PATH.unlink(missing_ok=True)
+    with _download_lock:
+        _download_state.update({'status': 'idle', 'percent': 0, 'message': '', 'error': ''})
+    logger.info(f'已删除 FireRedASR 模型文件，释放 {freed} 字节')
+    return {'freed_bytes': freed, 'ready': firered_model_ready()}
+
+
+def _set_download_state(**kwargs) -> None:
+    with _download_lock:
+        _download_state.update(kwargs)
 
 
 def _manual_hint(url: str, target: Path) -> str:

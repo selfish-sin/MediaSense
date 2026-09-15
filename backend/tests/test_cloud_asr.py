@@ -45,6 +45,19 @@ def no_sleep(monkeypatch):
     monkeypatch.setattr(cloud_asr.time, 'sleep', lambda *_: None)
 
 
+# provider 配置的读取单点已改为「DB（asr_providers 表）优先 → config.py 兜底」。
+# 本模块的用例都是验证 config.py 兜底语义与编排逻辑，因此屏蔽 DB 层，让它们保持
+# 改造前的确定行为；DB 优先与槽位解析由 test_asr_providers.py 显式覆盖。
+_DEFAULT_SLOTS = {'cloud': 'mimo', 'cloud_free': 'xingchen'}
+
+
+@pytest.fixture(autouse=True)
+def _config_only_providers(monkeypatch):
+    monkeypatch.setattr('db.asr_repo.get_provider', lambda key: None)
+    monkeypatch.setattr('db.asr_repo.get_provider_for_engine', lambda engine: _DEFAULT_SLOTS.get(engine))
+    monkeypatch.setattr('db.asr_repo.get_default_engine', lambda: '')
+
+
 # ============ parse_silences ============
 
 class TestParseSilences:
@@ -184,14 +197,20 @@ class TestTranscribeFile:
         assert called == ['a.mp3']
 
     def test_extract_text_handles_empty_choices(self):
-        """choices 空数组/缺字段必须安全返回空串（防越界，同 MaaS usage chunk 教训）。"""
-        assert cloud_asr._extract_asr_text('mimo', {}) == ''
-        assert cloud_asr._extract_asr_text('mimo', {'choices': []}) == ''
-        assert cloud_asr._extract_asr_text('mimo', {'choices': [{'message': {}}]}) == ''
-        assert cloud_asr._extract_asr_text('mimo', _mimo_body('内容')) == '内容'
-        # xingchen（multipart）响应形态：{'text': ...}
-        assert cloud_asr._extract_asr_text('xingchen', {'text': '识别内容'}) == '识别内容'
-        assert cloud_asr._extract_asr_text('xingchen', {}) == ''
+        """choices 空数组/缺字段必须安全返回空串（防越界，同 MaaS usage chunk 教训）。
+
+        参数是**请求姿势**（chat/multipart）而非 provider 名——自定义 provider 才不会错分支。
+        """
+        assert cloud_asr._extract_asr_text('chat', {}) == ''
+        assert cloud_asr._extract_asr_text('chat', {'choices': []}) == ''
+        assert cloud_asr._extract_asr_text('chat', {'choices': None}) == ''
+        assert cloud_asr._extract_asr_text('chat', {'choices': [{'message': {}}]}) == ''
+        assert cloud_asr._extract_asr_text('chat', _mimo_body('内容')) == '内容'
+        # multipart（OpenAI /audio/transcriptions）响应形态：{'text': ...}
+        assert cloud_asr._extract_asr_text('multipart', {'text': '识别内容'}) == '识别内容'
+        assert cloud_asr._extract_asr_text('multipart', {}) == ''
+        # 未知姿势按 chat 处理（宽松兜底，不抛错）
+        assert cloud_asr._extract_asr_text('unknown', _mimo_body('内容')) == '内容'
 
     def test_xingchen_provider_multipart_parse(self, asr_enabled, monkeypatch):
         """免费档 xingchen（multipart）走 {'text': ...} 解析，模型为 XingChenASR。"""

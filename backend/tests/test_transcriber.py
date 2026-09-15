@@ -15,6 +15,14 @@ from services.transcriber import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _config_only_providers(monkeypatch):
+    """引擎路由测试固定槽位 → provider 映射，不依赖本机 DB/config 里的 provider 启停状态。"""
+    monkeypatch.setattr('db.asr_repo.get_provider', lambda key: None)
+    monkeypatch.setattr('db.asr_repo.get_provider_for_engine',
+                        lambda engine: {'cloud': 'mimo', 'cloud_free': 'xingchen'}.get(engine))
+
+
 class TestModelComplete:
     def test_dir_not_exists(self):
         assert _model_complete(Path("/nonexistent/path")) is False

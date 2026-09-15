@@ -273,6 +273,29 @@ def init_db():
         )
     """)
 
+    # ★ 云端 ASR provider 表（模型管理页「ASR 模型」域；engine = 回退链槽位 cloud/cloud_free）
+    #   api = 请求姿势（chat = chat/completions 音频多模态 / multipart = /audio/transcriptions）
+    #   仓储与语义见 db/asr_repo.py；provider 配置的读取单点是 services/cloud_asr._provider_cfg
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS asr_providers (
+            key TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            engine TEXT NOT NULL DEFAULT 'cloud',
+            api TEXT NOT NULL DEFAULT 'chat',
+            endpoint TEXT NOT NULL DEFAULT '',
+            api_key TEXT DEFAULT '',
+            model TEXT DEFAULT '',
+            enabled INTEGER DEFAULT 1,
+            concurrency INTEGER,
+            timeout INTEGER,
+            is_builtin INTEGER DEFAULT 0,
+            sort_order INTEGER DEFAULT 100,
+            remark TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     # ★ 索引（IF NOT EXISTS，纯增量；加速列表/去重/批量/token汇总/追问历史查询）
     _index_stmts = [
         "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)",
@@ -284,6 +307,7 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_job_chats_job_id ON job_chats(job_id)",
         "CREATE INDEX IF NOT EXISTS idx_chat_sessions_job_id ON chat_sessions(job_id)",
         "CREATE INDEX IF NOT EXISTS idx_summary_history_job_id ON summary_history(job_id)",
+        "CREATE INDEX IF NOT EXISTS idx_asr_providers_engine ON asr_providers(engine, enabled, sort_order)",
     ]
     for _stmt in _index_stmts:
         try:
@@ -298,12 +322,23 @@ def init_db():
     # 初始化内置数据
     _seed_builtin_models()
     _seed_summary_types()
+    _seed_builtin_asr_providers()
 
 
 def _seed_builtin_models():
     """内置AI模型配置表（已清空，用户自行在 /models 页面管理模型）"""
     # 不再自动播种模型
     logger.info("无内置模型（请在 /models 页面自行添加）")
+
+
+def _seed_builtin_asr_providers():
+    """播种内置云端 ASR provider（仅当 asr_providers 为空时）
+
+    把用户 config.py 里已填的 endpoint/model/api_key 一次性迁入 DB，
+    之后运行时一律以 DB 为准（config.py 只作读取兜底），改配置不再需要重启。
+    """
+    from db.asr_repo import seed_builtin_providers
+    seed_builtin_providers()
 
 
 def _seed_summary_types():
