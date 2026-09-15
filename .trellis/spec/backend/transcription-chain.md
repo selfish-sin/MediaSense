@@ -31,9 +31,11 @@
   （`download_video(max_seconds=90)` → `--download-sections`，实测加固姿势 3.3s/6.9MB；
   片段放 `job_dir/_subtitle_check/` 子目录防断点续传误当完整音频复用；片段下载失败自动
   回退整段且日志可见），转写后与字幕头相似度 <0.3 判错位 → 弃字幕转全量转录。
-  抽查转写**云端优先**（`cloud_asr.extract_sample` + `transcribe_file`，mimo 已配置时），
-  失败回退本地 `transcribe_audio_sample`（**固定 CPU Whisper base**，采样语言跟随任务
-  转录语言 + 简中提示词防幻觉）。
+  抽查转写**云端优先**——provider 走 `cloud_asr.preferred_provider()` 单点
+  （`cloud_free` 槽位优先，免费档不可用才用 `cloud`；都不可用直接本地），
+  `extract_sample` + `transcribe_file(provider=...)`；失败回退本地 `transcribe_audio_sample`
+  （**固定 CPU Whisper base**，采样语言跟随任务转录语言 + 简中提示词防幻觉）。
+  **勿用 `transcribe_file` 的默认 provider**（那是 mimo 付费档，欠费时会白重试 3 次）。
   片段**不作转录输入与素材**：校验失败时转录由 `_acquire_audio` 重新下载完整音频。
 - **YouTube**：`extract_youtube_subtitles` 拿平台字幕，逻辑同上（无抽查）。
 - 其他平台：直接下载 → 引擎路由。
@@ -91,7 +93,8 @@ provider，运行时取「该槽位 enabled 且 sort_order 最小」者：单点
 公共管线：ffmpeg silencedetect（-35dB，静音≥0.5s，间隔<3s 不切，无静音 30s 强制等分）
 → 并发 `_concurrency()`（默认 8，env `ASR_CLOUD_CONCURRENCY`，钳制 1~16；实测 c16 更慢勿调高）
 → 单片 `transcribe_file(path, provider=...)`（timeout 180s，重试 3 次指数退避 ≤8s，
-401/403/404 为 ConfigError 立即抛；400 归重试——可能是单片内容问题，耗尽后跳过交本地补录）
+401/402/403/404 为 ConfigError 立即抛——402 是计费类错误（余额不足），重试永远不可能成功；
+400 归重试——可能是单片内容问题，耗尽后跳过交本地补录）
 → 写盘前 `split_sentences`+`distribute_times` 句级化（纯本地后处理：句末标点切句、
 短句累积≥4 字、超 40 字强制断、字数比例分配时长）。
 - 失败语义：单片失败 → **分片级本地补录**（§4）；全部失败且补录无收获 → 抛 Unavailable 走回退链。
@@ -202,6 +205,10 @@ FireRedASR 免费离线保留。XingChen 未参与 10min 全量横评（单片�
 13. **删除本地模型要挡两件事**：①下载进行中禁删（`_download_state.status == 'downloading'`）；
    ②FireRedASR 转录进行中禁删（`firered_busy()` = `_FIRERED_LOCK.locked()`）。Whisper 档位删除
    还必须清 `_model_cache`（不清则下次转录仍用内存旧实例，「删了还在跑」被误判为删除无效）。
+14. **一次性云端调用（字幕抽查）必须显式带 provider**：`transcribe_file(path, provider=...)`，
+   provider 由 `preferred_provider()` 选（免费槽位优先）。省略该参数会落到默认 `'mimo'`
+   付费档——2026-09-15 实测 MiMo 欠费（HTTP 402）时，每个 B站字幕任务白重试 3 次退避
+   （≈11s）后才回退本地 Whisper，前端只看到「云端抽查失败（CloudASRUnavailableError）」。
 
 ## 8. ASR 配置管理 API（模型管理页「ASR 模型」域，2026-09-15）
 
