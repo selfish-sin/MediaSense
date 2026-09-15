@@ -982,7 +982,7 @@
           "jobs-batch"
         ],
         "summary": "Batch Submit",
-        "description": "批量提交URL\nbody: {\"urls\": [\"url1\",\"url2\",...], \"options\": {...}}  或直接 [\"url1\",\"url2\",...]（兼容旧前端缓存）\n\n★ 完善：①URL 去重过滤 ②生成 batch_id 聚合 ③传递完整参数（model/summary_type/开关）\n批量任务严格串行：创建全部子任务后只启动一个编排任务（_run_batch_sequential），\n按提交顺序逐个执行，一次只跑一个（用户要求\"批量=任务序列\"，防平台风控降级）；\n全局信号量（MAX_CONCURRENT_JOBS）仍对跨批量/单个任务生效。",
+        "description": "批量提交URL\nbody: {\"urls\": [\"url1\",\"url2\",...], \"options\": {...}}  或直接 [\"url1\",\"url2\",...]（兼容旧前端缓存）\n\n批量任务严格串行：创建全部子任务后只启动一个编排任务（_run_batch_sequential），\n按提交顺序逐个执行，一次只跑一个（用户要求\"批量=任务序列\"，防平台风控降级）；\n全局信号量（MAX_CONCURRENT_JOBS）仍对跨批量/单个任务生效。\n\n★ 提交即全跑（2026-09-13 用户定稿）：批量=排队，提交几行就跑几个，不做任何\nURL 去重跳过（此前按 BV 号规范化去重，B站分P/合集多行链接被误判同一条静默\n跳过，用户明确反对）。只清洗 URL；非 URL 行不建任务，行号随响应返回由前端告警。",
         "operationId": "batch_submit_api_jobs_batch_post",
         "responses": {
           "200": {
@@ -1428,7 +1428,7 @@
           "asr"
         ],
         "summary": "Asr Status",
-        "description": "云端 ASR 配置状态（不含密钥）。\n\n- cloud_configured：MiMo（默认云端 provider）endpoint + key 齐全且开关打开\n- model / provider_host：MiMo 模型名与主机名（展示用）\n- free_configured / free_model：免费档 XingChen Ultra（cloud_free 引擎）可用状态\n- firered_ready：本地 FireRedASR 模型三件套+标点+VAD 是否就位（前端提示是否需下载）\n- recommended_engine：默认引擎推荐（免费优先；前端默认值单点，见 _recommended_engine）",
+        "description": "转录引擎配置状态（不含密钥）——工作台可用性与默认值的单点来源。\n\n- cloud_configured / provider_name / model / provider_host：付费档（cloud 槽位）运行时 provider\n- free_configured / free_provider_name / free_model：免费档（cloud_free 槽位）运行时 provider\n- firered_ready：本地 FireRedASR 模型是否就位（前端提示是否需下载）\n- recommended_engine：默认引擎推荐（用户设置优先，其次免费优先；前端只消费，不自行降级）\n- default_engine：用户显式设置的默认引擎（空串 = 未设置）",
         "operationId": "asr_status_api_asr_status_get",
         "responses": {
           "200": {
@@ -1436,6 +1436,356 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/asr/overview": {
+      "get": {
+        "tags": [
+          "asr"
+        ],
+        "summary": "Asr Overview",
+        "description": "ASR 模型域总览：云端 provider 列表 + 本地模型状态 + 设置 + 推荐引擎。\n\n一次喂满管理页（避免前端多次请求）；磁盘遍历在线程池执行，不阻塞事件循环。",
+        "operationId": "asr_overview_api_asr_overview_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/asr/providers": {
+      "post": {
+        "tags": [
+          "asr-admin"
+        ],
+        "summary": "Add Provider Api",
+        "description": "新增云端 provider",
+        "operationId": "add_provider_api_api_asr_providers_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AsrProviderUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/asr/providers/{key}": {
+      "put": {
+        "tags": [
+          "asr-admin"
+        ],
+        "summary": "Update Provider Api",
+        "description": "更新云端 provider（api_key 留空/含 **** = 保留原密钥）",
+        "operationId": "update_provider_api_api_asr_providers__key__put",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AsrProviderUpsert"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "asr-admin"
+        ],
+        "summary": "Delete Provider Api",
+        "description": "删除云端 provider（内置不可删，可停用/改配置）",
+        "operationId": "delete_provider_api_api_asr_providers__key__delete",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/asr/providers/{key}/test": {
+      "post": {
+        "tags": [
+          "asr-admin"
+        ],
+        "summary": "Test Provider Api",
+        "description": "真实调用一次云端 ASR（2 秒探测音频）验证链路。\n\n与 AI 模型测试连接同契约：HTTP 200 + success/error 字段（调用方据 success 判断）。\n探测音频无人声，`text` 为空属正常；401/403/404 与重试耗尽的原因原样透出。",
+        "operationId": "test_provider_api_api_asr_providers__key__test_post",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/asr/settings": {
+      "post": {
+        "tags": [
+          "asr-admin"
+        ],
+        "summary": "Update Settings Api",
+        "description": "更新转录默认设置（只提交要改的字段；非法值显式报错，不静默忽略）",
+        "operationId": "update_settings_api_api_asr_settings_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AsrSettingsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/asr/local/firered/download": {
+      "get": {
+        "tags": [
+          "asr-admin"
+        ],
+        "summary": "Firered Download State",
+        "description": "下载状态（轻量轮询端点；总览含磁盘遍历，轮询请用这个）",
+        "operationId": "firered_download_state_api_asr_local_firered_download_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "asr-admin"
+        ],
+        "summary": "Start Firered Download",
+        "description": "开始后台下载缺失的 FireRedASR 模型（约 1.1GB，进度轮询上面那个端点）",
+        "operationId": "start_firered_download_api_asr_local_firered_download_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/asr/local/firered/cancel": {
+      "post": {
+        "tags": [
+          "asr-admin"
+        ],
+        "summary": "Cancel Firered Download",
+        "description": "请求取消下载（在下一个数据块边界生效）",
+        "operationId": "cancel_firered_download_api_asr_local_firered_cancel_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/asr/local/firered": {
+      "delete": {
+        "tags": [
+          "asr-admin"
+        ],
+        "summary": "Delete Firered Model",
+        "description": "删除本地 FireRedASR 模型文件（释放磁盘；转录进行中拒绝删除）",
+        "operationId": "delete_firered_model_api_asr_local_firered_delete",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/asr/local/whisper/{size}": {
+      "delete": {
+        "tags": [
+          "asr-admin"
+        ],
+        "summary": "Delete Whisper Model",
+        "description": "删除本地 Whisper 指定档位模型目录（释放磁盘）",
+        "operationId": "delete_whisper_model_api_asr_local_whisper__size__delete",
+        "parameters": [
+          {
+            "name": "size",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Size"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
               }
             }
           }
@@ -3217,6 +3567,148 @@
           "confirm"
         ],
         "title": "ApplyRequest"
+      },
+      "AsrProviderUpsert": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key",
+            "description": "唯一标识（仅新增时使用；编辑走路径参数，可留空）",
+            "default": ""
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "显示名称"
+          },
+          "engine": {
+            "type": "string",
+            "title": "Engine",
+            "description": "引擎槽位: cloud（付费档）/ cloud_free（免费档）",
+            "default": "cloud"
+          },
+          "api": {
+            "type": "string",
+            "title": "Api",
+            "description": "请求姿势: chat（chat/completions 音频多模态）/ multipart（/audio/transcriptions）",
+            "default": "chat"
+          },
+          "endpoint": {
+            "type": "string",
+            "title": "Endpoint",
+            "description": "API 端点",
+            "default": ""
+          },
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key",
+            "description": "API密钥（编辑时留空或含 **** = 不修改）"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "模型名",
+            "default": ""
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "description": "是否启用（停用后该 provider 不参与引擎路由）",
+            "default": true
+          },
+          "concurrency": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Concurrency",
+            "description": "并发路数（留空=用全局默认）"
+          },
+          "timeout": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeout",
+            "description": "单次调用超时秒（留空=用全局默认）"
+          },
+          "sort_order": {
+            "type": "integer",
+            "title": "Sort Order",
+            "description": "槽位内优先级，小者先用",
+            "default": 100
+          },
+          "remark": {
+            "type": "string",
+            "title": "Remark",
+            "description": "备注（如密钥获取地址）",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "AsrProviderUpsert",
+        "description": "新增/编辑云端 ASR provider 请求体"
+      },
+      "AsrSettingsUpdate": {
+        "properties": {
+          "default_engine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Engine",
+            "description": "默认转录引擎: cloud/cloud_free/firered/local"
+          },
+          "whisper_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Whisper Model",
+            "description": "默认 Whisper 档位: tiny/base/small/medium"
+          },
+          "whisper_device": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Whisper Device",
+            "description": "转录设备: auto/cuda/cpu"
+          }
+        },
+        "type": "object",
+        "title": "AsrSettingsUpdate",
+        "description": "转录默认设置（只提交要改的字段）"
       },
       "BatchExportRequest": {
         "properties": {

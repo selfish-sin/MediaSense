@@ -27,6 +27,8 @@
 
 - SQLite 连接：WAL + busy_timeout=5000 + check_same_thread=False，每次操作独立连接、用完即关
 - 迁移用 `ALTER TABLE ... ADD COLUMN` 链（`db/database.py` init_db），新列必须有默认值
+- 播种只发生在表为空时（`db/asr_repo.seed_builtin_providers` 是范例）：把 config.py 的既有值
+  一次性迁进 DB，之后 DB 为准、config 兜底 → 升级与回滚都平滑
 
 ### 安全边界
 
@@ -45,8 +47,13 @@
   - `jobs.py`（核心域：上传/提交/列表/删除/清理/取消/重试/编辑结果）+ 共享工具 `normalize_url`/`extract_urls`
   - `jobs_ai.py`（AI 域：重新总结/总结历史/标签/思维导图）
   - `jobs_batch.py`（批量域：批量提交/批量状态/转录搜索）
+- `routers/asr.py`（只读状态/总览）与 `routers/asr_admin.py`（写：provider CRUD、测试连接、
+  默认设置、本地模型生命周期）同挂 `/api/asr`，读写分文件；脱敏与推荐策略在 `asr.py` 内单点，
+  `asr_admin.py` `from routers.asr import` 复用（勿各写一份）
 - 新增任务相关端点时先判断归属域，不要再往 `jobs.py` 堆
 - 跨域共享的纯函数（如 URL 规范化）放核心 `jobs.py`，其他路由 `from routers.jobs import` 复用
+- 出错一律走「可行动文案」：provider 配置类错误要指名到「模型管理 → ASR 模型」哪个 provider 的
+  哪一项，不能只甩 HTTP 码（`transcribe_file` 的 401/403/404 分支是范例）
 
 ### 任务编排（2026-08-27 拆分）
 
@@ -59,6 +66,6 @@
 
 ## Quality Check
 
-- [ ] `cd backend && venv/Scripts/python.exe -m pytest` 全绿（基线 402+，必须用项目 venv——沙箱默认 Python 缺 pytest-asyncio，异步用例会批量假失败）
+- [ ] `cd backend && venv/Scripts/python.exe -m pytest` 全绿（基线 692，必须用项目 venv——沙箱默认 Python 缺 pytest-asyncio，异步用例会批量假失败）
 - [ ] 新增/修改的 service 函数有对应测试（成功 + 主要错误路径）
 - [ ] 没有在 async 函数中引入新的同步阻塞调用

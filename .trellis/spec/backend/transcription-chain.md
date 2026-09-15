@@ -2,6 +2,8 @@
 
 > 2026-09-12 定稿。汇聚 09-11/09-12 三个任务的全部实测结论，是转录链路的单一事实源；
 > 改动链路任何环节前先读本文，改完必须同步本文（spec 规则）。
+> 2026-09-15 更新：云端 provider 配置改「DB（asr_providers 表）优先 + config.py 兜底」、
+> 槽位化 provider 解析、默认引擎用户设置优先（只降不升）、ASR 配置管理 API（§8）与坑点 11-13。
 > 实测证据：`archive/2026-09/09-11-asr-chain-quality-fix/compare*`、`archive/2026-09/09-12-cloud-latency-routing/`、`archive/2026-09/09-12-asr-vendor-compare/`。
 
 ## 0. 一图总览
@@ -47,9 +49,20 @@
   → _transcribe_sync（回退链循环）
 ```
 
+**provider 配置来源（2026-09-15 起，勿回退成 config 硬编码）**：云端 provider 落
+`asr_providers` 表（模型管理页「ASR 模型 → 云端 ASR」可增删改启停），运行时经
+`cloud_asr._provider_cfg(key)` 读取——**DB 优先、config.py 兜底**（表为空/未初始化时行为与改造前
+完全一致，可平滑回滚）。`engine` 字段是回退链**槽位**（cloud / cloud_free），一个槽位可挂多个
+provider，运行时取「该槽位 enabled 且 sort_order 最小」者：单点函数
+`cloud_asr.provider_for_engine(engine)` → `asr_repo.get_provider_for_engine`。
+改 provider 配置**无需重启服务**。旧 config.py 里已填的 endpoint/model/api_key 在首次
+`init_db()` 时一次性迁入 DB（播种仅发生在表为空时）。
+
 **默认引擎推荐（免费优先）**：`GET /api/asr/status` 的 `recommended_engine`（`routers/asr.py`
-单点）——免费档已配置 → `cloud_free`；否则付费档 → `cloud`；都不可用 → `local`（firered 不
-参与推荐，避免默认触发 1.1GB 下载）。前端 `settingsStore` 只消费推荐值（用户手选不覆盖），
+单点）——用户在模型管理页显式设置的 `asr_default_engine` 优先（可用性约束下**只降不升**：
+设了免费档而它不可用 → 落 local，绝不自动转付费）；未设置则免费档已配置 → `cloud_free`；
+否则付费档 → `cloud`；都不可用 → `local`（firered 不参与**自动**推荐，避免默认触发 1.1GB
+下载；用户显式设为默认则尊重其选择）。前端 `settingsStore` 只消费推荐值（用户手选不覆盖），
 不再自行降级。
 **引擎显示名**：`transcriber.engine_label()`（唯一事实源；日志/UI/文案勿再复制映射表）。
 
@@ -90,8 +103,12 @@
 | xingchen | cloud_free | OpenAI multipart /audio/transcriptions（同旧 SenseVoice 接口） | **限时免费** | 单片 1.7~4.7s 稳定无抖动，原生标点 |
 
 - 旧 SenseVoiceSmall 已退役（同基建单片 46~83s 排队抖动，服务端问题无参数解）。
-- provider 配置键：mimo=`ASR_CLOUD_*`；xingchen=`ASR_FREE_*`（config.example.py 有模板）。
+- provider 配置键：mimo=`ASR_CLOUD_*`；xingchen=`ASR_FREE_*`（config.example.py 有模板；
+  现仅作 DB 缺行时的兜底与首次播种初始值）。
 - 400 归重试不判配置错：可能是单片内容问题，重试耗尽 → 跳过 → 本地补录，不能拖垮整体。
+- **响应解析按请求姿势分支**：`_extract_asr_text(api, payload)`——`multipart` 取 `{'text': ...}`，
+  `chat` 取 `choices[0].message.content`（空数组/None 必须防越界）。**不要改回按 provider 名分支**，
+  否则自定义 provider 会解析错响应取到空文本。
 
 ### 3.2 本地 FireRedASR2-AED（local_asr.py，sherpa-onnx int8/CPU，不依赖 torch）
 
@@ -156,6 +173,9 @@ FireRedASR 免费离线保留。XingChen 未参与 10min 全量横评（单片�
 | `force_transcribe`（options） | false | 跳过B站字幕直接转录 |
 | `download_video(max_seconds)` | 无 | 只取开头 N 秒片段（抽查用 90s；失败自动回退完整下载） |
 | `transcribe_language`（options） | 'zh' | 云端忽略但影响本地兜底与字幕抽查 |
+| `asr_default_engine`（app_settings） | 空 | 用户设置的默认转录引擎（空=按免费优先自动推荐）；可用性不足时只降不升 |
+| `asr_whisper_model`（app_settings） | base | 默认 Whisper 档位（模型管理页可改；未设置回退 config.DEFAULT_WHISPER_MODEL） |
+| `asr_whisper_device`（app_settings） | auto | 转录设备（auto/cuda/cpu；任务 options 仍可逐任务覆盖） |
 
 ## 7. 坑点汇总（有解法的才记，全链路适用）
 
@@ -172,3 +192,33 @@ FireRedASR 免费离线保留。XingChen 未参与 10min 全量横评（单片�
 10. **服务运行环境 ≠ backend/venv**：服务实际跑在 PATH 上的 python（D:\path\python.exe），
    「No module named sherpa_onnx」排查先看进程解释器（`Get-CimInstance Win32_Process`）再装包；
    新依赖进 requirements.txt 必须同步 start.bat 探测 import 列表，否则启动不自动补装。
+11. **provider 配置只有一个读取点**：`cloud_asr._provider_cfg()`。任何模块都不要直接查
+   `asr_providers` 表——否则 DB 优先/兜底语义会在多处漂移（漏了兜底就变成"表空即崩"）。
+12. **带 provider 的测试用例必须隔离 DB 层**：`asr_providers` 在 `init_db()` 时会从本机 config.py
+   播种，不隔离的话「monkeypatch config → 断言 config 分支」的用例会被真实 DB 值污染而假通过/假失败。
+   既有做法：模块级 autouse fixture patch `db.asr_repo.get_provider` → None 且
+   `get_provider_for_engine` → 固定槽位映射（见 `tests/test_cloud_asr.py` / `test_transcriber.py` /
+   `test_routers.py::TestAsrStatusRouter`）。
+13. **删除本地模型要挡两件事**：①下载进行中禁删（`_download_state.status == 'downloading'`）；
+   ②FireRedASR 转录进行中禁删（`firered_busy()` = `_FIRERED_LOCK.locked()`）。Whisper 档位删除
+   还必须清 `_model_cache`（不清则下次转录仍用内存旧实例，「删了还在跑」被误判为删除无效）。
+
+## 8. ASR 配置管理 API（模型管理页「ASR 模型」域，2026-09-15）
+
+只读 `routers/asr.py`，写操作 `routers/asr_admin.py`（同挂 `/api/asr` 前缀，对外路径连续）：
+
+| Method | Path | 说明 |
+|---|---|---|
+| GET | `/api/asr/status` | 工作台单点：`cloud_configured`/`free_configured`/`firered_ready`/`recommended_engine`/`default_engine` |
+| GET | `/api/asr/overview` | 管理页总览：providers（脱敏+`configured`/`runtime`）+ local（whisper 各档 + firered 文件明细与下载态）+ settings |
+| POST/PUT/DELETE | `/api/asr/providers[/{key}]` | provider CRUD（内置不可删可停用；密钥脱敏展示，编辑留空/含 `****` = 不修改） |
+| POST | `/api/asr/providers/{key}/test` | 真实调用一次（2s 正弦探测音频，`_PROBE_SECONDS`）；HTTP 200 + `success` 字段承载成功/失败 |
+| POST | `/api/asr/settings` | 默认引擎（空串=清除→自动推荐）/ Whisper 档位 / 转录设备 |
+| GET/POST | `/api/asr/local/firered/download` | 下载状态轻量轮询 / 启动后台下载（daemon 线程 + 内存态，重启回 idle 可重试） |
+| POST | `/api/asr/local/firered/cancel` · DELETE `/api/asr/local/firered` | 取消下载 / 删除模型文件 |
+| DELETE | `/api/asr/local/whisper/{size}` | 删除某档 Whisper 模型目录 |
+
+- 测试连接**不返回 HTTP 错误码承载业务失败**（与 AI 模型测试连接同契约），前端按 `success` 分支。
+- 探测音频用 ffmpeg 生成正弦波：仓库不存媒体；无人声返回空文本属正常，`note` 字段会说明。
+- 管理页数据流：`stores/asrStore.js`（失败落 `error` 供失败态展示；写操作抛错由视图 ElMessage 提示）
+  → `components/models/AsrPanel.vue`（云端/本地二级分段）→ `AsrCloudPanel` / `AsrLocalPanel`。

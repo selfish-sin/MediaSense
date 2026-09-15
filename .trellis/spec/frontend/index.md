@@ -25,9 +25,16 @@
 
 ### 状态与 API
 
-- 跨视图共享状态进 Pinia store（jobStore/modelStore/settingsStore/themeStore），视图私有状态留在视图
+- 跨视图共享状态进 Pinia store（jobStore/modelStore/settingsStore/themeStore/asrStore），视图私有状态留在视图
 - axios 拦截器（`utils/api.js`）统一把后端 `detail` 转成 `Error(msg)`；调用方必须 catch 并给用户可见反馈（ElMessage），禁止空 `catch {}`
 - 四态覆盖：loading（按钮禁用/v-loading）、empty（空态提示）、error（可见可行动）、success
+- store 失败语义分两类（`asrStore` 是范例）：**只读总览**失败落 `error` 字段并清空列表（供页面失败态，
+  不展示陈旧数据），**写操作**抛错由视图 ElMessage 提示；可写 `computed` 做设置项，保存失败时显示值
+  自动回到后端真值（避免"UI 已改、后端没改"的假成功）
+- Element Plus 交互坑：`el-select` 必须点 `.el-select__wrapper`（点外层 `.el-select` 事件不冒泡到触发器，
+  下拉不会打开）；判断 popper 可见性用 `getComputedStyle(popper).display`，**不要用 `offsetParent`**
+  （fixed 定位元素恒为 null）；`el-dropdown` 的菜单项会为每行都渲染并全部留在 DOM 里，
+  按文案 find 会命中第一行的菜单——必须先按可见性过滤
 
 ### 构建与路由
 
