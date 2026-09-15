@@ -305,6 +305,31 @@ class TestTokenEndpoints:
             assert r.status_code == 200
 
 
+class TestResolveTranscribeEngine:
+    """任务 options → 转录引擎的单点判定。
+
+    ★ 不变量：**缺省/非法值绝不落到付费档 cloud（MiMo）**，一律走后端推荐（免费优先）。
+    历史泄漏：漏传该字段默认 'cloud' → 每个任务静默消耗付费额度（2026-09-15）。
+    """
+
+    def test_valid_value_passthrough(self):
+        import main as m
+        for eng in ('cloud', 'cloud_free', 'firered', 'local'):
+            assert m.resolve_transcribe_engine({'transcribe_engine': eng}) == eng
+
+    def test_missing_falls_back_to_recommended(self, monkeypatch):
+        import main as m
+        monkeypatch.setattr('routers.asr.recommended_engine', lambda: 'cloud_free')
+        assert m.resolve_transcribe_engine({}) == 'cloud_free'
+
+    def test_invalid_falls_back_to_recommended(self, monkeypatch):
+        import main as m
+        monkeypatch.setattr('routers.asr.recommended_engine', lambda: 'local')
+        assert m.resolve_transcribe_engine({'transcribe_engine': 'auto'}) == 'local'
+        assert m.resolve_transcribe_engine({'transcribe_engine': ''}) == 'local'
+        assert m.resolve_transcribe_engine(None) == 'local'
+
+
 class TestProxyBypass:
     """PROXY_BYPASS_HOSTS → NO_PROXY 合并（中转域名代理隧道不通时直连）"""
 

@@ -524,3 +524,17 @@ class TestEngineValuesAndChains:
     def test_local_whisper_is_always_chain_tail(self):
         for engine in ENGINE_VALUES:
             assert _fallback_chain(engine)[-1] == 'local'
+
+    def test_unknown_engine_falls_back_to_free_chain_not_paid(self, monkeypatch):
+        """未知引擎值 → 落**免费档**链，绝不回付费档 cloud（历史泄漏回归锁）。"""
+        import services.local_asr as la
+        monkeypatch.setattr(la, 'engine_ready', lambda key: False)
+        assert _fallback_chain('bogus') == _fallback_chain('cloud_free')
+        assert 'cloud' not in _fallback_chain('bogus')
+
+    def test_default_engine_argument_is_free_not_paid(self):
+        """`_transcribe_sync` / `transcribe_audio` 的 engine 缺省值是免费档（不是付费 cloud）。"""
+        import inspect
+        from services import transcriber
+        for fn in (transcriber._transcribe_sync, transcriber.transcribe_audio):
+            assert inspect.signature(fn).parameters['engine'].default == 'cloud_free'

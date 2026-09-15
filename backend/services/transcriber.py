@@ -714,8 +714,11 @@ def _fallback_chain(engine: str) -> Tuple[str, ...]:
 
     本地 ONNX 引擎模型未就绪时从**兜底**链路中剔除；用户自己选的那一档永远保留
     （显式选择才允许触发按需下载）。
+
+    ★ 未知引擎回落 `cloud_free` 链（**永不回付费**）：付费档只能由用户显式选择触发，
+    缺省/非法值不得隐式落到它（历史泄漏：漏传 engine → 默认 cloud=MiMo 付费）。
     """
-    chain = _FALLBACK_CHAINS.get(engine, _FALLBACK_CHAINS['cloud'])
+    chain = _FALLBACK_CHAINS.get(engine, _FALLBACK_CHAINS['cloud_free'])
     if engine in _LOCAL_ONNX_ENGINES:
         return chain
     from services import local_asr
@@ -789,11 +792,13 @@ def _transcribe_sync(
     progress_callback=None,
     cancel_check=None,
     device: str = 'auto',
-    engine: str = 'cloud',
+    engine: str = 'cloud_free',
 ) -> Tuple[str, str, int]:
     """同步转录入口（引擎路由递归回退 + Whisper 长音频分片）
 
-    engine: 'cloud' | 'cloud_free' | 'firered' | 'local'（非法值按 cloud）
+    engine: 'cloud' | 'cloud_free' | 'firered' | 'local'（缺省/非法值按 cloud_free）
+    ★ 缺省与非法值都落**免费档**链：付费档（cloud）只能由用户显式选择触发，
+    缺省值绝不隐式付费（历史泄漏：漏传 engine → 默认 cloud=MiMo 付费）。
     回退链：cloud → cloud_free → firered(模型就绪时) → local；cloud_free → firered → local；
     firered → local；local 无回退。
     每次回退原因经 progress_callback 可见；用户取消在任何一环都直接上抛不回退。
@@ -974,11 +979,12 @@ async def transcribe_audio(
     job_id: str = '',
     cancel_check=None,
     device: str = 'auto',
-    engine: str = 'cloud',
+    engine: str = 'cloud_free',
 ) -> Tuple[str, str, int]:
     """
     异步转录音频（在线程池中运行同步引擎，云端/本地由 engine 路由）
     使用 asyncio.Queue 跨线程桥接进度回调
+    engine 缺省/非法值落免费档链（付费档只能显式选择；见 `_transcribe_sync`）
     返回：(srt_path, txt_path, segment_count)
     """
     if sio:

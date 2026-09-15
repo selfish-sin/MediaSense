@@ -170,16 +170,20 @@ class TestConfigured:
 # ============ preferred_provider（一次性调用的槽位选择单点） ============
 
 class TestPreferredProvider:
-    """B站字幕抽查等一次性云端调用的 provider 选择：免费槽位优先，其次付费槽位。"""
+    """自动路径（抽查等）的 provider 选择：**只挑免费槽位**。
+
+    不变量：付费档只能由用户显式选择触发，自动路径永不回退到付费档
+    （历史泄漏：抽查漏传 provider → 默认 mimo 付费档，付费额度被静默消耗）。
+    """
 
     def test_free_slot_first(self, monkeypatch):
         monkeypatch.setattr(cloud_asr, 'cloud_asr_configured', lambda key: True)
         assert preferred_provider() == 'xingchen'
 
-    def test_paid_when_free_unavailable(self, monkeypatch):
-        """免费档缺密钥/停用 → 落到付费档（有可用云端就比本地 Whisper 强）"""
+    def test_none_when_free_unavailable(self, monkeypatch):
+        """免费档缺密钥/停用 → 返回 None（调用方回退本地 Whisper），**绝不落到付费档**。"""
         monkeypatch.setattr(cloud_asr, 'cloud_asr_configured', lambda key: key == 'mimo')
-        assert preferred_provider() == 'mimo'
+        assert preferred_provider() is None
 
     def test_none_when_nothing_configured(self, monkeypatch):
         monkeypatch.setattr(cloud_asr, 'cloud_asr_configured', lambda key: False)
@@ -187,6 +191,12 @@ class TestPreferredProvider:
 
     def test_none_when_slots_empty(self, monkeypatch):
         monkeypatch.setattr('db.asr_repo.get_provider_for_engine', lambda engine: None)
+        assert preferred_provider() is None
+
+    def test_free_only_never_paid_slot(self, monkeypatch):
+        """即使付费槽位可用，只要免费档不可用就必须返回 None（不得回退付费档）。"""
+        monkeypatch.setattr('db.asr_repo.get_provider_for_engine',
+                            lambda engine: {'cloud': 'paid-key', 'cloud_free': None}.get(engine))
         assert preferred_provider() is None
 
 
@@ -206,18 +216,55 @@ def _mimo_body(content):
     return {'choices': [{'message': {'role': 'assistant', 'content': content}}]}
 
 
+class TestNoPaidDefault:
+    """不变量回归锁：**未显式指定 provider 的自动路径永不落到付费档**。
+
+    历史泄漏：B站字幕抽查漏传 provider → 落到 `transcribe_file` 旧默认 `'mimo'`
+    （付费档），每个任务静默消耗付费额度（2026-09-15）。
+    """
+
+    def test_without_provider_uses_free_slot(self, monkeypatch):
+        seen = []
+
+        def fake_cfg(provider='mimo'):
+            return {'enabled': True, 'endpoint': 'https://free.example/v1', 'api_key': 'k',
+                    'model': 'm', 'api': 'multipart', 'name': provider}
+
+        monkeypatch.setattr(cloud_asr, '_provider_cfg', fake_cfg)
+        monkeypatch.setattr(cloud_asr, 'preferred_provider', lambda: 'free-x')
+        monkeypatch.setattr(cloud_asr, '_do_request',
+                            lambda cfg, p, t: (seen.append(cfg['api']),
+                                               _resp(200, json_body={'text': '免费结果'}))[1])
+        assert transcribe_file('a.mp3') == '免费结果'
+        assert seen == ['multipart']  # 未指定 provider → 走免费档，而非 mimo(chat)
+
+    def test_without_provider_and_no_free_raises_not_paid(self, monkeypatch):
+        """免费档不可用 → 立即抛可行动 ConfigError，**一次付费调用都不许发**。"""
+        calls = []
+        monkeypatch.setattr(cloud_asr, 'preferred_provider', lambda: None)
+        monkeypatch.setattr(cloud_asr, '_do_request', lambda cfg, p, t: calls.append(p))
+        with pytest.raises(CloudASRConfigError, match='免费档不可用'):
+            transcribe_file('a.mp3')
+        assert calls == []
+
+    def test_audio_cloud_without_provider_and_no_free_raises(self, monkeypatch):
+        monkeypatch.setattr(cloud_asr, 'preferred_provider', lambda: None)
+        with pytest.raises(CloudASRConfigError, match='免费档不可用'):
+            transcribe_audio_cloud('a.mp3')
+
+
 class TestTranscribeFile:
     def test_not_configured_raises_config_error(self, monkeypatch):
         monkeypatch.setattr('config.ASR_CLOUD_ENABLED', False, raising=False)
         monkeypatch.setattr('config.ASR_CLOUD_API_KEY', '', raising=False)
         with pytest.raises(CloudASRConfigError, match='未配置'):
-            transcribe_file('whatever.mp3')
+            transcribe_file('whatever.mp3', provider='mimo')
 
     def test_success(self, asr_enabled, monkeypatch):
         called = []
         monkeypatch.setattr(cloud_asr, '_do_request',
                             lambda cfg, p, t: (called.append(p), _resp(200, json_body=_mimo_body(' 识别结果 ')))[1])
-        assert transcribe_file('a.mp3') == '识别结果'
+        assert transcribe_file('a.mp3', provider='mimo') == '识别结果'
         assert called == ['a.mp3']
 
     def test_extract_text_handles_empty_choices(self):
@@ -257,7 +304,7 @@ class TestTranscribeFile:
     def test_rich_tags_stripped(self, asr_enabled, monkeypatch):
         monkeypatch.setattr(cloud_asr, '_do_request',
                             lambda cfg, p, t: _resp(200, json_body=_mimo_body('<|HAPPY|>开心<|BGM|>')))
-        assert transcribe_file('a.mp3') == '开心'
+        assert transcribe_file('a.mp3', provider='mimo') == '开心'
 
     def test_401_no_retry(self, asr_enabled, monkeypatch):
         calls = []
@@ -266,7 +313,7 @@ class TestTranscribeFile:
             return _resp(401, 'Invalid token')
         monkeypatch.setattr(cloud_asr, '_do_request', fake)
         with pytest.raises(CloudASRConfigError, match='密钥'):
-            transcribe_file('a.mp3')
+            transcribe_file('a.mp3', provider='mimo')
         assert len(calls) == 1  # 配置类错误不重试
 
     def test_404_model_hint(self, asr_enabled, monkeypatch):
@@ -301,7 +348,7 @@ class TestTranscribeFile:
         responses = [_resp(429, 'rate limited'), _resp(429, 'rate limited'),
                      _resp(200, json_body=_mimo_body('ok'))]
         monkeypatch.setattr(cloud_asr, '_do_request', lambda cfg, p, t: responses.pop(0))
-        assert transcribe_file('a.mp3') == 'ok'
+        assert transcribe_file('a.mp3', provider='mimo') == 'ok'
 
     def test_retries_exhausted(self, asr_enabled, monkeypatch, no_sleep):
         monkeypatch.setattr(cloud_asr, '_do_request',
@@ -436,7 +483,8 @@ class TestTranscribeAudioCloud:
         chunk_paths, calls = _setup_orchestration(monkeypatch, tmp_path)
         progress = []
         srt, txt, seg_count = transcribe_audio_cloud(
-            fake_audio, progress_callback=lambda pct, msg: progress.append((pct, msg)))
+            fake_audio, provider='mimo',
+            progress_callback=lambda pct, msg: progress.append((pct, msg)))
 
         assert Path(srt).exists() and Path(txt).exists()
         assert seg_count == len(calls)
@@ -468,7 +516,7 @@ class TestTranscribeAudioCloud:
             return texts[idx]
 
         monkeypatch.setattr(cloud_asr, 'transcribe_file', reversed_transcribe)
-        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
         assert seg_count == 5
         lines = [l for l in Path(srt).read_text(encoding='utf-8').splitlines()
                  if '-->' in l]
@@ -478,13 +526,13 @@ class TestTranscribeAudioCloud:
     def test_empty_chunk_dropped(self, monkeypatch, tmp_path, fake_audio):
         texts = ['文本一', '', '文本三', '文本四', '文本五']
         _setup_orchestration(monkeypatch, tmp_path, texts=texts)
-        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
         assert seg_count == 4
         assert '文本一' in Path(srt).read_text(encoding='utf-8')
 
     def test_all_empty_returns_zero_segments(self, monkeypatch, tmp_path, fake_audio):
         _setup_orchestration(monkeypatch, tmp_path, texts=[''] * 5)
-        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
         assert seg_count == 0
         assert Path(srt).read_text(encoding='utf-8') == ''
 
@@ -498,7 +546,7 @@ class TestTranscribeAudioCloud:
         monkeypatch.setattr(cloud_asr, 'transcribe_file', slow_transcribe)
         cancel = MagicMock(side_effect=[False, True])
         with pytest.raises(TranscriptionCancelledError):
-            transcribe_audio_cloud(fake_audio, cancel_check=cancel)
+            transcribe_audio_cloud(fake_audio, provider='mimo', cancel_check=cancel)
         # 取消也要清理分片
         for cp in chunk_paths:
             assert not Path(cp).exists()
@@ -508,7 +556,7 @@ class TestTranscribeAudioCloud:
         monkeypatch.setattr(cloud_asr, 'transcribe_file',
                             lambda p, **kw: (_ for _ in ()).throw(CloudASRConfigError('云端 ASR 401: 密钥无效')))
         with pytest.raises(CloudASRConfigError, match='401'):
-            transcribe_audio_cloud(fake_audio)
+            transcribe_audio_cloud(fake_audio, provider='mimo')
         for cp in chunk_paths:
             assert not Path(cp).exists()
 
@@ -526,7 +574,7 @@ class TestTranscribeAudioCloud:
         monkeypatch.setattr(cloud_asr, 'export_chunks', lambda ap, c: (chunks, [10.0, 90.0]))
         texts = iter(['第一段', '第二段'])
         monkeypatch.setattr(cloud_asr, 'transcribe_file', lambda p, **kw: next(texts))
-        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
         assert seg_count == 2
         lines = Path(srt).read_text(encoding='utf-8').splitlines()
         assert lines[1].startswith('00:00:00,000 --> 00:00:10,000')
@@ -542,7 +590,7 @@ class TestTranscribeAudioCloud:
                 raise CloudASRUnavailableError('重试耗尽: ReadTimeout')
             return f'OK-{Path(path).name}'
         monkeypatch.setattr(cloud_asr, 'transcribe_file', flaky)
-        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
         assert seg_count == 4
         srt_text = Path(srt).read_text(encoding='utf-8')
         assert 'OK-fake_audio_cloud_000.mp3' in srt_text
@@ -564,7 +612,7 @@ class TestTranscribeAudioCloud:
                 raise CloudASRUnavailableError('重试耗尽: ReadTimeout')
             return f'OK-{Path(path).name}'
         monkeypatch.setattr(cloud_asr, 'transcribe_file', flaky)
-        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
         assert seg_count == 5  # 4 片云端成功 + 1 片补录
         srt_text = Path(srt).read_text(encoding='utf-8')
         assert '本地补录内容。' in srt_text
@@ -582,7 +630,7 @@ class TestTranscribeAudioCloud:
                 raise CloudASRUnavailableError('重试耗尽: HTTP 429')
             return f'OK-{provider}-{Path(path).name}'
         monkeypatch.setattr(cloud_asr, 'transcribe_file', flaky)
-        srt, _txt, seg_count = transcribe_audio_cloud(fake_audio)
+        srt, _txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
         assert seg_count == 5
         assert 'OK-xingchen-fake_audio_cloud_002.mp3' in Path(srt).read_text(encoding='utf-8')
 
@@ -626,7 +674,7 @@ class TestTranscribeAudioCloud:
                 raise CloudASRUnavailableError('重试耗尽: ReadTimeout')
             return f'OK-{Path(path).name}'
         monkeypatch.setattr(cloud_asr, 'transcribe_file', flaky)
-        _srt, _txt, seg_count = transcribe_audio_cloud(fake_audio)
+        _srt, _txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
         assert seg_count == 5
         assert 'Whisper补录内容。' in Path(_srt).read_text(encoding='utf-8')
 
@@ -640,7 +688,7 @@ class TestTranscribeAudioCloud:
                 raise CloudASRUnavailableError('重试耗尽: ReadTimeout')
             return f'OK-{Path(path).name}'
         monkeypatch.setattr(cloud_asr, 'transcribe_file', flaky)
-        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
         assert seg_count == 4
 
     def test_all_fail_but_rescue_recovers_returns_result(self, monkeypatch, tmp_path, fake_audio):
@@ -655,7 +703,7 @@ class TestTranscribeAudioCloud:
         monkeypatch.setattr(
             cloud_asr, 'transcribe_file',
             lambda p, **kw: (_ for _ in ()).throw(CloudASRUnavailableError('HTTP 500')))
-        _srt, _txt, seg_count = transcribe_audio_cloud(fake_audio)
+        _srt, _txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
         assert seg_count == 5  # 5 片全部补录恢复
 
     def test_all_shards_fail_raises_unavailable(self, monkeypatch, tmp_path, fake_audio):
@@ -666,12 +714,12 @@ class TestTranscribeAudioCloud:
             cloud_asr, 'transcribe_file',
             lambda p, **kw: (_ for _ in ()).throw(CloudASRUnavailableError('HTTP 500')))
         with pytest.raises(CloudASRUnavailableError, match='全部分片失败'):
-            transcribe_audio_cloud(fake_audio)
+            transcribe_audio_cloud(fake_audio, provider='mimo')
 
     def test_no_duration_raises(self, monkeypatch, tmp_path, fake_audio):
         monkeypatch.setattr(cloud_asr, '_get_audio_duration_seconds', lambda p: None)
         with pytest.raises(CloudASRUnavailableError, match='时长'):
-            transcribe_audio_cloud(fake_audio)
+            transcribe_audio_cloud(fake_audio, provider='mimo')
 
     def test_concurrency_from_config(self, monkeypatch):
         monkeypatch.delenv('ASR_CLOUD_CONCURRENCY', raising=False)
@@ -772,7 +820,7 @@ class TestSentenceLevelOutput:
         """带标点的分片文本被拆成多条 SRT，而非整片一坨。"""
         texts = ['今天天气很好。我们去公园玩耍吧！非常感谢你啊。'] * 5
         _setup_orchestration(monkeypatch, tmp_path, texts=texts)
-        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
         lines = [l for l in Path(srt).read_text(encoding='utf-8').splitlines() if '-->' in l]
         # 每片 3 句 × 5 片 = 15 条，远多于分片数
         assert seg_count == 15
@@ -782,5 +830,5 @@ class TestSentenceLevelOutput:
     def test_no_punctuation_keeps_one_entry_per_chunk(self, monkeypatch, tmp_path, fake_audio):
         """无标点分片退化行为不变：1 片 = 1 条。"""
         _setup_orchestration(monkeypatch, tmp_path, texts=['文本一', '文本二', '文本三', '文本四', '文本五'])
-        srt, txt, seg_count = transcribe_audio_cloud(fake_audio)
+        srt, txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
         assert seg_count == 5

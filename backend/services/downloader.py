@@ -682,8 +682,8 @@ async def verify_subtitle_against_audio(txt_path, audio_path, sio=None, job_id: 
     """校验字幕内容与音频开头是否一致（防 B站 返回旧/错误字幕）。
 
     转写引擎云端优先——provider 由 `cloud_asr.preferred_provider()` 单点挑选
-    （免费槽位优先，免费档不可用才用付费档），云端失败回退本地 Whisper base，
-    双失败按现行语义保留字幕（不让校验本身拖垮任务）。
+    （**只挑免费槽位**；免费档不可用返回 None 直接走本地 Whisper，绝不烧付费额度），
+    云端失败回退本地 Whisper base，双失败按现行语义保留字幕（不让校验本身拖垮任务）。
     字幕与音频是两个独立来源，内容对不上即说明字幕不是当前视频的。
     返回 (是否保留字幕, 说明)。
     """
@@ -693,10 +693,10 @@ async def verify_subtitle_against_audio(txt_path, audio_path, sio=None, job_id: 
         asr_text: Optional[str] = None
         engine_used = 'local'
 
-        # ★ 云端抽查（provider 已配置才走）：90s 片段一次 API 调用
-        #   provider 选择单点 = cloud_asr.preferred_provider()（免费槽位优先，与转录默认
-        #   引擎的「免费优先」同口径）——抽查只是校验手段，不该烧付费额度。此前硬编码默认
-        #   provider（mimo 付费档）导致付费档欠费（402）时每个任务白重试 3 次退避。
+        # ★ 云端抽查（免费档可用才走）：90s 片段一次 API 调用
+        #   provider 选择单点 = cloud_asr.preferred_provider()（**只挑免费槽位**）——抽查只是
+        #   校验手段，不该烧付费额度，免费档不可用就直接走本地 Whisper。此前硬编码默认
+        #   provider（mimo 付费档）导致每个任务静默消耗付费额度（2026-09-15 泄漏）。
         try:
             from services import cloud_asr
             provider = cloud_asr.preferred_provider()

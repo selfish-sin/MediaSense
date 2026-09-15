@@ -17,7 +17,11 @@
   403 无权限、404 模型不存在），重试无意义，立即抛给调用方回退并给修复指引
 - CloudASRUnavailableError：400/429/5xx/网络错误退避重试耗尽（400 可能是单片内容问题，
   重试耗尽后跳过交给本地补录，不能上升为整体配置失败）
-- 一次性调用（B站字幕抽查等）的 provider 选择走 `preferred_provider()` 单点（免费槽位优先）
+- **付费档只能显式选择**（2026-09-15 收紧）：自动路径（B站字幕抽查、未显式指定 provider 的调用）
+  的 provider 走 `preferred_provider()` 单点，**只返回免费槽位**；免费档不可用返回 None
+  （调用方回退本地），绝不静默落到付费档（历史泄漏：抽查漏传 provider → 默认 mimo 付费档，
+  付费额度在用户不知情时被逐任务消耗）。付费档由用户显式选引擎 `cloud` 时经
+  `transcriber._transcribe_by_engine` 传 `provider_for_engine('cloud')` 进入。
 分片级韧性（长视频数百片，单片抖动不应整体回退本地）：
 - 单片 Unavailable 失败 → 备用引擎补录（XingChen 免费 → firered → Whisper，
   _rescue_failed_chunks），补不回才留空洞
@@ -162,19 +166,20 @@ def provider_for_engine(engine: str) -> Optional[str]:
 
 
 def preferred_provider() -> Optional[str]:
-    """**一次性**云端调用（B站字幕抽查等）的 provider 选择单点：免费槽位优先，其次付费槽位。
+    """**自动路径**（B站字幕抽查、未显式指定 provider 的调用）的云端 provider 单点。
 
-    与转录默认引擎推荐（`routers.asr.recommended_engine`）的「免费优先」分支同口径：
-    抽查只是校验手段，不该消耗付费额度；免费档不可用时才用付费档。
-    两者都没配置（或都停用/缺密钥）→ 返回 None，调用方直接走本地 Whisper。
+    ★ 策略（2026-09-15 收紧，勿放宽回「免费档不可用就用付费档」）：
+    **只返回免费槽位（`cloud_free`）的可用 provider**；免费档未配置/停用/缺密钥 → 返回 None，
+    调用方直接回退本地 Whisper。
 
-    注意：这是**槽位选择**，不做用户默认引擎判定——抽查是随时可能发生的一次调用，
-    最便宜且可用的云端 provider 即最优；要彻底禁用某档就在 ASR 管理页停用它。
+    为什么不再回退付费槽位：抽查是「每个任务都会发生」的隐式调用，付费档作为默认兜底
+    曾让付费额度在用户毫不知情时被逐任务消耗（历史泄漏：抽查漏传 provider → 默认 mimo）。
+    付费档**只能由用户显式选择引擎 `cloud`** 触发，不在本函数职责内
+    （要停用免费档就在「模型管理 → ASR 模型」停用它）。
     """
-    for engine in ('cloud_free', 'cloud'):
-        key = provider_for_engine(engine)
-        if key and cloud_asr_configured(key):
-            return key
+    key = provider_for_engine('cloud_free')
+    if key and cloud_asr_configured(key):
+        return key
     return None
 
 
@@ -561,13 +566,23 @@ def extract_sample(audio_path: str, max_seconds: float = 90.0) -> str:
 
 
 def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int = _MAX_RETRIES,
-                    provider: str = 'mimo') -> str:
+                    provider: Optional[str] = None) -> str:
     """单文件一次云端转写，返回清洗后的纯文本。
 
+    provider 省略（None）→ 走 `preferred_provider()`（**只挑免费档**）；免费档不可用则抛
+    CloudASRConfigError。**绝不默认付费档**——付费档必须由调用方显式传入
+    （用户显式选引擎 `cloud` 的路径），避免"漏传参数 = 悄悄烧钱"。
     401/402/403/404 配置与计费类错误立即抛 CloudASRConfigError（重试无意义）；
     400/429/5xx/网络错误指数退避重试，耗尽抛 CloudASRUnavailableError。
     供完整转录与 B站字幕抽查共用。
     """
+    if provider is None:
+        provider = preferred_provider()
+    if not provider:
+        raise CloudASRConfigError(
+            '未指定云端 ASR provider，且免费档不可用（未配置/已停用）——'
+            '请在「模型管理 → ASR 模型 → 云端 ASR」启用免费档，或显式传入 provider'
+        )
     cfg = _provider_cfg(provider)
     if not (cfg['enabled'] and bool(cfg['endpoint']) and bool(cfg['api_key'])):
         raise CloudASRConfigError(
@@ -695,14 +710,22 @@ def transcribe_audio_cloud(
     cancel_check: Optional[Callable] = None,
     language: Optional[str] = None,
     speaker_diarization: bool = False,
-    provider: str = 'mimo',
+    provider: Optional[str] = None,
 ) -> Tuple[str, str, int]:
     """云端完整转录：静音切分 → 分片上传（指定 provider）→ 句级时间戳 SRT/TXT。
 
     与本地 Whisper 引擎同契约，返回 (srt_path, txt_path, seg_count)。
-    provider: 'mimo'（付费主力）| 'xingchen'（免费档）。两者均按音频内容直接转写
-    （language 参数仅记录）；不支持说话人分离。
+    provider: None → `preferred_provider()`（只挑免费档，不可用则抛 ConfigError）；
+    调用方（transcriber 引擎路由）总是显式传槽位 provider——付费档只在用户显式选 `cloud` 时进入。
+    两者均按音频内容直接转写（language 参数仅记录）；不支持说话人分离。
     """
+    if provider is None:
+        provider = preferred_provider()
+    if not provider:
+        raise CloudASRConfigError(
+            '未指定云端 ASR provider，且免费档不可用（未配置/已停用）——'
+            '请在「模型管理 → ASR 模型 → 云端 ASR」启用免费档，或显式传入 provider'
+        )
     if language:
         logger.info(f'云端引擎按音频内容转写（忽略指定语言 {language}）')
     if speaker_diarization:

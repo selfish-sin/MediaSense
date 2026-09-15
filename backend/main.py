@@ -453,7 +453,7 @@ async def _handle_subtitle_file(input_file, job_dir, sio, job_id):
 
 
 async def _handle_media_file(input_file, job_dir, sio, job_id, model_size, speaker_diarization, language,
-                             whisper_device: str = 'auto', transcribe_engine: str = 'cloud'):
+                             whisper_device: str = 'auto', transcribe_engine: str = 'cloud_free'):
     """音视频文件上传：提取音频后转录（云端/本地由引擎路由）。"""
     from services.downloader import handle_file_upload
     from services.transcriber import transcribe_audio
@@ -474,7 +474,7 @@ async def _handle_media_file(input_file, job_dir, sio, job_id, model_size, speak
 
 async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                             model_size, speaker_diarization, language, whisper_device: str = 'auto',
-                            transcribe_engine: str = 'cloud'):
+                            transcribe_engine: str = 'cloud_free'):
     """URL 输入：B站字幕（含内容抽查）→ 平台原文字幕 → 下载+Whisper 转录（含断点续传）。"""
     from socket_handlers import check_cancelled
     from services.transcriber import transcribe_audio, engine_label
@@ -732,6 +732,23 @@ async def process_job(job_id: str):
             clear_cancel_flag(job_id)
 
 
+def resolve_transcribe_engine(options: dict) -> str:
+    """任务 options → 实际转录引擎（单点判定，勿在别处再抄一份）。
+
+    - 合法值（`transcriber.ENGINE_VALUES`：cloud/cloud_free/firered/local）原样返回；
+    - **缺省/非法值 → 后端推荐引擎**（`routers.asr.recommended_engine`，免费优先）。
+
+    ★ 不变量：缺省/非法值**绝不落到付费档 `cloud`（MiMo）**——付费档只能由用户在
+    「转录引擎」里显式选择（历史泄漏：漏传该字段默认 'cloud'，静默消耗付费额度）。
+    """
+    from routers.asr import recommended_engine
+    from services.transcriber import ENGINE_VALUES
+    engine = (options or {}).get('transcribe_engine')
+    if engine in ENGINE_VALUES:
+        return engine
+    return recommended_engine()
+
+
 async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_state: dict = None):
     """实际的任务处理实现（被 process_job 包装，负责并发控制）
 
@@ -792,13 +809,10 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
         whisper_device = options.get('whisper_device', 'auto')
         if whisper_device not in ('auto', 'cuda', 'cpu'):
             whisper_device = 'auto'
-        # ★ 转录引擎：白名单单点在 transcriber.ENGINE_VALUES（cloud/cloud_free/
-        #   firered/local），非法值按 cloud 处理；
-        #   失败按回退链自动降级（本地 ONNX 引擎只在模型就绪时参与兜底，原因可见）
-        from services.transcriber import ENGINE_VALUES
-        transcribe_engine = options.get('transcribe_engine', 'cloud')
-        if transcribe_engine not in ENGINE_VALUES:
-            transcribe_engine = 'cloud'
+        # ★ 转录引擎：白名单 + 缺省/非法值落推荐（单点 `resolve_transcribe_engine`）——
+        #   **绝不隐式落到付费档 MiMo**；失败按回退链自动降级
+        #   （本地 ONNX 引擎只在模型就绪时参与兜底，原因可见）
+        transcribe_engine = resolve_transcribe_engine(options)
         # ★ 转录语言默认中文（Whisper自动识别会把中文误判为英文）
         #   前端 settingsStore 默认 'zh'，这里做兜底：None → 'zh'
         #   用户在前端选"自动检测"才会传 null，否则一律尊重用户选择
