@@ -23,6 +23,20 @@
 - `useJobRestore`：路由参数回填（`?rerun=jobId` 等），依赖通过参数注入（route/router/store 等），不直接 import
 - 新 composable 必须先补 `src/__tests__/` 测试再迁移视图代码；mock 用注入/stub，不引真实后端
 
+### 复制与格式化（2026-09-17 固化）
+
+- **复制唯一入口** `utils/clipboard.js` 的 `copyText()`（成功/失败都给 ElMessage）。任何新的复制按钮都调它，
+  不要再各写一份 `navigator.clipboard` 逻辑。
+- **可测的格式化一律抽纯函数模块**（`utils/chatExport.js` 是范例：`buildAiText` / `buildConversationMarkdown` /
+  `parseChatTime`），组件只负责取数据 + 调 `copyText()`。写在 `.vue` 里就没法单测。
+- **时间戳坑点**：后端 SQLite `CURRENT_TIMESTAMP` 落库为 **UTC 的 "YYYY-MM-DD HH:MM:SS"（无时区标记）**，
+  `new Date()` 会按本地时区解析，东八区会整整差 8 小时 → 必须补 `Z` 按 UTC 读（`parseChatTime`）。
+- **v-html 注入的 DOM 不接 Vue 事件**：markdown-it 渲染出的代码块「复制」按钮靠
+  `utils/codeCopy.js` 在 document 上挂**一次**委托（`data-md-code-copy`）。
+  禁止在某个组件里只给自己接一份——漏接的页面按钮就是死按钮（本项目已为"假按钮"踩过坑）。
+- `el-tooltip` / `el-popover` 包裹**内部带 `v-if`** 的元素时，条件为假会触发
+  `[ElOnlyChild] no valid child node found` 警告 → `v-if` 要提到 tooltip 外层。
+
 ### 状态与 API
 
 - 跨视图共享状态进 Pinia store（jobStore/modelStore/settingsStore/themeStore/asrStore），视图私有状态留在视图
