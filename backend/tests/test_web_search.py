@@ -234,7 +234,71 @@ class TestDescribeSearchBackends:
     def test_reports_availability(self, monkeypatch):
         monkeypatch.setattr(web_search, "zhipu_configured", lambda: False)
         monkeypatch.setattr(web_search, "ddgs_available", lambda: True)
-        assert web_search.describe_search_backends() == {"zhipu": None, "ddgs": "available"}
+        monkeypatch.setattr(web_search, "resolve_search_proxy", lambda: "")
+        assert web_search.describe_search_backends() == {
+            "zhipu": None, "ddgs": "available", "proxy": None}
+
+
+class TestResolveSearchProxy:
+    """★ 坑点回归：ddgs/primp 不读 HTTP_PROXY 环境变量，必须显式传 proxy，
+    否则国内网络下免 Key 兜底恒超时（表现为「联网开关没用」）。"""
+
+    @pytest.fixture(autouse=True)
+    def _clear_proxy_env(self, monkeypatch):
+        for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr("config.PROXY", "", raising=False)
+
+    def test_config_proxy_wins(self, monkeypatch):
+        monkeypatch.setattr("config.PROXY", "http://127.0.0.1:7890", raising=False)
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
+        assert web_search.resolve_search_proxy() == "http://127.0.0.1:7890"
+
+    def test_falls_back_to_env_proxy(self, monkeypatch):
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
+        assert web_search.resolve_search_proxy() == "http://127.0.0.1:7897"
+
+    def test_none_when_absent(self):
+        assert web_search.resolve_search_proxy() == ""
+
+    @pytest.mark.asyncio
+    async def test_proxy_passed_to_ddgs(self, monkeypatch):
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
+        seen = {}
+
+        class _FakeDDGS:
+            def __init__(self, timeout=None, proxy=None):
+                seen["proxy"] = proxy
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def text(self, query, max_results=5):
+                return [{"title": "T", "href": "https://x.com", "body": "b"}]
+
+        monkeypatch.setitem(__import__("sys").modules, "ddgs",
+                            type("m", (), {"DDGS": _FakeDDGS}))
+
+        result = await web_search.ddgs_search("q", max_results=1)
+
+        assert seen["proxy"] == "http://127.0.0.1:7897"
+        assert result[0]["url"] == "https://x.com"
+
+    @pytest.mark.asyncio
+    async def test_timeout_message_is_actionable(self, monkeypatch):
+        monkeypatch.setattr(web_search, "ddgs_available", lambda: True)
+
+        async def _timeout(query, max_results=5):
+            raise TimeoutError("超时")
+
+        monkeypatch.setattr(web_search, "ddgs_search", _timeout)
+
+        outcome = await web_search.web_search_collect("q")
+
+        assert "HTTPS_PROXY" in outcome.error
 
 
 class TestNoDuplicateSearchImplementation:

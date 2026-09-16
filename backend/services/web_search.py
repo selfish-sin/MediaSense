@@ -43,7 +43,10 @@ DEFAULT_RESULTS = 5
 
 # 单次搜索超时（秒）
 ZHIPU_TIMEOUT = 30.0
-DDGS_TIMEOUT = 8.0
+# DDGS 实测（2026-09-16）：内部多引擎轮询，单次耗时 2~26s 波动很大，且 duckduckgo 直连
+# 经代理会 TLS 握手失败（auto 聚合可用）。故拆成「单请求超时」+「整体预算」两个阈值。
+DDGS_REQUEST_TIMEOUT = 10.0
+DDGS_TOTAL_TIMEOUT = 25.0
 
 # 引擎映射：前端/调用方 key → 智谱 search_engine 编码
 ENGINE_MAP = {
@@ -183,11 +186,31 @@ async def zhipu_search(
 
 # ============ DuckDuckGo 兜底（ddgs，免 Key） ============
 
-def _ddgs_search_sync(query: str, max_results: int) -> List[Dict[str, str]]:
+def resolve_search_proxy() -> str:
+    """DDGS 走的代理。
+
+    坑点（2026-09-16 实测）：`ddgs`/`primp` **不会**自动读取 HTTP_PROXY/HTTPS_PROXY
+    环境变量，不显式传 `proxy=` 时在国内网络直接超时（表现为「联网开关没用」）。
+    优先级：config.PROXY（项目显式配置）→ HTTPS_PROXY/HTTP_PROXY（系统级代理）。
+    """
+    try:
+        from config import PROXY
+        if PROXY:
+            return PROXY
+    except Exception as exc:
+        logger.debug(f"读取 config.PROXY 失败: {exc}")
+    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        value = os.getenv(name)
+        if value:
+            return value
+    return ""
+
+
+def _ddgs_search_sync(query: str, max_results: int, proxy: str = "") -> List[Dict[str, str]]:
     from ddgs import DDGS
 
     results: List[Dict[str, str]] = []
-    with DDGS(timeout=DDGS_TIMEOUT) as ddgs:
+    with DDGS(timeout=DDGS_REQUEST_TIMEOUT, proxy=proxy or None) as ddgs:
         for r in ddgs.text(query, max_results=max_results):
             results.append({
                 "title": (r.get("title") or "来源").strip(),
@@ -201,9 +224,10 @@ def _ddgs_search_sync(query: str, max_results: int) -> List[Dict[str, str]]:
 
 async def ddgs_search(query: str, max_results: int = DEFAULT_RESULTS) -> List[Dict[str, str]]:
     """DuckDuckGo 搜索（在线程中执行并加总超时，DDGS 内部各引擎默认超时过长）"""
+    proxy = resolve_search_proxy()
     return await asyncio.wait_for(
-        asyncio.to_thread(_ddgs_search_sync, query, max_results),
-        timeout=DDGS_TIMEOUT,
+        asyncio.to_thread(_ddgs_search_sync, query, max_results, proxy),
+        timeout=DDGS_TOTAL_TIMEOUT,
     )
 
 
@@ -272,7 +296,10 @@ async def web_search_collect(
                 return SearchOutcome(sources=results, text=text, provider="ddgs")
             errors.append("DuckDuckGo 返回 0 条结果")
         except asyncio.TimeoutError:
-            errors.append(f"DuckDuckGo 兜底超时（{DDGS_TIMEOUT:.0f}s）")
+            errors.append(
+                f"DuckDuckGo 兜底超时（{DDGS_TOTAL_TIMEOUT:.0f}s）；若本机需代理，"
+                "请在 config.py 设 PROXY 或设置 HTTPS_PROXY 环境变量"
+            )
         except Exception as exc:
             msg = _short_error(exc)
             errors.append(f"DuckDuckGo 兜底失败（{msg}）")
@@ -321,4 +348,5 @@ def describe_search_backends() -> Dict[str, Optional[str]]:
     return {
         "zhipu": "configured" if zhipu_configured() else None,
         "ddgs": "available" if ddgs_available() else None,
+        "proxy": resolve_search_proxy() or None,
     }
