@@ -45,6 +45,9 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `backend/scripts/export_openapi.py` + `contracts/` | 导出/存放 OpenAPI 契约快照（`openapi.json`，66 端点） | 改后端 API 后重新导出；查全部端点契约时读它 |
 | `backend/verify.py` | 一键验证：backend pytest + frontend vitest + vite build | 改完代码做全量验证，或想快速回归 |
 | `frontend/src/App.vue` | 主题 CSS 变量（`--app-*` 明/暗两套 + 自定义主色）、全局卡片与工作台通用类（`.app-card`/`.wb-card`/`.log-panel`/`.row-more-btn`）、侧栏与滚动按钮 | 改主题变量、全局类或侧栏布局时 |
+| `frontend/src/components/ChatPanel.vue` | 追问聊天面板（多会话/流式/SSE search 事件/消息操作栏：复制·编辑·删除·重新生成/时间戳/整对话复制） | 改追问交互、引用来源展示或联网检索状态时 |
+| `frontend/src/utils/chatExport.js` | 追问复制/导出格式化纯函数：`parseChatTime`（SQLite naive 时间戳按 **UTC** 解析）、`buildAiText`（正文 ± 参考来源）、`buildConversationMarkdown`（`### 你` / `### AI` 分节） | 改追问复制内容或时间戳显示时 |
+| `frontend/src/utils/codeCopy.js` | Markdown 代码块「复制」按钮的 **document 全局事件委托**（`data-md-code-copy`），main.js 安装一次 | 改代码块复制，或排查"复制按钮点了没反应"/"某页面复制是死的"时 |
 | `frontend/src/utils/` | api 封装（axios 拦截器/错误归一化；`asrApi` 含 provider CRUD/测试连接/本地模型/设置）、jobActions、modelDisplay（引擎-模型显示名）、clipboard/recipes/errorNotice 等工具 | 改 HTTP 调用或共享工具行为 |
 | `frontend/src/stores/asrStore.js` | ASR 配置状态：`loadOverview`（只读失败落 `error` 并清空列表）、provider 增删改/测试、`saveSettings`、下载状态轻量轮询、本地模型删除 | 改 ASR 管理页数据流 |
 | `frontend/src/stores/settingsStore.js` | 工作台设置：维度/配方/高级选项；**`transcribe_engine` 占位=免费档 `cloud_free` + `engineTouched`**（用户手选后不再被推荐值覆盖，付费档只能显式选择） | 改工作台默认值/引擎或维度选择 |
