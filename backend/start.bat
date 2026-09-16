@@ -19,11 +19,11 @@ if errorlevel 1 (
 %PYTHON% --version
 
 echo [2] Checking dependencies...
-%PYTHON% -c "import fastapi,uvicorn,socketio,pydantic,httpx,multipart,aiofiles,yt_dlp,faster_whisper,ctranslate2,docx,bilibili_api,PIL,requests,fpdf,websockets,sherpa_onnx" >nul 2>&1
+%PYTHON% -c "import fastapi,uvicorn,socketio,pydantic,httpx,multipart,aiofiles,yt_dlp,faster_whisper,ctranslate2,docx,bilibili_api,PIL,requests,fpdf,websockets,sherpa_onnx,ddgs" >nul 2>&1
 if errorlevel 1 (
     echo   [!] Missing dependencies detected, auto installing requirements.txt ...
     %PYTHON% -m pip install -r requirements.txt
-    %PYTHON% -c "import fastapi,uvicorn,socketio,pydantic,httpx,multipart,aiofiles,yt_dlp,faster_whisper,ctranslate2,docx,bilibili_api,PIL,requests,fpdf,websockets,sherpa_onnx" >nul 2>&1
+    %PYTHON% -c "import fastapi,uvicorn,socketio,pydantic,httpx,multipart,aiofiles,yt_dlp,faster_whisper,ctranslate2,docx,bilibili_api,PIL,requests,fpdf,websockets,sherpa_onnx,ddgs" >nul 2>&1
     if errorlevel 1 (
         echo   [x] Some dependencies still missing, service may be degraded!
         echo       Manual fix: %PYTHON% -m pip install -r requirements.txt

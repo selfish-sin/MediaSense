@@ -15,6 +15,8 @@ bilibili-api-python>=17.4.0
 pillow>=10.4.0
 requests>=2.31.0
 fpdf2>=2.7.9
+# 联网检索免 Key 兜底（智谱 Web Search API 不可用/未配 Key 时使用）
+ddgs>=9.0.0
 
 # 可选 GPU 加速（CUDA 12 环境按需手动安装，CPU 环境无需安装）
 # nvidia-cublas-cu12
