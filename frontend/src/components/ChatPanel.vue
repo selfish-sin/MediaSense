@@ -12,6 +12,9 @@
             </span>
           </el-tooltip>
           <el-checkbox v-model="showThinking" value="show-thinking" size="small" class="think-toggle">显示思考过程</el-checkbox>
+          <el-tooltip content="把整个对话复制为 Markdown（含参考来源）" placement="top">
+            <el-button v-if="messages.length" size="small" text :icon="Copy" @click="copyConversation">复制对话</el-button>
+          </el-tooltip>
           <el-button v-if="messages.length" size="small" text type="danger" @click="onClear">清空当前</el-button>
         </div>
       </div>
@@ -76,7 +79,16 @@
         <div v-if="msg.role === 'user'" class="bubble bubble-user">
           <div class="bubble-head">
             <span class="role-tag user-tag">你</span>
-            <el-button size="small" text class="edit-btn" @click="onEdit(msg)">编辑</el-button>
+            <span v-if="msgTime(msg)" class="msg-time">{{ msgTime(msg) }}</span>
+            <span class="head-actions">
+              <el-tooltip content="复制提问" placement="top">
+                <el-button size="small" text :icon="Copy" @click="copyText(msg.content)" />
+              </el-tooltip>
+              <el-button size="small" text :disabled="streaming" @click="onEdit(msg)">编辑</el-button>
+              <el-tooltip content="删除该提问及其回答" placement="top">
+                <el-button size="small" text type="danger" :disabled="streaming" @click="onDeleteTurn(msg)">删除</el-button>
+              </el-tooltip>
+            </span>
           </div>
           <div class="bubble-body user-text">{{ msg.content }}</div>
         </div>
@@ -85,12 +97,32 @@
         <div v-else class="bubble bubble-ai">
           <div class="bubble-head">
             <span class="role-tag ai-tag">AI</span>
+            <span v-if="msgTime(msg)" class="msg-time">{{ msgTime(msg) }}</span>
             <span v-if="msg.token_usage && (msg.token_usage.input || msg.token_usage.output)" class="token-tag">
               {{ (msg.token_usage.input || 0) + (msg.token_usage.output || 0) }} tokens
             </span>
             <span class="head-actions">
-              <el-button size="small" text @click="onRegenerate(msg)">重新生成</el-button>
-              <el-button size="small" text type="danger" @click="onDelete(msg)">删除</el-button>
+              <!-- 有引用来源时复制可选：仅正文 / 正文 + 参考来源 -->
+              <el-dropdown
+                v-if="msg.sources && msg.sources.length"
+                trigger="click"
+                @command="(cmd) => onCopyAi(msg, cmd)"
+              >
+                <el-button size="small" text :icon="Copy" :disabled="!msg.content">
+                  复制<el-icon class="el-icon--right"><ChevronDown /></el-icon>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="body">仅正文</el-dropdown-item>
+                    <el-dropdown-item command="with-sources">正文 + 参考来源</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+              <el-tooltip v-else content="复制回答" placement="top">
+                <el-button size="small" text :icon="Copy" :disabled="!msg.content" @click="onCopyAi(msg, 'body')" />
+              </el-tooltip>
+              <el-button size="small" text :disabled="streaming" @click="onRegenerate(msg)">重新生成</el-button>
+              <el-button size="small" text type="danger" :disabled="streaming" @click="onDelete(msg)">删除</el-button>
             </span>
           </div>
 
@@ -183,9 +215,11 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
-import { MessageCircle, Plus, Pencil, Trash2, ArrowDown, Sparkles, Link, Search } from 'lucide-vue-next'
+import { MessageCircle, Plus, Pencil, Trash2, ArrowDown, Sparkles, Link, Search, Copy, ChevronDown } from 'lucide-vue-next'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatApi } from '../utils/api'
+import { copyText } from '../utils/clipboard'
+import { buildAiText, buildConversationMarkdown, formatChatTime } from '../utils/chatExport'
 import { isDialogCancel } from '../utils/errorNotice'
 import { useMarkdownListCache } from '../composables/useMarkdownRender'
 import { useModelStore } from '../stores/modelStore'
@@ -328,6 +362,8 @@ async function loadHistory() {
       thinking: m.thinking || '',
       sources: m.sources || [],
       token_usage: m.token_usage || null,
+      created_at: m.created_at || '',
+      search: null,
     }))
   } catch (e) {
     console.warn('加载追问历史失败', e)
@@ -411,8 +447,10 @@ async function onSend(overrideContent) {
 
   const uid = 'tmp-u-' + ++tmpSeq
   const aid = 'tmp-a-' + tmpSeq
-  messages.value.push({ id: uid, role: 'user', content, thinking: '', sources: [], token_usage: null })
-  const assistant = { id: aid, role: 'assistant', content: '', thinking: '', sources: [], search: null, token_usage: null }
+  // 本地消息先打自己的时间戳（服务端 created_at 要等重载后才有）
+  const nowIso = new Date().toISOString()
+  messages.value.push({ id: uid, role: 'user', content, thinking: '', sources: [], token_usage: null, created_at: nowIso })
+  const assistant = { id: aid, role: 'assistant', content: '', thinking: '', sources: [], search: null, token_usage: null, created_at: nowIso }
   messages.value.push(assistant)
   activeMsg.value = assistant
   streaming.value = true
@@ -503,6 +541,36 @@ function searchLabel(state) {
     return `已联网检索 · ${who} · ${state.count} 条来源`
   }
   return `联网检索失败：${state.message}（已改用模型自身知识回答）`
+}
+
+// ===== 复制（格式化见 utils/chatExport.js 纯函数；复制反馈走 utils/clipboard 单点） =====
+
+function msgTime(msg) {
+  return formatChatTime(msg.created_at)
+}
+
+function onCopyAi(msg, mode) {
+  return copyText(buildAiText(msg, mode === 'with-sources'))
+}
+
+function copyConversation() {
+  if (!messages.value.length) {
+    ElMessage.warning('当前对话还没有消息')
+    return
+  }
+  const title = sessions.value.find((s) => s.id === activeSessionId.value)?.title || '追问对话'
+  return copyText(buildConversationMarkdown(messages.value, title))
+}
+
+// 删除该提问及其回答（整轮删除；只删提问会留下一段孤儿的 AI 回答）
+async function onDeleteTurn(msg) {
+  if (streaming.value) return
+  try {
+    await chatApi.deleteFrom(props.jobId, msg.id)
+    await loadHistory()
+  } catch (e) {
+    ElMessage.error('删除失败: ' + (e?.message || '未知错误'))
+  }
 }
 
 // 编辑：删除该条（含）之后所有消息，并把内容填入输入框，等待重新发送
@@ -809,8 +877,12 @@ watch(
   display: flex;
   gap: 2px;
 }
-.edit-btn {
-  margin-left: auto;
+.msg-time {
+  font-size: 11px;
+  color: var(--el-text-color-secondary, #909399);
+}
+.bubble-user .msg-time {
+  color: rgba(255, 255, 255, 0.8);
 }
 .user-text {
   white-space: pre-wrap;
