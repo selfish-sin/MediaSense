@@ -8,17 +8,48 @@
  *   与 HomeView 原 socketUnsubs（onUnmounted 清理）语义一致；keep-alive 切页不卸载。
  */
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useJobStore } from '../stores/jobStore'
 import { onProgress, onLog } from '../utils/socket'
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
+import { jobsApi } from '../utils/api'
+import { isDialogCancel } from '../utils/errorNotice'
 import JobProgressDetail from './JobProgressDetail.vue'
 
 const jobStore = useJobStore()
 
 // ── 任务进度日志（默认展开，当作进度条使用） ──
 const showJobProgress = ref(true)
+const cancelling = ref(false)
 
 const isProcessing = computed(() => jobStore.isProcessing)
+
+/** 取消当前任务：终止后端处理步骤，并把本地状态同步为已取消 */
+async function handleCancel() {
+  if (!jobStore.currentJobId) return
+  try {
+    await ElMessageBox.confirm(
+      '取消将终止后端所有处理步骤（下载/转录/AI 加工），任务状态变为「已取消」。确认？',
+      '取消任务',
+      { type: 'warning', confirmButtonText: '确认取消', cancelButtonText: '继续等待' }
+    )
+  } catch (err) {
+    if (!isDialogCancel(err)) ElMessage.error(err?.message || err)
+    return
+  }
+  cancelling.value = true
+  try {
+    await jobsApi.cancel(jobStore.currentJobId)
+    jobStore.jobStatus = 'cancelled'
+    jobStore.isProcessing = false
+    jobStore.progress.msg = '任务已取消'
+    ElMessage.success('任务已取消')
+  } catch (err) {
+    ElMessage.error(err?.message || err)
+  } finally {
+    cancelling.value = false
+  }
+}
 
 let socketUnsubs = []
 
@@ -82,6 +113,16 @@ defineExpose({ reveal })
           </span>
         </div>
         <div class="progress-header-right">
+          <el-button
+            v-if="isProcessing"
+            size="small"
+            type="danger"
+            plain
+            :loading="cancelling"
+            @click="handleCancel"
+          >
+            取消任务
+          </el-button>
           <el-button size="small" text @click="showJobProgress = !showJobProgress">
             {{ showJobProgress ? '收起' : '展开' }}
           </el-button>
