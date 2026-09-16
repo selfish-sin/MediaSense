@@ -110,6 +110,12 @@
             <span class="dot-flashing">{{ msg.thinking && !msg.content ? '思考中' : '生成中' }}</span>
           </div>
 
+          <!-- 联网检索状态：检索中 / 命中条数 / 失败原因（失败不再静默） -->
+          <div v-if="msg.search" class="search-state" :class="'search-' + msg.search.status">
+            <el-icon :size="13" style="vertical-align: -2px;"><Search /></el-icon>
+            <span class="search-text">{{ searchLabel(msg.search) }}</span>
+          </div>
+
           <!-- 引用来源 -->
           <div v-if="msg.sources && msg.sources.length" class="sources-box">
             <div class="sources-label"><el-icon :size="13" style="vertical-align: -2px;"><Link /></el-icon> 引用来源 ({{ msg.sources.length }})</div>
@@ -177,7 +183,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
-import { MessageCircle, Plus, Pencil, Trash2, ArrowDown, Sparkles, Link } from 'lucide-vue-next'
+import { MessageCircle, Plus, Pencil, Trash2, ArrowDown, Sparkles, Link, Search } from 'lucide-vue-next'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatApi } from '../utils/api'
 import { isDialogCancel } from '../utils/errorNotice'
@@ -406,7 +412,7 @@ async function onSend(overrideContent) {
   const uid = 'tmp-u-' + ++tmpSeq
   const aid = 'tmp-a-' + tmpSeq
   messages.value.push({ id: uid, role: 'user', content, thinking: '', sources: [], token_usage: null })
-  const assistant = { id: aid, role: 'assistant', content: '', thinking: '', sources: [], token_usage: null }
+  const assistant = { id: aid, role: 'assistant', content: '', thinking: '', sources: [], search: null, token_usage: null }
   messages.value.push(assistant)
   activeMsg.value = assistant
   streaming.value = true
@@ -426,6 +432,8 @@ async function onSend(overrideContent) {
           assistant.thinking += ev.delta || ''
         } else if (ev.type === 'content') {
           assistant.content += ev.delta || ''
+        } else if (ev.type === 'search') {
+          setSearchState(assistant, ev)
         } else if (ev.type === 'sources') {
           assistant.sources = ev.sources || []
         } else if (ev.type === 'done') {
@@ -469,6 +477,32 @@ async function onSend(overrideContent) {
 
 function onStop() {
   if (abortCtrl) abortCtrl.abort()
+}
+
+// 联网检索状态写入该条消息的响应式代理（直接改局部裸对象不会触发视图更新）
+function setSearchState(assistant, ev) {
+  let state
+  if (ev.status === 'ok') {
+    state = { status: 'ok', provider: ev.provider || '', count: ev.count || 0 }
+  } else if (ev.status === 'failed') {
+    state = { status: 'failed', message: ev.message || '未知原因' }
+  } else {
+    state = { status: 'searching' }
+  }
+  const live = messages.value.find((m) => m.id === assistant.id)
+  if (live) live.search = state
+  else assistant.search = state
+}
+
+// 联网检索状态文案
+function searchLabel(state) {
+  if (!state) return ''
+  if (state.status === 'searching') return '正在联网检索…'
+  if (state.status === 'ok') {
+    const who = state.provider === 'zhipu' ? '智谱' : state.provider === 'ddgs' ? 'DuckDuckGo' : '联网'
+    return `已联网检索 · ${who} · ${state.count} 条来源`
+  }
+  return `联网检索失败：${state.message}（已改用模型自身知识回答）`
 }
 
 // 编辑：删除该条（含）之后所有消息，并把内容填入输入框，等待重新发送
@@ -819,6 +853,27 @@ watch(
   margin-top: 8px;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
   padding-top: 6px;
+}
+/* 联网检索状态（检索中 / 命中 / 失败） */
+.search-state {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.search-state .search-text {
+  word-break: break-word;
+}
+.search-searching {
+  color: var(--el-text-color-secondary, #a3a6ad);
+}
+.search-ok {
+  color: #34d399;
+}
+.search-failed {
+  color: #fbbf24;
 }
 .sources-label {
   font-size: 12px;
