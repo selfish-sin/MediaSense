@@ -23,6 +23,22 @@
 - 完整 Chrome UA + 进程级缓存 buvid3/buvid4 + 真实视频页 Referer（`_bili_headers`）
 - OpenAI 兼容流式接口（阿里云 MaaS）末尾会发 `choices: []` 的 usage chunk——取值必须用 `(chunk.get('choices') or [])` 防护，`[0]` 直接索引会越界（dict.get 默认值只在 key 缺失时生效）
 
+### 联网检索（2026-09-16 修复，勿回退）
+
+- **单一事实源**：`services/web_search.py` 是唯一联网实现（追问 + 深度研究共用）。禁止在
+  `research_processor.py` / 路由层再内联第二份智谱或 DDGS 调用（曾因两份实现漂移，
+  追问链路用的是只读环境变量的空 Key，整条链路静默失效）。
+- **智谱姿势**：必须走独立端点 `POST /api/paas/v4/web_search`（body `search_query`（≤70 字符）/
+  `search_engine` / `search_intent` / `count` / `content_size`，返回 `search_result[]`）。
+  **不要**用 `chat/completions + tools=[{type:web_search}]` 老姿势——已被官方独立端点取代，
+  且其 `message.web_search` 是**数组**，按 dict 取值会抛 `AttributeError` 并被 except 吞掉。
+- **Key 三级兜底**：`resolve_zhipu_key()`（环境变量 → config.py → DB 里 endpoint 含 bigmodel/zhipu 的模型）。
+  需要智谱 Key 时统一调它，不要直接读 `config.ZHIPU_API_KEY`。
+- **DDGS 兜底**：`ddgs`/`primp` **不读** `HTTP_PROXY`/`HTTPS_PROXY`，必须经 `resolve_search_proxy()`
+  显式传 `proxy=`，否则国内网络恒超时（实测 2~26s 波动，整体预算 25s）。
+- **失败必须可见**：`web_search_collect()` 返回 `SearchOutcome`（`sources`/`text`/`provider`/`error`），
+  绝不静默返回空；追问经 SSE `search` 事件透出 `searching|ok|failed`，前端气泡展示状态。
+
 ### 数据库
 
 - SQLite 连接：WAL + busy_timeout=5000 + check_same_thread=False，每次操作独立连接、用完即关
@@ -66,6 +82,6 @@
 
 ## Quality Check
 
-- [ ] `cd backend && venv/Scripts/python.exe -m pytest` 全绿（基线 692，必须用项目 venv——沙箱默认 Python 缺 pytest-asyncio，异步用例会批量假失败）
+- [ ] `cd backend && venv/Scripts/python.exe -m pytest` 全绿（基线 748，必须用项目 venv——沙箱默认 Python 缺 pytest-asyncio，异步用例会批量假失败）
 - [ ] 新增/修改的 service 函数有对应测试（成功 + 主要错误路径）
 - [ ] 没有在 async 函数中引入新的同步阻塞调用

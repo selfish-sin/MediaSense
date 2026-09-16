@@ -69,6 +69,8 @@ SERVER_HOST = "0.0.0.0"
 ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "")
 
 # ============ 代理配置 ============
+# 联网检索的 DuckDuckGo 兜底会显式使用此代理（ddgs 不读 HTTP_PROXY 环境变量）；
+# 留空时回退到系统 HTTPS_PROXY/HTTP_PROXY。
 PROXY = ""  # 需要时设置，如 "http://127.0.0.1:7890"
 
 # 走系统代理不稳定的域名 → 启动时合并进 NO_PROXY，直连访问（httpx 全客户端生效）。
