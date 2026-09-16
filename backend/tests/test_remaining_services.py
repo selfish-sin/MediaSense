@@ -1,7 +1,7 @@
 """
 剩余服务纯逻辑函数综合测试：web_search
 """
-from services.web_search import format_search_context, _parse_chat_response
+from services.web_search import format_search_context
 
 
 # ── web_search ──
@@ -24,29 +24,3 @@ class TestFormatSearchContext:
         ctx = format_search_context(results)
         assert "A" in ctx and "B" in ctx
         assert "2026" in ctx
-
-
-class TestParseChatResponse:
-    def test_dict_choices_with_web_search(self):
-        resp = {
-            "choices": [{
-                "message": {
-                    "content": "summary",
-                    "web_search": [
-                        {"title": "T1", "link": "https://a.com", "content": "c1"}
-                    ]
-                }
-            }]
-        }
-        results = _parse_chat_response(resp, 5, "query")
-        assert len(results) == 1
-        assert results[0]["title"] == "T1"
-
-    def test_dict_no_web_search(self):
-        resp = {"choices": [{"message": {"content": "fallback content"}}]}
-        results = _parse_chat_response(resp, 5, "q")
-        assert len(results) == 1
-        assert results[0]["title"].startswith("智谱AI")
-
-    def test_empty_choices(self):
-        assert _parse_chat_response({"choices": []}, 5, "q") == []
