@@ -9,6 +9,8 @@ import 'element-plus/es/components/message/style/css'
 import 'element-plus/es/components/message-box/style/css'
 
 import App from './App.vue'
+// Markdown 代码块「复制」按钮的全局事件委托（所有 v-html 渲染处自动生效）
+import { installMarkdownCodeCopy } from './utils/codeCopy'
 
 // ★ 主题模式由 themeStore 管理（data-theme 属性 + dark class）
 // 不再硬编码 dark class，支持日间/夜间切换
@@ -37,5 +39,7 @@ app.use(router)
 app.use(pinia)
 // 组件级按需注册由 unplugin-vue-components 处理；语言包经 App.vue 的
 // el-config-provider 全局注入，无需 app.use(ElementPlus)
+
+installMarkdownCodeCopy()
 
 app.mount('#app')

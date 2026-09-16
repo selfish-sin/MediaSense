@@ -31,6 +31,27 @@ describe('markdown utils', () => {
     expect(html).toContain('<code>')
   })
 
+  // ★ 代码块带「复制」按钮容器（utils/codeCopy.js 全局委托消费 data-md-code-copy）
+  it('renderMarkdown wraps fenced code with copy button', () => {
+    const html = renderMarkdown('```python\nprint(1)\n```')
+    expect(html).toContain('data-md-code-copy')
+    expect(html).toContain('md-code-block')
+    expect(html).toContain('<span class="md-code-lang">python</span>')
+    expect(html).toContain('language-python')
+    expect(html).toContain('print(1)')
+  })
+
+  it('renderMarkdown escapes html inside fenced code', () => {
+    const html = renderMarkdown('```\n<script>alert(1)</script>\n```')
+    expect(html).not.toContain('<script>')
+    expect(html).toContain('&lt;script&gt;')
+  })
+
+  it('renderMarkdown defaults code lang label to text', () => {
+    const html = renderMarkdown('```\nplain\n```')
+    expect(html).toContain('<span class="md-code-lang">text</span>')
+  })
+
   it('renderMarkdown linkifies URLs', () => {
     const html = renderMarkdown('visit https://example.com')
     expect(html).toContain('href')

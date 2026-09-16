@@ -824,6 +824,56 @@ h2, h3 { color: var(--app-text-heading) !important; }
   background: var(--app-table-header-bg);
 }
 
+/* Markdown 代码块容器 + 右上「复制」按钮（行为见 utils/codeCopy.js 全局委托）
+   ⚠ 选择器带 .md-code-block > pre.md-code-pre（特异性 0-3-2）：压制各组件 scoped 的
+   `.markdown-body[x] pre`（0-2-1）里自带的圆角/外边距，保证标题条与代码区严丝合缝。 */
+.markdown-body .md-code-block {
+  position: relative;
+  margin: 10px 0;
+}
+.markdown-body .md-code-block > .md-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  background: var(--app-log-bg);
+  border: 1px solid var(--app-border);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+}
+.markdown-body .md-code-block > .md-code-head > .md-code-lang {
+  letter-spacing: 0.3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.markdown-body .md-code-block > .md-code-head > .md-code-copy {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--app-text-secondary);
+  background: transparent;
+  border: 1px solid var(--app-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.markdown-body .md-code-block > .md-code-head > .md-code-copy:hover {
+  color: var(--app-accent-1);
+  border-color: var(--app-accent-1);
+}
+.markdown-body .md-code-block > .md-code-head > .md-code-copy.is-copied {
+  color: #34d399;
+  border-color: #34d399;
+}
+.markdown-body .md-code-block > pre.md-code-pre {
+  margin: 0;
+  border-radius: 0 0 8px 8px;
+}
+
 /* 分页 */
 .el-pagination {
   --el-pagination-bg-color: transparent;
