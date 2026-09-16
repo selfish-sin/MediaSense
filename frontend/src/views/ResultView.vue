@@ -554,46 +554,47 @@ async function copyTranscript() {
 </script>
 
 <template>
-  <div style="max-width: 1000px; margin: 0 auto; padding: 24px;" v-loading="loading">
+  <div class="page-container" v-loading="loading">
     <!-- 顶部导航 -->
-    <el-card class="app-card" shadow="never" style="margin-bottom: 16px;">
-      <div style="display: flex; align-items: center; gap: 12px;">
-        <el-button :icon="ArrowLeft" @click="goBack" size="small">返回</el-button>
-        <h2 style="margin: 0; flex: 1; font-size: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-          {{ job?.title || '任务详情' }}
-        </h2>
-        <el-tag v-if="job" :type="jobStatusTagType(job.status)" size="small" effect="plain" round>
-          {{ jobStatusLabel(job.status) }}
-        </el-tag>
-        <el-button
-          v-if="taskAction.primary === 'restore' || taskAction.primary === 'resume'"
-          type="primary"
-          size="small"
-          @click="handleTaskAction(taskAction.primary)"
-        >
-          {{ taskAction.primaryLabel }}
-        </el-button>
-        <el-button
-          v-if="taskAction.secondary === 'rerun' || taskAction.secondary === 'forceRetry'"
-          type="warning"
-          size="small"
-          @click="handleTaskAction(taskAction.secondary)"
-        >
-          {{ taskAction.secondaryLabel }}
-        </el-button>
-        <el-button
-          v-if="taskAction.canCancel"
-          type="danger"
-          size="small"
-          @click="handleTaskAction('cancel')"
-        >
-          取消任务
-        </el-button>
+    <el-card class="app-card" shadow="never">
+      <div class="page-header">
+        <el-button :icon="ArrowLeft" @click="goBack">返回</el-button>
+        <div class="page-header-text">
+          <h2 class="page-title result-title" :title="job?.title || '任务详情'">
+            {{ job?.title || '任务详情' }}
+          </h2>
+        </div>
+        <div class="page-header-actions">
+          <el-tag v-if="job" :type="jobStatusTagType(job.status)" size="small" effect="plain" round>
+            {{ jobStatusLabel(job.status) }}
+          </el-tag>
+          <el-button
+            v-if="taskAction.primary === 'restore' || taskAction.primary === 'resume'"
+            type="primary"
+            @click="handleTaskAction(taskAction.primary)"
+          >
+            {{ taskAction.primaryLabel }}
+          </el-button>
+          <el-button
+            v-if="taskAction.secondary === 'rerun' || taskAction.secondary === 'forceRetry'"
+            type="warning"
+            @click="handleTaskAction(taskAction.secondary)"
+          >
+            {{ taskAction.secondaryLabel }}
+          </el-button>
+          <el-button
+            v-if="taskAction.canCancel"
+            type="danger"
+            @click="handleTaskAction('cancel')"
+          >
+            取消任务
+          </el-button>
+        </div>
       </div>
     </el-card>
 
     <!-- 任务信息 -->
-    <el-card class="app-card" shadow="never" style="margin-bottom: 16px;">
+    <el-card class="app-card" shadow="never">
       <el-descriptions v-if="job" :column="3" border size="small">
       <el-descriptions-item label="平台">{{ job.platform || '-' }}</el-descriptions-item>
       <el-descriptions-item label="总结类型">
@@ -620,7 +621,7 @@ async function copyTranscript() {
     </el-card>
 
     <!-- ★ 历史版本面板（从后端加载） -->
-    <el-card v-if="summaryHistory.length > 0" class="app-card" shadow="never" style="margin-bottom: 16px;">
+    <el-card v-if="summaryHistory.length > 0" class="app-card" shadow="never">
       <div style="font-size: 13px; color: var(--app-text-secondary); margin-bottom: 8px;">
         历史版本 ({{ summaryHistory.length }})
         <el-button v-if="activeVersion > 0" size="small" text type="primary" @click="switchToVersion(0)" style="margin-left: 8px;">
@@ -839,7 +840,6 @@ async function copyTranscript() {
       :title="job.error"
       type="error"
       :closable="false"
-      style="margin-top: 16px;"
     />
 
     <!-- 追问聊天（ChatPanel：SSE 流式 + 思考过程 + 引用源 + 编辑/重发） -->
@@ -851,6 +851,14 @@ async function copyTranscript() {
 </template>
 
 <style scoped>
+/* 结果页标题：占满剩余宽度、超长省略（字号/字重沿用全局 .page-title） */
+.result-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-bubble-user {
   background: var(--app-accent-1);
   color: #fff;

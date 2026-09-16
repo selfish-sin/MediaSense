@@ -408,18 +408,16 @@ async function applyLib(item) {
 <template>
   <div class="templates-page page-container">
     <!-- 顶部标题 + Tab 切换 -->
-    <el-card class="app-card" shadow="never" style="margin-bottom: 16px;">
-      <div style="display: flex; justify-content: space-between; align-items: center;">
-        <div>
-          <h2 style="margin: 0;">模板中心</h2>
-          <div style="font-size: 12px; color: var(--app-text-secondary); margin-top: 4px;">
-            维度模块编辑器（修改内置模块提示词） · 完全自定义提示词库（收集/应用完整 prompt）
-          </div>
+    <el-card class="app-card" shadow="never">
+      <div class="page-header">
+        <div class="page-header-text">
+          <h2 class="page-title">模板中心</h2>
+          <p class="page-subtitle">维度模块编辑器（修改内置模块提示词） · 完全自定义提示词库（收集/应用完整 prompt）</p>
         </div>
       </div>
     </el-card>
 
-    <el-tabs v-model="activeTab" class="templates-tabs">
+    <el-tabs v-model="activeTab">
       <!-- Tab 1: 维度模块编辑器 -->
       <el-tab-pane label="维度模块编辑器" name="modules">
         <!-- 预设配方编辑器（位于维度树/角色之上） -->
@@ -474,7 +472,7 @@ async function applyLib(item) {
 
         <div class="editor-layout">
           <!-- 左侧：维度 + 模块树 -->
-          <div class="dim-tree" v-loading="loading && !dimensionList.length">
+          <div class="sub-panel dim-tree" v-loading="loading && !dimensionList.length">
             <div v-for="dim in dimensionList" :key="dim.key" class="dim-tree-item">
               <div class="dim-tree-label">
                 <span>{{ dim.label }}</span>
@@ -504,7 +502,7 @@ async function applyLib(item) {
           </div>
 
           <!-- 右侧：编辑区 -->
-          <div class="edit-area" v-loading="loading">
+          <div class="sub-panel edit-area" v-loading="loading">
             <template v-if="selectedDim && selectedModule">
               <div class="edit-header">
                 <div>
@@ -606,8 +604,8 @@ async function applyLib(item) {
 
         <el-card class="app-card" shadow="never" v-loading="libraryLoading">
           <el-table :data="library" style="width: 100%;" :empty-text="libraryLoading ? '加载中...' : '暂无提示词，点击右上角添加'">
-            <el-table-column prop="name" label="名称" width="180" />
-            <el-table-column label="描述" width="200">
+            <el-table-column prop="name" label="名称" min-width="180" />
+            <el-table-column label="描述" min-width="200">
               <template #default="{ row }">
                 <span style="font-size: 12px; color: var(--app-text-secondary);">{{ row.options?.desc || '—' }}</span>
               </template>
@@ -617,7 +615,7 @@ async function applyLib(item) {
                 <span style="font-size: 12px; color: var(--app-text-secondary); font-family: 'Consolas', monospace;">{{ row.prompt.slice(0, 120) }}{{ row.prompt.length > 120 ? '...' : '' }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="220" align="center">
+            <el-table-column label="操作" min-width="220" align="center">
               <template #default="{ row }">
                 <el-button size="small" type="primary" @click="applyLib(row)">应用</el-button>
                 <el-button size="small" :icon="Pencil" @click="openEditLibDialog(row)" />
@@ -707,20 +705,10 @@ async function applyLib(item) {
   user-select: text;
 }
 
-.templates-tabs {
-  background: rgba(var(--app-dim-color), var(--app-card-opacity, 1));
-  border: 1px solid var(--app-border);
-  border-radius: 12px;
-  padding: 16px;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  transition: box-shadow 0.2s, border-color 0.2s;
-}
-.templates-tabs:hover {
-  box-shadow: var(--app-card-glow, 0 8px 28px rgba(0, 0, 0, 0.42));
-}
-
+/* el-tabs 外壳不再套卡片（全站约定：卡片只出现在 pane 内容里），
+   页面纵向间距由 .page-container 的 gap 提供 */
 .editor-layout {
+  margin-top: 4px;
   display: grid;
   grid-template-columns: 280px 1fr;
   gap: 16px;
@@ -731,16 +719,16 @@ async function applyLib(item) {
 .recipe-editor {
   background: var(--app-hover-bg);
   border: 1px solid var(--app-border);
-  border-radius: 6px;
-  padding: 8px;
-  margin-bottom: 8px;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
   transition: background 0.25s, border-color 0.25s;
 }
 .recipe-editor-head {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 4px;
+  gap: 8px;
+  margin-bottom: 8px;
   flex-wrap: wrap;
 }
 .recipe-editor-title {
@@ -752,15 +740,15 @@ async function applyLib(item) {
 .recipe-editor-bar {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 8px;
   flex: 1;
   min-width: 0;
 }
 .recipe-editor-fields {
   display: flex;
   align-items: center;
-  gap: 5px;
-  margin-bottom: 6px;
+  gap: 8px;
+  margin-bottom: 8px;
   flex-wrap: wrap;
 }
 .recipe-editor-dims {
@@ -785,20 +773,23 @@ async function applyLib(item) {
   line-height: 1.5;
 }
 
-/* 左侧维度树（透明卡片） */
-.dim-tree {
+/* 嵌套子面板（维度树 / 编辑区）：共用同一套卡片基准，避免两处各自漂移 */
+.sub-panel {
   background: rgba(var(--app-dim-color), var(--app-card-opacity, 1));
   border: 1px solid var(--app-border);
   border-radius: 12px;
-  padding: 12px;
-  max-height: 70vh;
-  overflow-y: auto;
+  padding: 16px;
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   transition: box-shadow 0.2s, border-color 0.2s;
 }
-.dim-tree:hover {
+.sub-panel:hover {
   box-shadow: var(--app-card-glow, 0 8px 28px rgba(0, 0, 0, 0.42));
+}
+/* 左侧维度树 */
+.dim-tree {
+  max-height: 70vh;
+  overflow-y: auto;
 }
 .dim-tree-item {
   margin-bottom: 16px;
@@ -856,20 +847,10 @@ async function applyLib(item) {
   color: rgba(255, 255, 255, 0.75);
 }
 
-/* 右侧编辑区（透明卡片） */
+/* 右侧编辑区 */
 .edit-area {
-  background: rgba(var(--app-dim-color), var(--app-card-opacity, 1));
-  border: 1px solid var(--app-border);
-  border-radius: 12px;
-  padding: 16px;
   max-height: 70vh;
   overflow-y: auto;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  transition: box-shadow 0.2s, border-color 0.2s;
-}
-.edit-area:hover {
-  box-shadow: var(--app-card-glow, 0 8px 28px rgba(0, 0, 0, 0.42));
 }
 .edit-header {
   display: flex;

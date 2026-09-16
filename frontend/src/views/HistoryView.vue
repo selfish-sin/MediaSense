@@ -347,24 +347,29 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
 
 <template>
   <div class="page-container">
-    <!-- 标题 + 搜索 + 清空：合并成一个工具条卡片 -->
-    <el-card class="app-card" shadow="never" style="margin-bottom: 16px;">
-      <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
-        <h2 style="margin: 0; margin-right: auto;">任务历史</h2>
-        <el-input
-          v-model="searchQuery"
-          placeholder="按标题或 URL 过滤"
-          clearable
-          @keyup.enter="doSearch"
-          @clear="clearSearch"
-          style="width: 260px;"
-        >
-          <template #prefix><el-icon><Search /></el-icon></template>
-        </el-input>
-        <el-button type="primary" :loading="searching" @click="doSearch">搜索</el-button>
-        <el-button type="success" plain size="small" @click="handleClearByStatus('completed', '成功')">清空成功</el-button>
-        <el-button type="danger" plain size="small" @click="handleClearFailed">清空失败/取消</el-button>
-        <el-button type="danger" plain size="small" @click="handleClearAll">清空全部</el-button>
+    <!-- 标题 + 搜索 + 清空：合并成一个工具条卡片（结构复用全局 .page-header） -->
+    <el-card class="app-card" shadow="never">
+      <div class="page-header">
+        <div class="page-header-text">
+          <h2 class="page-title">任务历史</h2>
+          <p class="page-subtitle">按标题或 URL 过滤，支持批量取消 / 删除 / 导出</p>
+        </div>
+        <div class="page-header-actions">
+          <el-input
+            v-model="searchQuery"
+            placeholder="按标题或 URL 过滤"
+            clearable
+            @keyup.enter="doSearch"
+            @clear="clearSearch"
+            style="width: 240px;"
+          >
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-button type="primary" :loading="searching" @click="doSearch">搜索</el-button>
+          <el-button type="success" plain @click="handleClearByStatus('completed', '成功')">清空成功</el-button>
+          <el-button type="danger" plain @click="handleClearFailed">清空失败/取消</el-button>
+          <el-button type="danger" plain @click="handleClearAll">清空全部</el-button>
+        </div>
       </div>
     </el-card>
 
@@ -459,7 +464,7 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
   gap: 8px;
   align-items: center;
   padding: 10px 14px;
-  border-radius: 6px;
+  border-radius: 8px;
 }
 .batch-toolbar__count {
   font-weight: 600;

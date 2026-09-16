@@ -632,10 +632,11 @@ const tokenPanelRef = ref(null)
 </template>
 
 <style scoped>
+/* 工作台刻意比列表页窄（表单两列更易读），但左右/上下内边距与 .page-container 对齐 */
 .home-workbench {
   max-width: 1040px;
   margin: 0 auto;
-  padding: 20px 24px 48px;
+  padding: 24px 24px 48px;
 }
 
 .wb-card {

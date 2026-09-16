@@ -934,11 +934,69 @@ h2, h3 { color: var(--app-text-heading) !important; }
   padding: 20px;
 }
 
-/* ============ 页面容器（2026-09-13 统一；此前各视图各自内联 max-width/margin/padding） ============ */
+/* ============ 页面容器（2026-09-13 统一；2026-09-17 补弹性间距） ============ */
+/* 纵向间距由容器 gap 单点定义：子块不要再写 margin-bottom，否则间距翻倍 */
 .page-container {
   max-width: 1200px;
   margin: 0 auto;
   padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ============ 页面标题栏（2026-09-17 统一：历史/模型/模板/存储/结果五视图共用） ============
+ * 此前各页标题各自为政（h2 默认字号 / 18px / 26px h1 + eyebrow），基线和高低不齐。
+ * 结构固定为：左 标题(+可选副标题) · 右 操作区，横向 gap 12。 */
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-height: 32px;
+}
+/* flex-basis 0：标题块先占满剩余宽度再让位给右侧操作区，
+   否则长标题（结果页）会因内容宽度过大被挤到单独一行，标题栏折成三行 */
+.page-header-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 0%;
+  min-width: 0;
+}
+.page-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
+  color: var(--app-text-heading);
+}
+.page-subtitle {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--app-text-secondary);
+}
+.page-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* 标题栏内控件统一 32px 高（默认尺寸），消除 default(32) 与 small(24) 同排高低差 */
+.page-header-actions .el-button,
+.page-header-actions .el-input,
+.page-header-actions .el-select {
+  height: 32px;
+  box-sizing: border-box;
+}
+
+/* ============ el-tabs 统一（2026-09-17） ============
+ * 全站约定：tabs 自身不套外壳卡片，卡片只出现在各 pane 内容里 ——
+ * 避免「卡片套卡片」的双层边框，也让三个带 tabs 的页面（模型/模板/存储）结构一致。 */
+.page-container > .el-tabs {
+  margin-top: 4px;
 }
 
 /* ============ 空态统一（2026-09-13） ============ */

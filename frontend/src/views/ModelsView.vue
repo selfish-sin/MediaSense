@@ -315,14 +315,20 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
 
 <template>
   <div class="page-container">
-    <el-card class="app-card" shadow="never" style="margin-bottom: 16px;">
-      <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
-        <h2 style="margin: 0;">模型管理</h2>
-        <el-button v-if="activeDomain === 'llm'" type="primary" @click="openAddDialog">添加模型</el-button>
+    <el-card class="app-card" shadow="never">
+      <div class="page-header">
+        <div class="page-header-text">
+          <h2 class="page-title">模型管理</h2>
+          <p class="page-subtitle">LLM 文本模型与 ASR 语音模型分域管理，配置与默认值互不影响</p>
+        </div>
+        <div class="page-header-actions">
+          <el-button v-if="activeDomain === 'llm'" type="primary" @click="openAddDialog">添加模型</el-button>
+        </div>
       </div>
     </el-card>
 
-    <!-- 一级分域：LLM 文本模型 / ASR 语音模型。两者配置、密钥、默认值完全独立 -->
+    <!-- 一级分域：LLM 文本模型 / ASR 语音模型。两者配置、密钥、默认值完全独立。
+         约定：el-tabs 本身不套外壳卡片，卡片只出现在各 pane 内容里（全站统一）。 -->
     <el-tabs v-model="activeDomain">
       <el-tab-pane name="llm">
         <template #label>LLM 模型</template>

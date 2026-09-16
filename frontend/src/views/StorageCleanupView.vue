@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  CircleCheck, Clock, Trash2, Copy, Files, List, Lock, RefreshCw,
+  CircleCheck, Clock, Trash2, Copy, List, Lock, RefreshCw,
   Search, TriangleAlert,
 } from 'lucide-vue-next'
 import { storageCleanupApi } from '../utils/api'
@@ -152,13 +152,12 @@ onBeforeUnmount(stopPolling)
 
 <template>
   <div class='storage-page page-container'>
-    <header class='storage-header'>
-      <div>
-        <div class='eyebrow'><Files /> 存储管理</div>
-        <h1>清理工作台</h1>
-        <p>先预览，再确认执行。所有候选项都会在实际处理前重新校验。</p>
+    <header class='storage-header page-header'>
+      <div class='page-header-text'>
+        <h2 class='page-title'>存储管理</h2>
+        <p class='page-subtitle'>清理工作台：先预览，再确认执行。所有候选项都会在实际处理前重新校验。</p>
       </div>
-      <div class='header-actions'>
+      <div class='page-header-actions header-actions'>
         <el-tag :type='phaseType' effect='plain' size='large'>{{ phaseLabels[state.phase] || state.phase }}</el-tag>
         <el-button :loading='loading' :disabled='isBusy' @click='loadStatus'>
           <el-icon><RefreshCw /></el-icon>刷新状态
@@ -224,6 +223,7 @@ onBeforeUnmount(stopPolling)
     </section>
 
     <section class='workspace-section'>
+      <!-- 已处于 .workspace-section 卡片内，不再叠加 .panel-tabs（避免双层卡片） -->
       <el-tabs class='storage-tabs'>
         <el-tab-pane name='candidates'>
           <template #label><el-icon><List /></el-icon><span>候选项 {{ candidates.length }}</span></template>
@@ -298,47 +298,25 @@ onBeforeUnmount(stopPolling)
   color: var(--app-text);
 }
 
+/* 标题栏结构与其余视图一致（全局 .page-header/.page-title/.page-subtitle） */
 .storage-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 24px;
-  padding: 18px 0 22px;
-  border-bottom: 1px solid var(--app-border);
+  align-items: center;
+  gap: 12px;
 }
+.header-actions { gap: 8px; }
 
-.storage-header h1 {
-  margin: 5px 0 7px;
-  font-size: 26px;
-  line-height: 1.25;
-  letter-spacing: 0;
-}
-
-.storage-header p,
 .section-heading span {
   margin: 0;
   color: var(--app-text-secondary);
   font-size: 13px;
 }
 
-.eyebrow {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--app-accent-1, #409eff);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.eyebrow svg { width: 15px; }
-.header-actions { display: flex; align-items: center; gap: 10px; }
-
+/* 区块卡片：内边距与 .el-card 默认（20px）对齐，纵向间距由 .page-container 的 gap 统一 */
 .policy-section,
 .workspace-section,
 .logs-section,
 .progress-section {
-  padding: 22px;
-  margin-bottom: 16px;
+  padding: 20px;
   border: 1px solid var(--app-border);
   border-radius: 12px;
   background: rgba(var(--app-dim-color), var(--app-card-opacity, 1));
@@ -438,7 +416,7 @@ onBeforeUnmount(stopPolling)
 
 .storage-tabs :deep(.el-tabs__header) { margin-bottom: 16px; }
 .storage-tabs :deep(.el-tabs__item) { gap: 6px; }
-.storage-tabs :deep(.el-table) { border: 1px solid var(--app-border); border-radius: 6px; overflow: hidden; }
+.storage-tabs :deep(.el-table) { border: 1px solid var(--app-border); border-radius: 8px; overflow: hidden; }
 
 .category-strip {
   display: flex;
@@ -446,7 +424,7 @@ onBeforeUnmount(stopPolling)
   margin-bottom: 14px;
   overflow-x: auto;
   border: 1px solid var(--app-border);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--app-border);
 }
 
@@ -471,7 +449,7 @@ onBeforeUnmount(stopPolling)
   padding: 11px 13px;
   box-sizing: border-box;
   border: 1px solid var(--app-log-border);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--app-log-bg);
   color: var(--app-log-text);
   font: 12px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace;
@@ -491,8 +469,7 @@ onBeforeUnmount(stopPolling)
 
 @media (max-width: 700px) {
   .storage-page { padding: 12px; }
-  .storage-header { flex-direction: column; gap: 14px; padding-top: 8px; }
-  .storage-header h1 { font-size: 22px; }
+  .storage-header { flex-direction: column; align-items: stretch; gap: 14px; }
   .header-actions { width: 100%; justify-content: space-between; }
   .policy-section, .workspace-section, .logs-section, .progress-section { padding: 16px; }
   .section-heading { align-items: flex-end; }
