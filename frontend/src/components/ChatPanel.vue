@@ -12,8 +12,10 @@
             </span>
           </el-tooltip>
           <el-checkbox v-model="showThinking" value="show-thinking" size="small" class="think-toggle">显示思考过程</el-checkbox>
-          <el-tooltip content="把整个对话复制为 Markdown（含参考来源）" placement="top">
-            <el-button v-if="messages.length" size="small" text :icon="Copy" @click="copyConversation">复制对话</el-button>
+          <!-- ⚠ v-if 必须在 el-tooltip 外层：包内部按钮会让无消息时 tooltip 没有子节点，
+               触发 Element Plus 的 [ElOnlyChild] no valid child node found 警告 -->
+          <el-tooltip v-if="messages.length" content="把整个对话复制为 Markdown（含参考来源）" placement="top">
+            <el-button size="small" text :icon="Copy" @click="copyConversation">复制对话</el-button>
           </el-tooltip>
           <el-button v-if="messages.length" size="small" text type="danger" @click="onClear">清空当前</el-button>
         </div>
