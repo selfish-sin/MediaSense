@@ -417,6 +417,11 @@ body [contenteditable="true"] {
 .row-more-btn {
   margin-left: 12px;
 }
+/* el-dropdown 默认 vertical-align: top，会让「更多」比同行主操作按钮高 5px（视觉不齐）；
+   选择器带 .el-table 是为压过 Element Plus 按需注入的同特异度规则（同特异度时后加载者胜） */
+.el-table .row-more-dropdown {
+  vertical-align: middle;
+}
 .row-more-arrow {
   margin-left: 2px;
   font-size: 12px;

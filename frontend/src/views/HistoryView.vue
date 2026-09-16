@@ -407,7 +407,7 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
             <el-button size="small" type="primary" link :icon="Eye" @click="handlePrimaryAction(row)">
               {{ actionFor(row).primaryLabel }}
             </el-button>
-            <el-dropdown trigger="click" @command="(cmd) => handleRowCommand(cmd, row)">
+            <el-dropdown class="row-more-dropdown" trigger="click" @command="(cmd) => handleRowCommand(cmd, row)">
               <el-button size="small" link class="row-more-btn">
                 更多<el-icon class="row-more-arrow"><ArrowDown /></el-icon>
               </el-button>

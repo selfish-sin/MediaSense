@@ -352,7 +352,7 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
       <el-table-column label="操作" min-width="130" fixed="right">
         <template #default="{ row }">
           <el-button size="small" link type="primary" @click="openEditDialog(row)">编辑</el-button>
-          <el-dropdown trigger="click" @command="(cmd) => handleRowCommand(cmd, row)">
+          <el-dropdown class="row-more-dropdown" trigger="click" @command="(cmd) => handleRowCommand(cmd, row)">
             <el-button size="small" link class="row-more-btn">
               更多<el-icon class="row-more-arrow"><ArrowDown /></el-icon>
             </el-button>
