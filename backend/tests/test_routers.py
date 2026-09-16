@@ -912,6 +912,77 @@ class TestChatRouter:
         resp = client.get("/api/jobs/j1/chat/history")
         assert resp.status_code == 200
 
+    def _stub_stream(self, monkeypatch, outcome):
+        """追问流式端点的公共替身：DB / 搜索 / 模型调用全部短路，只观察 SSE 事件"""
+        monkeypatch.setattr("routers.chat.get_job", lambda job_id: {
+            "id": job_id, "status": "completed", "result_text": "已有分析",
+            "files": {}, "model": "m1",
+        })
+        monkeypatch.setattr("routers.chat.get_model_by_key", lambda key: {
+            "key": "m1", "model_id": "m1",
+            "endpoint": "https://x.example.com/v1/chat/completions",
+            "api_key": "sk-x", "auth_type": "bearer",
+        })
+        monkeypatch.setattr("routers.chat._ensure_session", lambda *a, **k: None)
+        monkeypatch.setattr("routers.chat._get_session_history", lambda *a, **k: [])
+        monkeypatch.setattr("routers.chat._insert_chat", lambda *a, **k: 1)
+        monkeypatch.setattr("routers.chat._maybe_rename_session", lambda *a, **k: None)
+
+        async def _fake_collect(query, **kwargs):
+            return outcome
+
+        monkeypatch.setattr("routers.chat.web_search_collect", _fake_collect)
+
+        # 模型调用短路（测试只关心 search 事件，不必构造流式响应）
+        def _boom(*a, **k):
+            raise RuntimeError("模型调用被测试短路")
+
+        monkeypatch.setattr("routers.chat.httpx.AsyncClient", _boom)
+
+        # 断连探测固定为 False，避免 TestClient 的 receive 通道差异导致用例不稳定
+        async def _not_disconnected(self):
+            return False
+
+        monkeypatch.setattr("starlette.requests.Request.is_disconnected", _not_disconnected)
+
+    def test_chat_stream_reports_search_failure(self, client, monkeypatch):
+        """★ 回归锚点：联网检索失败必须经 SSE 显式透出（此前静默 → 开关形同虚设）"""
+        from services.web_search import SearchOutcome
+
+        self._stub_stream(monkeypatch, SearchOutcome(
+            error="未配置智谱 API Key（…）；DuckDuckGo 兜底不可用（未安装 ddgs 包）"))
+        resp = client.post("/api/jobs/j1/chat/sessions/s1/stream",
+                           json={"content": "问题", "enable_search": True})
+
+        assert resp.status_code == 200
+        assert '"type": "search", "status": "searching"' in resp.text
+        assert '"type": "search", "status": "failed"' in resp.text
+        assert "未配置智谱 API Key" in resp.text
+
+    def test_chat_stream_reports_search_hits(self, client, monkeypatch):
+        from services.web_search import SearchOutcome
+
+        self._stub_stream(monkeypatch, SearchOutcome(
+            sources=[{"title": "A", "url": "https://a.com", "snippet": "s"}],
+            text="[1] A", provider="zhipu"))
+        resp = client.post("/api/jobs/j1/chat/sessions/s1/stream",
+                           json={"content": "问题", "enable_search": True})
+
+        assert resp.status_code == 200
+        assert '"status": "ok"' in resp.text
+        assert '"provider": "zhipu"' in resp.text
+        assert '"count": 1' in resp.text
+
+    def test_chat_stream_without_search_emits_no_search_event(self, client, monkeypatch):
+        from services.web_search import SearchOutcome
+
+        self._stub_stream(monkeypatch, SearchOutcome(provider="zhipu"))
+        resp = client.post("/api/jobs/j1/chat/sessions/s1/stream",
+                           json={"content": "问题", "enable_search": False})
+
+        assert resp.status_code == 200
+        assert '"type": "search"' not in resp.text
+
 
 # ── ASR 状态 ──
 class TestAsrStatusRouter:

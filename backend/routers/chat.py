@@ -4,7 +4,8 @@ YouTube Tool V2 - 追问聊天路由（SSE 流式）
 特性：
   - 多会话：每个视频可有多个独立对话线程（chat_sessions），每条复用该视频原文/AI结果作上下文
   - SSE 流式输出（token 级），并捕获思考过程（reasoning_content / thinking）
-  - 联网搜索：智谱 web_search 优先，DDGS 兜底；结构化引用源返回前端
+  - 联网搜索：`services/web_search` 单点（智谱独立 Web Search API 优先，DuckDuckGo 免 Key 兜底）；
+    结构化引用源返回前端，检索失败原因经 SSE `search` 事件显式透出（不静默）
   - 编辑 / 重生成 / 中断残回答 均落库
 """
 import asyncio
@@ -22,7 +23,7 @@ from pydantic import BaseModel
 from db.database import get_connection
 from db.job_repo import get_job
 from db.model_repo import get_model_by_key
-from services.research_processor import web_search_collect
+from services.web_search import web_search_collect
 from services.httpx_errors import describe_http_response
 from config import DEFAULT_MODEL
 
@@ -423,11 +424,30 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
 
             search_text = ""
             if msg.enable_search:
+                # 联网检索：结果与失败原因都推给前端（此前失败静默返回空 → 开关形同虚设）
+                yield _sse({"type": "search", "status": "searching"})
                 try:
-                    sources, search_text = await web_search_collect(question, result_ctx)
+                    outcome = await web_search_collect(question)
                 except Exception as e:
-                    logger.warning(f"联网搜索异常: {e}")
-                    sources, search_text = [], ""
+                    # web_search_collect 内部已兜异常，这里只防它自身出 bug：也要可见，不吞
+                    logger.exception("联网搜索异常")
+                    yield _sse({"type": "search", "status": "failed", "message": str(e)[:300]})
+                else:
+                    sources = outcome.sources
+                    search_text = outcome.text
+                    if outcome.ok:
+                        logger.info(
+                            f"追问联网搜索命中 {len(sources)} 条来源（{outcome.provider}）"
+                        )
+                        yield _sse({
+                            "type": "search", "status": "ok",
+                            "provider": outcome.provider, "count": len(sources),
+                        })
+                    else:
+                        logger.warning(f"追问联网搜索不可用: {outcome.error}")
+                        yield _sse({
+                            "type": "search", "status": "failed", "message": outcome.error,
+                        })
 
             messages = _build_messages(
                 original_ctx, result_ctx, history, question, search_text, msg.regenerate
