@@ -390,17 +390,6 @@ PROMPT_DIMENSIONS = {
 - 适合需要反复研读的场景""",
             },
             {
-                "key": "textbook",
-                "name": "教科书模式",
-                "desc": "章→节→知识点三层结构，配练习",
-                "template": """【深度要求】
-教科书模式：生成结构化教材，章→节→知识点三层递进。
-- 自动分析视频结构，划分章节
-- 每节包含：概述、核心概念表、知识点详解（400-600字/个）、注意事项、思考练习
-- 知识点旁保留原视频时间戳
-- 适合需要脱离视频系统学习的场景""",
-            },
-            {
                 "key": "research",
                 "name": "深度研究",
                 "desc": "提取主题→逐主题深度扩展→研究博文",
@@ -580,22 +569,6 @@ RECIPES = [
             "depth": "deep",
             "tone": "学术严谨",
             "word_count": "10000",
-            "language": "简体中文",
-        },
-    },
-    {
-        "key": "textbook_mode",
-        "name": "📖 教科书模式",
-        "desc": "章→节→知识点三层结构，配练习",
-        "dimensions": {
-            "role": "academic",
-            "mode": "social_science",
-            "rules": "deep",
-            "output": "chapters",
-            "content_type": "lecture",
-            "depth": "textbook",
-            "tone": "学术严谨",
-            "word_count": "20000",
             "language": "简体中文",
         },
     },

@@ -768,7 +768,6 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
     from services.ai_processor import (
         ai_process, generate_tags, TaskCancelledError,
     )
-    from services.textbook_processor import textbook_process
     from services.research_processor import research_process
 
     # 阻止系统睡眠
@@ -1054,7 +1053,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             # ★ 模块化提示词：从 options 中提取 dimensions（由 create_job 存入）
             dimensions = options.get('dimensions')
 
-            # ★ 教科书/深度研究模式检测
+            # ★ 深度研究模式检测
             # Long-text auto-routing: if default model and text >=5000 chars, switch to deepseek
             if model == DEFAULT_MODEL and len(text_content) >= 5000:
                 from db.model_repo import get_model_by_key
@@ -1062,25 +1061,13 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                     model = 'deepseek-v4-flash'
                     await emit_log(sio, job_id, f'Long text ({len(text_content)} chars), auto-switched model: {model}')
 
-            is_textbook = (
-                summary_type == 'textbook'
-                or (dimensions and isinstance(dimensions, dict) and dimensions.get('depth') == 'textbook')
-            )
             is_research = (
                 summary_type in ('deep_research', 'research')
                 or (dimensions and isinstance(dimensions, dict) and dimensions.get('depth') == 'research')
             )
 
             # ★ 路由：根据模式选择处理管线 + 超时
-            if is_textbook:
-                result_text, in_tok, out_tok = await asyncio.wait_for(
-                    textbook_process(
-                        text_content, title=title or options.get('input_url', '未命名'), model=model,
-                        sio=sio, job_id=job_id,
-                    ),
-                    timeout=3600.0,
-                )
-            elif is_research:
+            if is_research:
                 result_text, in_tok, out_tok = await asyncio.wait_for(
                     research_process(
                         text_content, title=title or options.get('input_url', '未命名'), model=model,

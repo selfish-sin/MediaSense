@@ -137,7 +137,6 @@ SCENARIOS = {
     "study":         {"name": "📝 学习做笔记",      "word_count": "3000",    "tone": "学术严谨", "format": "Markdown", "purpose": "学习笔记", "summary_type": "notes"},
     "skim":          {"name": "👀 快速扫一眼",      "word_count": "1000",    "tone": "通俗科普", "format": "要点列表", "purpose": "快速浏览", "summary_type": "summary"},
     "deep_research": {"name": "🔬 深度研究分析",    "word_count": "不限",    "tone": "学术严谨", "format": "结构化大纲","purpose": "深度分析", "summary_type": "deep_research"},
-    "textbook":      {"name": "📖 教科书模式",      "word_count": "20000",   "tone": "学术严谨", "format": "结构化大纲","purpose": "教材编写", "summary_type": "textbook"},
     "podcast":       {"name": "🎤 播客/采访整理",    "word_count": "5000",    "tone": "口语化",  "format": "要点列表", "purpose": "素材收集", "summary_type": "qa"},
 }
 
