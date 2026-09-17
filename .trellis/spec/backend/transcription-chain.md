@@ -30,7 +30,9 @@
 
 - **B站**：`force_transcribe=true` 跳过字幕直接转录；否则 `extract_bilibili_subtitles`
   （CC + AI 双路径，旧版 x/player/v2 优先，412 风控六项加固：串行限流≥1s/wbi 刷新/完整
-  Chrome UA+buvid/明确无字幕才跳 yt-dlp）。拿到字幕**不直接信**，过两道防错位校验：
+  Chrome UA+buvid/明确无字幕才跳 yt-dlp）。字幕选择单点 `downloader._pick_zh_subtitle`：
+  **中文 CC（zh-* 无 ai- 前缀，创作者人工上传永不旧）优先 → 中文 AI（ai-zh）→ 任意 AI
+  （外文视频兜底）**，绝不把 ai-en/ai-jp 误当中文。拿到字幕**不直接信**，过两道防错位校验：
   ①时长校验（字幕时间跨度 vs 视频时长，明显不符即拒）；
   ②内容抽查（默认开，`subtitle_check=false` 关）：**只下载开头 90s 片段**
   （`download_video(max_seconds=90)` → `--download-sections`，实测加固姿势 3.3s/6.9MB；
