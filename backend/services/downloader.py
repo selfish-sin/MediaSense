@@ -272,6 +272,30 @@ def detect_platform(url: str) -> Tuple[str, bool]:
 
 
 # ============ B站字幕提取 ============
+def _pick_zh_subtitle(subtitles: list) -> list:
+    """从中文字幕列表里按优先级挑可用字幕，返回新的排序后列表。
+
+    优先级（CC 人工上传永不旧，必须排 AI 之前）：
+    1. 中文 CC 字幕（lan 如 zh-CN/zh-Hans，无 ai- 前缀）
+    2. 中文 AI 字幕（ai-zh）
+    3. 兜底：任意 AI 字幕（视频本身可能是外文）
+    4. 空列表（调用方走转录流程）
+    绝不把 ai-en / ai-jp 之类的非中文字幕误当中文用。
+    """
+    def _lan(s):
+        return (s.get('lan') or '').lower()
+
+    zh_subs = [
+        s for s in subtitles
+        if _lan(s).startswith('zh') or _lan(s).startswith('ai-zh')
+    ]
+    # CC（非 ai- 前缀）排前面，AI 字幕排后面
+    zh_subs.sort(key=lambda s: _lan(s).startswith('ai-'))
+    if not zh_subs:
+        zh_subs = [s for s in subtitles if _lan(s).startswith('ai')]
+    return zh_subs
+
+
 def _fetch_subtitles_via_player_v2(aid, cid, bvid):
     """同步调用 B 站播放器 API 获取字幕列表。
 
@@ -475,20 +499,7 @@ async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_i
         # sub_data 格式: {"allow_submit":..., "lan":..., "subtitles":[{lan, lan_doc, subtitle_url, ai_status}], ...}
         subtitles = sub_data.get('subtitles', []) if isinstance(sub_data, dict) else []
 
-        # 优先选中文：中文AI字幕(ai-zh) / 中文CC字幕(zh-*) 都算；
-        # 绝不把 ai-en / ai-jp 之类的非中文字幕误当中文用
-        zh_subs = [
-            s for s in subtitles
-            if (s.get('lan') or '').lower().startswith('zh')
-            or (s.get('lan') or '').lower().startswith('ai-zh')
-        ]
-        if not zh_subs:
-            # 退而求其次：任意 AI 字幕（视频本身可能是外文）
-            zh_subs = [s for s in subtitles if (s.get('lan') or '').lower().startswith('ai')]
-        if not zh_subs:
-            zh_subs = subtitles
-
-        return aid, cid, video_title, zh_subs, video_duration, api_ok
+        return aid, cid, video_title, _pick_zh_subtitle(subtitles), video_duration, api_ok
 
     try:
         aid, cid, video_title, zh_subs, video_duration, api_ok = await asyncio.to_thread(_do_extract)

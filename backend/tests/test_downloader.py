@@ -17,6 +17,7 @@ from services.downloader import (
     _subtitle_head_text,
     _text_similarity,
     verify_subtitle_against_audio,
+    _pick_zh_subtitle,
     _bili_headers,
     _ensure_buvid,
     PLATFORM_CONFIG,
@@ -290,6 +291,51 @@ class TestExtractBilibiliSubtitlesYtdlp:
 
         assert subtitle == {}
         assert api_ok is False  # 接口全部被风控：状态未知，必须走 yt-dlp/Whisper 兜底
+
+
+class TestPickZhSubtitle:
+    """B站字幕选择：CC（创作者上传）优先于 AI 字幕"""
+
+    def test_cc_before_ai(self):
+        subs = [
+            {"lan": "ai-zh", "lan_doc": "AI字幕"},
+            {"lan": "zh-CN", "lan_doc": "CC字幕"},
+        ]
+        picked = _pick_zh_subtitle(subs)
+        assert picked[0]["lan"] == "zh-CN"  # CC 永远排 AI 前面
+
+    def test_keeps_ai_when_no_cc(self):
+        subs = [{"lan": "ai-zh"}, {"lan": "ai-zh-Hans"}]
+        picked = _pick_zh_subtitle(subs)
+        assert [s["lan"] for s in picked] == ["ai-zh", "ai-zh-Hans"]
+
+    def test_never_picks_foreign_ai_as_zh(self):
+        subs = [
+            {"lan": "ai-en"},
+            {"lan": "ai-jp"},
+            {"lan": "zh-Hans"},
+        ]
+        picked = _pick_zh_subtitle(subs)
+        assert picked[0]["lan"] == "zh-Hans"
+        assert "ai-en" not in [s["lan"] for s in picked]
+
+    def test_fallback_to_any_ai_for_foreign_video(self):
+        subs = [{"lan": "ai-en"}, {"lan": "ai-jp"}]
+        picked = _pick_zh_subtitle(subs)
+        assert picked == subs  # 无中文字幕时，外文视频兜底任意 AI 字幕
+
+    def test_empty_input_returns_empty(self):
+        assert _pick_zh_subtitle([]) == []
+
+    def test_keeps_original_order_within_same_kind(self):
+        subs = [
+            {"lan": "ai-zh"},
+            {"lan": "zh-TW"},
+            {"lan": "ai-zh-Hans"},
+            {"lan": "zh-CN"},
+        ]
+        picked = _pick_zh_subtitle(subs)
+        assert [s["lan"] for s in picked] == ["zh-TW", "zh-CN", "ai-zh", "ai-zh-Hans"]
 
 
 class TestBiliFingerprint:
