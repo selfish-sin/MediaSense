@@ -880,15 +880,15 @@ class TestAcquireBilibiliSubtitle:
         ]
 
     @pytest.mark.asyncio
-    async def test_retries_truncated_body_after_refreshing_url(self, tmp_path, monkeypatch):
-        """首次返回"假残缺" → 换新 auth_key 链接重试 → 拿到完整内容"""
+    async def test_retries_degraded_body_after_refreshing_url(self, tmp_path, monkeypatch):
+        """首次只回零星几条（风控降级形态）→ 换新 auth_key 链接重试 → 拿到完整内容"""
         calls = {'fetch': 0, 'refresh': 0}
-        truncated = [{'from': i * 5, 'to': i * 5 + 5, 'content': 'x'} for i in range(20)]
+        degraded = [{'from': i * 5, 'to': i * 5 + 5, 'content': 'x'} for i in range(3)]
         full = self._full_body()
 
         async def fake_fetch(url, bvid=''):
             calls['fetch'] += 1
-            return truncated if calls['fetch'] == 1 else full
+            return degraded if calls['fetch'] == 1 else full
 
         async def fake_wait(_seconds):
             return None
@@ -909,6 +909,37 @@ class TestAcquireBilibiliSubtitle:
         assert result['body_count'] == len(full)
         assert calls == {'fetch': 2, 'refresh': 1}
         assert (tmp_path / 'bilibili_subtitle.srt').exists()
+
+    @pytest.mark.asyncio
+    async def test_incomplete_source_body_is_not_retried(self, tmp_path, monkeypatch):
+        """条目不少但覆盖不足 = B站该视频字幕本身生成不全 → **一次都不重试**。
+
+        实战教训（2026-09-21）：BV17V4y1S7i1 的 ai-zh 只有 477s/3101s，
+        旧逻辑换链接重试 7 次、耗时数分钟，拿到的仍是同一份残缺内容。
+        """
+        calls = {'fetch': 0, 'refresh': 0}
+        partial = [{'from': i * 5, 'to': i * 5 + 5, 'content': 'x'} for i in range(95)]  # 覆盖 475s
+
+        async def fake_fetch(url, bvid=''):
+            calls['fetch'] += 1
+            return partial
+
+        def fake_refresh(aid, cid, bvid, lan):
+            calls['refresh'] += 1
+            return ['https://cdn/new.json']
+
+        monkeypatch.setattr('services.downloader._fetch_subtitle_body', fake_fetch)
+        monkeypatch.setattr('services.downloader._subtitle_retry_wait',
+                            lambda _s: asyncio.sleep(0))
+        monkeypatch.setattr('services.downloader._refresh_subtitle_urls', fake_refresh)
+
+        result = await _acquire_bilibili_subtitle(
+            [{'lan': 'ai-zh', 'subtitle_url': 'https://cdn/a.json'}],
+            1, 2, 'BV1abc123456', 3101.0, tmp_path)
+
+        assert result['success'] is False
+        assert result['reason'] == 'subtitle_incomplete'
+        assert calls == {'fetch': 1, 'refresh': 0}  # 不再无谓重试
 
     @pytest.mark.asyncio
     async def test_falls_through_to_next_candidate_track(self, tmp_path, monkeypatch):

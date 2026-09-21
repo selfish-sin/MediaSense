@@ -361,6 +361,13 @@ _BILI_SUBTITLE_RETRY_JITTER = float(os.environ.get('BILI_SUBTITLE_RETRY_JITTER',
 # 纯请求侧校验：只用"视频时长 + 字幕时间轴"两个接口数据即可判断，不需要音频/ASR。
 _AI_SUBTITLE_MIN_COVERAGE = float(os.environ.get('BILI_SUBTITLE_MIN_COVERAGE', '0.75'))
 
+# 硬校验不过时，"零星几条"与"条目不少只是覆盖不足"要分开处理（2026-09-21 实战教训）：
+# - 零星几条（≤ 本阈值）是**风控降级**的典型形态（轨道在、body 被截成几条，
+#   稍后同视频能拿到完整内容）→ 换新链接重试有意义。
+# - 条目不少但覆盖不足 = **B站该视频字幕本身生成不全**（实测 BV17V4y1S7i1 的 ai-zh
+#   只有 477s/3101s）→ 换链接拿到的还是同一份内容，重试 9 次白等数分钟仍失败。
+_SUBTITLE_DEGRADED_MAX_COUNT = int(os.environ.get('BILI_SUBTITLE_DEGRADED_MAX_COUNT', '5'))
+
 
 def _subtitle_retry_delay(attempt: int) -> float:
     """第 attempt 次尝试之后到下一次的等待秒数（attempt 从 1 起；首次不等待）。
@@ -867,7 +874,12 @@ async def _acquire_bilibili_subtitle(subtitles, aid, cid, bvid, video_duration,
                                      output_dir: Path, sio=None, job_id: str = '') -> dict:
     """候选字幕轨上「下载 → 校验 → 换链接重试」，直到拿到完整可用的一份。
 
-    重试触发条件：链接过期/网络失败、内容为空、时间覆盖不符、疑似"假残缺"。
+    **两类失败语义不同，别混用重试**（2026-09-21 实战教训）：
+    - 可重试：下载失败 / HTTP 错误 / 链接过期（换新 auth_key 有意义）、疑似"假残缺"
+      （风控降级时 body 只零星几条，稍后同视频能拿到完整内容）。
+    - **不可重试**：`_validate_subtitle_body` 硬校验不过（覆盖不足/超时长）——
+      同一视频换链接仍是同一份内容，重试纯属白等，直接跳下一条候选轨。
+
     每次重试都重新请求接口换新链接（新 auth_key），优先用尚未试过的链接；
     一条轨重试耗尽后换下一条候选轨。宁缺勿错：全部拿不到完整内容就返回 success=False
     让调用方走转录，而不是把残缺/错位字幕当成品。
@@ -908,8 +920,19 @@ async def _acquire_bilibili_subtitle(subtitles, aid, cid, bvid, video_duration,
                 continue
             ok, reason = _validate_subtitle_body(body, video_duration, is_ai)
             if not ok:
-                await _log(f'  ⚠ 字幕 {lan} 第{attempt}次内容校验未过（{reason}），换新链接重试')
-                continue
+                # ★ 内容类失败分两种（2026-09-21 实战教训）：
+                #   ①零星几条（≤ _SUBTITLE_DEGRADED_MAX_COUNT）= 风控降级，稍后能拿到完整内容
+                #     → 换新链接重试有意义；
+                #   ②条目不少但覆盖不足 / 内容为空 = B站该视频字幕本身生成不全（实测
+                #     BV17V4y1S7i1 的 ai-zh 只有 477s/3101s）→ 换链接拿到的还是同一份内容，
+                #     重试 9 次只是白等 2~5 分钟仍失败，直接放弃该轨换下一条候选。
+                count_now, _cov = _subtitle_body_stats(body)
+                if 0 < count_now <= _SUBTITLE_DEGRADED_MAX_COUNT:
+                    await _log(f'  ⚠ 字幕 {lan} 第{attempt}次仅 {count_now} 条（疑似风控降级），'
+                               f'换新链接重试')
+                    continue
+                await _log(f'  ⚠ 字幕 {lan} 内容校验未过（{reason}），放弃该轨换下一条候选')
+                break
             incomplete, why = _is_subtitle_body_incomplete(body, video_duration, is_ai)
             if not incomplete:
                 if attempt > 1:
