@@ -30,10 +30,13 @@
 
 - **B站**：`force_transcribe=true` 跳过字幕直接转录；否则 `extract_bilibili_subtitles`
   （CC + AI 双路径，旧版 x/player/v2 优先，412 风控六项加固：串行限流≥1s/wbi 刷新/完整
-  Chrome UA+buvid/明确无字幕才跳 yt-dlp）。字幕选择单点 `downloader._pick_zh_subtitle`：
+  Chrome UA+buvid/明确无字幕才跳 yt-dlp；**登录态被 412 时匿名兜底重试一次**——实测带
+  SESSDATA 可能比匿名更严）。字幕选择单点 `downloader._pick_zh_subtitle`：
   **中文 CC（zh-* 无 ai- 前缀，创作者人工上传永不旧）优先 → 中文 AI（ai-zh）→ 任意 AI
-  （外文视频兜底）**，绝不把 ai-en/ai-jp 误当中文。拿到字幕**不直接信**，过两道防错位校验：
-  ①时长校验（字幕时间跨度 vs 视频时长，明显不符即拒）；
+  （外文视频兜底）**，同类内**简体优先**（zh/zh-Hans/zh-CN 排在 zh-TW/zh-Hant 之前），
+  绝不把 ai-en/ai-jp 误当中文；**生成中（`ai_status` != 2）的 AI 字幕直接剔除**
+  （body 尚未产出，选中只会拿到空/半成品）。拿到字幕**不直接信**，过两道防错位校验：
+  ①时长校验（字幕时间跨度 vs 视频时长，明显不符即拒；见下"请求侧取链加固"）；
   ②内容抽查（默认开，`subtitle_check=false` 关）：**只下载开头 90s 片段**
   （`download_video(max_seconds=90)` → `--download-sections`，实测加固姿势 3.3s/6.9MB；
   片段放 `job_dir/_subtitle_check/` 子目录防断点续传误当完整音频复用；片段下载失败自动
@@ -45,6 +48,22 @@
   **抽查绝不消耗付费额度**：provider 必须显式传（`transcribe_file` 的缺省值已是"免费优先/无免费则报错"，
   不再是 mimo 付费档）。
   片段**不作转录输入与素材**：校验失败时转录由 `_acquire_audio` 重新下载完整音频。
+- **请求侧取链加固（2026-09-21，纯请求侧、不依赖音频/抽查）**：字幕"给错/给残"在拿到 body
+  之前就可自愈，全部收敛在 `_acquire_bilibili_subtitle`（单一出口，勿在别处再实现一遍）：
+  - **候选轨依次尝试**（`_pick_zh_subtitle` 排序后取前 4 条）：首选轨不可用不再直接放弃整条字幕；
+  - **换新链接重试** `_refresh_subtitle_urls`：`subtitle_url` 带时效 `auth_key`，过期即 403，
+    重试前必须重新请求接口换链接（旧链接只会一直失败），优先用尚未试过的链接；
+  - **时间覆盖自校验** `_validate_subtitle_body(body, video_duration, is_ai)`：只用"视频时长 +
+    字幕时间轴"两个接口数据判断，**不跑 ASR**。AI 字幕覆盖率下限 `0.75×时长`
+    （`BILI_SUBTITLE_MIN_COVERAGE` 可调），CC 保持宽松 `0.5×时长-30s`（创作者可只传片段）；
+    超出 `时长+120s` 判非本视频字幕；
+  - **"假残缺"判定** `_is_subtitle_body_incomplete`：风控降级会返回"轨道在、body 只有零星几条"
+    （同一视频稍后复查能拿到完整内容），命中即重试；密度判断（<1 条/30s）**只对 AI 字幕生效**
+    （CC 可以很稀疏，不误杀）；
+  - 全部候选与重试都拿不到完整内容时返回 `success=False`（`reason=subtitle_incomplete`）→
+    调用方走转录，**宁缺勿错**。
+  - 参数字段名/顺序：`_BILI_SUBTITLE_MAX_ATTEMPTS`（默认 4）、`_BILI_SUBTITLE_RETRY_BASE`（默认
+    3s，间隔 = base×(attempt-1)）、`_subtitle_retry_wait()` 单点可 patch。
 - **YouTube**：`extract_youtube_subtitles` 拿平台字幕，逻辑同上（无抽查）。
 - 其他平台：直接下载 → 引擎路由。
 - **音频获取单点**：`main._acquire_audio`（断点续传复用 → 按 options 下载），成功返回的
@@ -294,8 +313,21 @@ Whisper **base 是链路里最弱一环**（`asr_whisper_model` 未设置时即�
    ③前端占位值也必须是免费档，并用显式 `engineTouched` 标记区分"用户主动选了付费档"与"仍是占位"。
    回归锁：`tests/test_cloud_asr.py::TestNoPaidDefault`、`tests/test_main.py::TestResolveTranscribeEngine`、
    `tests/test_transcriber.py::TestEngineValuesAndChains::test_unknown_engine_falls_back_to_free_chain_not_paid`。
+   17. **B站字幕只有 `x/player/v2`（含 wbi 变体）一条真源，别再找"第二数据源"**（2026-09-21 真网否证）：
+    `x/player/wbi/playurl` 与 `x/player/playurl` 的 `data.subtitle` **恒为 `null`**
+    （`fnval=4048` 与 `16` 都试过，`code=0` 且无字幕字段）——B站已不在播放地址接口返回字幕元数据；
+    网页 `__initial_state__`/`__playinfo__` 里的字幕同样是 playurl 的回显，一并无效。
+    所以"多源交叉取链"这条路不成立，字幕获取的对错只能靠**同一源内的新链接 + 时间覆盖自校验**兜。
+    （诊断脚本 `backend/scripts/diag/diag_bilibili*.py` 已覆盖该结论；勿重复实验。）
+   18. **AI 字幕"轨道在但 body 残"是 B站侧真实状态，不是接口调用姿势问题**（2026-09-21 实证）：
+    `BV1DZeK64ETW`（单分P，`duration=9687s`，`videos=1`）的 `ai-zh` body 只有 **74 条 / 覆盖 137s**，
+    多次刷新链接均为同一份 → 属于 B站生成不全，重试拿不到更全的内容，只能按 `subtitle_incomplete`
+    交转录。判据别放松成"有 body 就用"（那会把前 2 分钟字幕配 2.7 小时视频 = 错字幕）。
+    顺带：`x/web-interface/view` 的 `duration` 与 `pages[i].duration` 对单分P一致；多分P 时
+    `view.duration` 是**各分P之和**，而 `cid` 只对应第 1P——多P 视频取 `video_duration` 必须用
+    `pages[page-1].duration`，否则分P字幕会被整篇误判为"覆盖不足"。
 
-## 8. ASR 配置管理 API（模型管理页「ASR 模型」域，2026-09-15）
+   ## 8. ASR 配置管理 API（模型管理页「ASR 模型」域，2026-09-15）
 
 只读 `routers/asr.py`，写操作 `routers/asr_admin.py`（同挂 `/api/asr` 前缀，对外路径连续）：
 
