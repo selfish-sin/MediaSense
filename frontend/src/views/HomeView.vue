@@ -268,6 +268,10 @@ watch(() => jobStore.jobStatus, (newStatus) => {
 })
 
 // ============ 提交任务 ============
+// 提交请求进行中（仅用于按钮 loading；不再用 isProcessing 禁用按钮——
+// 任务进行中也要能继续提交，入队后逐个处理）
+const submitting = ref(false)
+
 async function handleSubmit() {
   // 同步自定义选项值
   syncCustomToOptions()
@@ -375,16 +379,28 @@ async function handleSubmit() {
     }
   }
 
-  // 重置结果区状态（editMode/resultTab 由结果组件自持，经 expose reset 复位）
-  resultPanelRef.value?.reset()
+  // ★ 串行队列：任务进行中再提交 = 入队（后端按提交顺序逐个处理）
+  //   入队不能重置当前任务的跟踪状态与结果区，否则用户正在看的进度/结果被冲掉
+  const queueMode = isProcessing.value && !!jobStore.currentJobId
 
+  // 重置结果区状态（仅空闲提交时；editMode/resultTab 由结果组件自持，经 expose reset 复位）
+  if (!queueMode) resultPanelRef.value?.reset()
+
+  submitting.value = true
   try {
-    await jobStore.submitJob(jobData)
-    ElMessage.success(rerunSourceJobId.value ? '已创建新的重新处理任务' : '任务已提交')
+    await jobStore.submitJob(jobData, { queueMode })
+    ElMessage.success(
+      queueMode
+        ? '已加入队列，将按顺序依次处理'
+        : (rerunSourceJobId.value ? '已创建新的重新处理任务' : '任务已提交')
+    )
     rerunSourceJobId.value = null
-    scrollToJobProgress()
+    progressPanelRef.value?.refreshQueue()
+    if (!queueMode) scrollToJobProgress()
   } catch (err) {
     ElMessage.error(err.message)
+  } finally {
+    submitting.value = false
   }
 }
 
@@ -578,14 +594,14 @@ const tokenPanelRef = ref(null)
     <!-- 提交按钮 -->
     <div class="submit-row">
       <!-- 按钮文案随任务目标联动：仅生成字幕模式下明示"生成字幕"，按下前最后确认一次 -->
+      <!-- 任务进行中不再禁用：继续提交 = 加入队列（串行逐个处理） -->
       <el-button
         class="submit-btn"
         type="primary"
         size="large"
-        :loading="isProcessing"
-        :disabled="isProcessing"
+        :loading="submitting"
         @click="handleSubmit"
-      >{{ isProcessing ? '处理中...' : (settings.jobGoal === 'subtitle_only' ? '生成字幕' : '开始处理') }}</el-button>
+      >{{ isProcessing ? '加入队列' : (settings.jobGoal === 'subtitle_only' ? '生成字幕' : '开始处理') }}</el-button>
       <el-button v-if="isProcessing" type="danger" size="large" plain @click="handleCancelJob">取消</el-button>
     </div>
 

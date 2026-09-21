@@ -14,9 +14,45 @@ import { onProgress, onLog } from '../utils/socket'
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
 import { jobsApi } from '../utils/api'
 import { isDialogCancel } from '../utils/errorNotice'
+import { useJobQueue } from '../composables/useJobQueue'
 import JobProgressDetail from './JobProgressDetail.vue'
+import JobQueueList from './JobQueueList.vue'
 
 const jobStore = useJobStore()
+
+// 处理队列（串行：running + pending），数据源 GET /api/jobs/queue
+const { queue, refreshQueue } = useJobQueue()
+
+/** 取消排队中的任务（pending 也支持取消：process_job 顶部会检查取消标记） */
+async function handleQueueCancel(jobId) {
+  try {
+    await ElMessageBox.confirm(
+      '取消该任务？正在排队中的任务会直接跳过，不占用后续顺序。',
+      '取消排队任务',
+      { type: 'warning', confirmButtonText: '确认取消', cancelButtonText: '继续等待' }
+    )
+  } catch (err) {
+    if (!isDialogCancel(err)) ElMessage.error(err?.message || err)
+    return
+  }
+  try {
+    await jobsApi.cancel(jobId)
+    ElMessage.success('已取消')
+    refreshQueue()
+  } catch (err) {
+    ElMessage.error(err?.message || err)
+  }
+}
+
+/** 切换到队列中另一个任务的进度视图（用户点击队列项） */
+async function handleQueueSelect(jobId) {
+  if (!jobId || jobId === jobStore.currentJobId) return
+  try {
+    await jobStore.loadJob(jobId)
+  } catch {
+    ElMessage.error('切换任务失败，请稍后重试')
+  }
+}
 
 // ── 任务进度日志（默认展开，当作进度条使用） ──
 const showJobProgress = ref(true)
@@ -84,13 +120,13 @@ function reveal() {
     })
   })
 }
-defineExpose({ reveal })
+defineExpose({ reveal, refreshQueue })
 </script>
 
 <template>
   <el-card
     id="job-progress-section"
-    v-if="isProcessing || jobStore.logs.length > 0 || jobStore.currentJobId"
+    v-if="isProcessing || jobStore.logs.length > 0 || jobStore.currentJobId || (queue && queue.total > 0)"
     class="wb-card progress-card"
     :class="{ 'progress-card--live': isProcessing }"
     shadow="never"
@@ -137,6 +173,14 @@ defineExpose({ reveal })
       :active="isProcessing"
       :job-status="jobStore.jobStatus"
       @clear="jobStore.clearLogs"
+    />
+
+    <!-- 串行队列：正在处理 + 排队中（受控，数据来自 useJobQueue） -->
+    <JobQueueList
+      :queue="queue"
+      :current-job-id="jobStore.currentJobId"
+      @cancel="handleQueueCancel"
+      @select="handleQueueSelect"
     />
   </el-card>
 </template>

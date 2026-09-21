@@ -170,6 +170,37 @@ describe('jobStore', () => {
       expect(store.isProcessing).toBe(false)
       expect(store.logs.at(-1).msg).toBe('提交失败: network down')
     })
+
+    it('queueMode：入队不重置当前任务状态（进度/结果不被冲掉）', async () => {
+      apiMocks.submit.mockResolvedValueOnce({ job_id: 'j2' })
+      const store = useJobStore()
+      // 模拟「任务 j1 正在跑」
+      store.currentJobId = 'j1'
+      store.jobStatus = 'downloading'
+      store.isProcessing = true
+      store.resultText = '当前结果'
+
+      const res = await store.submitJob({ url: 'https://y' }, { queueMode: true })
+
+      expect(res.job_id).toBe('j2')
+      expect(store.currentJobId).toBe('j1')
+      expect(store.jobStatus).toBe('downloading')
+      expect(store.resultText).toBe('当前结果')
+      expect(store.isProcessing).toBe(true)
+    })
+
+    it('queueMode：入队失败不把正在跑的任务标记为 failed', async () => {
+      apiMocks.submit.mockRejectedValueOnce(new Error('boom'))
+      const store = useJobStore()
+      store.currentJobId = 'j1'
+      store.jobStatus = 'downloading'
+      store.isProcessing = true
+
+      await expect(store.submitJob({ url: 'https://y' }, { queueMode: true })).rejects.toThrow('boom')
+
+      expect(store.jobStatus).toBe('downloading')
+      expect(store.isProcessing).toBe(true)
+    })
   })
 
   describe('loadJob / tryRestore', () => {

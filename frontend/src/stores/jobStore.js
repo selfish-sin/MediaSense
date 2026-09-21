@@ -193,13 +193,23 @@ export const useJobStore = defineStore('job', () => {
     aiTokens.value = [text]
   }
 
-  async function submitJob(jobData) {
-    reset()
-    isProcessing.value = true
-    jobStatus.value = 'pending'
+  async function submitJob(jobData, { queueMode = false } = {}) {
+    // ★ 串行队列模式（queueMode）：任务进行中再次提交只入队，**不重置**当前跟踪状态
+    //   —— 否则用户正在看的进度/日志会被新任务冲掉（旧行为提交即 reset，只能等）。
+    //   空闲提交走原逻辑（reset + 跟踪新任务）。
+    if (!queueMode) {
+      reset()
+      isProcessing.value = true
+      jobStatus.value = 'pending'
+    }
 
     try {
       const res = await jobsApi.submit(jobData)
+
+      if (queueMode) {
+        return res  // 入队：当前任务继续跑，队列面板负责展示排队项
+      }
+
       currentJobId.value = res.job_id
 
       if (res.existing_job && jobData.force_new) {
@@ -218,9 +228,12 @@ export const useJobStore = defineStore('job', () => {
       addLog(`任务已提交: ${res.job_id}`)
       return res
     } catch (err) {
-      jobStatus.value = 'failed'
-      addLog(`提交失败: ${err.message}`)
-      isProcessing.value = false
+      // 入队失败不能把当前正在跑的任务标记为 failed
+      if (!queueMode) {
+        jobStatus.value = 'failed'
+        addLog(`提交失败: ${err.message}`)
+        isProcessing.value = false
+      }
       throw err
     }
   }

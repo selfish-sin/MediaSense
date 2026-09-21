@@ -56,6 +56,8 @@ export const jobsApi = {
   running: () => api.get('/jobs/running'),
   batch: (data) => api.post('/jobs/batch', data),  // data: {urls, options, model, summary_type, do_summary, ...}
   batchStatus: (batchId) => api.get(`/jobs/batch/${batchId}`),
+  // 处理队列快照（running + pending，FIFO）：串行队列的单一数据源
+  queue: () => api.get('/jobs/queue'),
   searchTranscript: (q, limit = 50, maxMatchesPerJob = 5) =>
     api.get('/jobs/search/transcript', { params: { q, limit, max_matches_per_job: maxMatchesPerJob } }),
   summarize: (jobId, data) => api.post(`/jobs/${jobId}/summarize`, data),
