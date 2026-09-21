@@ -10,6 +10,7 @@ monkeypatch routers.export.get_job 提供假任务数据。
 import io
 import zipfile
 from unittest.mock import patch
+from urllib.parse import unquote
 
 import pytest
 from fastapi import FastAPI
@@ -58,9 +59,23 @@ class TestBatchExport:
 
         zf = zipfile.ZipFile(io.BytesIO(resp.content))
         names = sorted(zf.namelist())
-        assert names == ["AI总结_j2.md", "第一集_解说.md"]
-        assert zf.read("第一集_解说.md").decode("utf-8") == "# 第一集 解说\n\n## 总结\n这里是第一集的内容。\n"
-        assert zf.read("AI总结_j2.md").decode("utf-8") == "# AI总结_j2\n\n## 总结\n第二条结果。\n"
+        # ★ 命名统一后：保留可读标点与空格；无标题任务用「任务 {id}」而非 AI总结_{id}
+        assert names == ["任务 j2.md", "第一集 解说.md"]
+        assert zf.read("第一集 解说.md").decode("utf-8") == "# 第一集 解说\n\n## 总结\n这里是第一集的内容。\n"
+        assert zf.read("任务 j2.md").decode("utf-8") == "# 任务 j2\n\n## 总结\n第二条结果。\n"
+
+    def test_zip_download_name_uses_video_title(self, client, mock_get_job):
+        """ZIP 下载名（浏览器看到的）用视频名，不再带随机 hex 段。"""
+        resp = client.post("/api/export/batch", json={"job_ids": ["j1", "j2"]})
+        assert resp.status_code == 200
+        disposition = unquote(resp.headers["content-disposition"])
+        assert "第一集 解说等2个.zip" in disposition
+        assert "b921e7" not in disposition  # 旧随机段不得再出现
+
+    def test_single_video_zip_name_has_no_count_suffix(self, client, mock_get_job):
+        resp = client.post("/api/export/batch", json={"job_ids": ["j1"]})
+        disposition = unquote(resp.headers["content-disposition"])
+        assert "第一集 解说.zip" in disposition
 
     def test_duplicate_titles_get_numbered_suffix(self, client, monkeypatch):
         monkeypatch.setattr("routers.export.get_job", lambda jid: {

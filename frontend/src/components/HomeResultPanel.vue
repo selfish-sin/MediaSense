@@ -130,11 +130,14 @@ async function loadJobFiles(jobId) {
   }
 }
 
-function downloadJobFile(path) {
-  if (!path) return
-  // 通过 download API 下载
-  const url = `/api/download/file?path=${encodeURIComponent(path)}`
-  window.open(url, '_blank')
+function downloadJobFile(file) {
+  if (!file?.path) return
+  // ★ 传 job_id + label：后端用视频名生成可读下载名（{视频名}_{素材类型}.{ext}），
+  //   不再直接暴露磁盘名（audio.m4a / bilibili_subtitle.srt）
+  const params = new URLSearchParams({ path: file.path })
+  if (jobStore.currentJobId) params.set('job_id', jobStore.currentJobId)
+  if (file.label) params.set('label', file.label)
+  window.open(`/api/download/file?${params.toString()}`, '_blank')
 }
 
 // 任务完成时加载文件列表
@@ -295,7 +298,7 @@ defineExpose({ reset })
           </el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item v-for="f in jobFiles" :key="f.key" :command="f.path">
+              <el-dropdown-item v-for="f in jobFiles" :key="f.key" :command="f">
                 {{ f.label }} ({{ f.ext }})
               </el-dropdown-item>
             </el-dropdown-menu>

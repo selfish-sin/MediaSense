@@ -18,23 +18,13 @@ from fastapi.responses import FileResponse
 from models.schemas import ExportRequest, BatchExportRequest
 from db.job_repo import get_job
 from config import DATA_DIR
+from services.naming import export_basename, safe_basename
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 EXPORT_DIR = DATA_DIR / "exports"
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _sanitize_title(title: str) -> str:
-    """清理标题，用于文件名"""
-    if not title:
-        return "result"
-    # 移除特殊字符，保留中文/英文/数字/空格
-    clean = re.sub(r'[^\w\s\u4e00-\u9fff]', '', title)
-    clean = clean.strip().replace(' ', '_')
-    # 截断过长标题
-    return clean[:50] if len(clean) > 50 else clean or "result"
 
 
 def _md_to_plain_text(md_text: str) -> str:
@@ -119,8 +109,9 @@ async def export_docx(req: ExportRequest):
         raise HTTPException(status_code=400, detail="任务没有结果文本")
 
     title = job.get('title') or f"AI总结_{req.job_id}"
-    safe_title = _sanitize_title(title)
-    output_path = EXPORT_DIR / f"{safe_title}.docx"
+    # ★ 对外下载名走命名单点（保留标点、可读）；磁盘名附 job_id 短码防同标题互相覆盖
+    download_name = export_basename(job)
+    output_path = EXPORT_DIR / f"{download_name}_{req.job_id[:8]}.docx"
 
     try:
         from docx import Document
@@ -170,7 +161,7 @@ async def export_docx(req: ExportRequest):
 
     return FileResponse(
         path=str(output_path),
-        filename=f"{safe_title}.docx",
+        filename=f"{download_name}.docx",
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
 
@@ -185,25 +176,26 @@ async def export_pdf(req: ExportRequest):
         raise HTTPException(status_code=400, detail="任务没有结果文本")
 
     title = job.get('title') or f"AI总结_{req.job_id}"
-    safe_title = _sanitize_title(title)
+    download_name = export_basename(job)
+    disk_stem = f"{download_name}_{req.job_id[:8]}"
     result_text = job['result_text']
 
     # 尝试 weasyprint（需要 GTK/Pango，Windows 通常没有）
     try:
         from weasyprint import HTML
         html_content = _md_to_html(result_text, title)
-        pdf_path = EXPORT_DIR / f"{safe_title}.pdf"
+        pdf_path = EXPORT_DIR / f"{disk_stem}.pdf"
         def _gen():
             HTML(string=html_content).write_pdf(str(pdf_path))
         await asyncio.to_thread(_gen)
-        return FileResponse(path=str(pdf_path), filename=f"{safe_title}.pdf", media_type="application/pdf")
+        return FileResponse(path=str(pdf_path), filename=f"{download_name}.pdf", media_type="application/pdf")
     except (ImportError, OSError):
         pass  # 降级到 fpdf2
 
     # fpdf2 兜底（纯 Python，无系统依赖，支持中文）
     try:
         from fpdf import FPDF
-        pdf_path = EXPORT_DIR / f"{safe_title}.pdf"
+        pdf_path = EXPORT_DIR / f"{disk_stem}.pdf"
         _MSYH = r'C:\Windows\Fonts\msyh.ttc'
         def _gen_fpdf():
             pdf = FPDF()
@@ -246,7 +238,7 @@ async def export_pdf(req: ExportRequest):
                     pdf.multi_cell(0, 6, line)
             pdf.output(str(pdf_path))
         await asyncio.to_thread(_gen_fpdf)
-        return FileResponse(path=str(pdf_path), filename=f"{safe_title}.pdf", media_type="application/pdf")
+        return FileResponse(path=str(pdf_path), filename=f"{download_name}.pdf", media_type="application/pdf")
     except Exception as e:
         logger.error(f"PDF 生成失败: {e}")
         raise HTTPException(status_code=500, detail=f"PDF 生成失败: {e}")
@@ -262,15 +254,15 @@ async def export_html(req: ExportRequest):
         raise HTTPException(status_code=400, detail="任务没有结果文本")
 
     title = job.get('title') or f"AI总结_{req.job_id}"
-    safe_title = _sanitize_title(title)
-    output_path = EXPORT_DIR / f"{safe_title}.html"
+    download_name = export_basename(job)
+    output_path = EXPORT_DIR / f"{download_name}_{req.job_id[:8]}.html"
 
     html_content = _md_to_html(job['result_text'], title)
     await asyncio.to_thread(output_path.write_text, html_content, 'utf-8')
 
     return FileResponse(
         path=str(output_path),
-        filename=f"{safe_title}.html",
+        filename=f"{download_name}.html",
         media_type="text/html",
     )
 
@@ -285,8 +277,8 @@ async def export_txt(req: ExportRequest):
         raise HTTPException(status_code=400, detail="任务没有结果文本")
 
     title = job.get('title') or f"AI总结_{req.job_id}"
-    safe_title = _sanitize_title(title)
-    output_path = EXPORT_DIR / f"{safe_title}.txt"
+    download_name = export_basename(job)
+    output_path = EXPORT_DIR / f"{download_name}_{req.job_id[:8]}.txt"
 
     plain_text = _md_to_plain_text(job['result_text'])
     content = f"{title}\n{'=' * len(title.encode('utf-8'))}\n\n{plain_text}"
@@ -294,7 +286,7 @@ async def export_txt(req: ExportRequest):
 
     return FileResponse(
         path=str(output_path),
-        filename=f"{safe_title}.txt",
+        filename=f"{download_name}.txt",
         media_type="text/plain",
     )
 
@@ -310,14 +302,14 @@ async def export_batch(req: BatchExportRequest):
     if not job_ids:
         raise HTTPException(status_code=400, detail="job_ids 不能为空")
 
-    contents: List[str] = []  # (唯一文件名, 文件内容)
+    contents: List[tuple] = []  # (展示标题, 文件内容)
     for jid in job_ids:
         job = get_job(jid)
         if not job or not job.get('result_text'):
             continue
-        title = job.get('title') or f"AI总结_{jid}"
-        content = f"# {title}\n\n{job['result_text'].strip()}\n"
-        contents.append((title, content))
+        display_title = job.get('title') or f"任务 {jid}"
+        content = f"# {display_title}\n\n{job['result_text'].strip()}\n"
+        contents.append((display_title, content))
 
     if not contents:
         raise HTTPException(status_code=400, detail="选中的任务都没有可导出的结果")
@@ -325,14 +317,21 @@ async def export_batch(req: BatchExportRequest):
     # 重名标题的文件名追加序号，保证 zip 内文件名唯一
     seen: dict = {}
     def _md_name(title: str) -> str:
-        safe = _sanitize_title(title)
+        safe = safe_basename(title, max_len=80, fallback='未命名')
         if safe not in seen:
             seen[safe] = 1
             return f"{safe}.md"
         seen[safe] += 1
         return f"{safe}_{seen[safe]}.md"
 
+    # ★ 磁盘名保持唯一（时间戳+随机段，同秒重复导出不互相覆盖）；对外 filename=
+    #   用可读名（视频名优先）——「唯一性」与「可读性」解耦
     zip_path = EXPORT_DIR / f"AI总结批量导出_{datetime.now():%Y%m%d-%H%M%S}_{uuid.uuid4().hex[:6]}.zip"
+    first_name = safe_basename(contents[0][0], max_len=40, fallback='AI总结')
+    zip_download_name = (
+        f"{first_name}.zip" if len(contents) == 1
+        else f"{first_name}等{len(contents)}个.zip"
+    )
 
     def _build_zip():
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -343,6 +342,6 @@ async def export_batch(req: BatchExportRequest):
 
     return FileResponse(
         path=str(zip_path),
-        filename=zip_path.name,
+        filename=zip_download_name,
         media_type="application/zip",
     )
