@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Eye, Search, ArrowDown } from 'lucide-vue-next'
@@ -20,7 +20,17 @@ const total = ref(0)
 const loading = ref(false)
 const page = ref(1)
 const pageSize = ref(20)
-const selectedJobs = ref([])  // 多选勾中的任务
+const selectedJobs = ref([])  // 表格勾选的任务（row-key + reserve-selection 跨页/跨筛选累积）
+const tableRef = ref(null)    // 用于 clearSelection / toggleRowSelection
+// 「全选当前筛选结果」模式：一次性把筛选命中的**全部**任务纳入选择（跨页，无需逐页勾）
+const selectAllMode = ref(false)
+const allFilteredJobs = ref([])
+const selectAllLoading = ref(false)
+const SELECT_ALL_CAP = 2000   // 安全上限，避免误选上万条后一次批量删除/ZIP
+
+// 当前生效的选择集：全选模式优先，否则用表格勾选
+const activeSelection = computed(() =>
+  selectAllMode.value ? allFilteredJobs.value : selectedJobs.value)
 
 async function loadJobs() {
   loading.value = true
@@ -59,6 +69,11 @@ async function handleDelete(jobId) {
     )
     await jobsApi.delete(jobId, true)
     ElMessage.success('已删除（含磁盘文件）')
+    // 若被删任务在选中集里，必须连表格内部勾选一起清（否则它变成"幽灵选择"，
+    // 下次 selection-change 会把这个已消失的任务带回选择集）
+    if (activeSelection.value.some(item => item.id === jobId)) {
+      resetSelection()
+    }
     await loadJobs()
   } catch (err) {
     if (!isDialogCancel(err)) {
@@ -72,6 +87,7 @@ async function handleClearAll() {
     await ElMessageBox.confirm('确认清空所有任务？此操作不可恢复！', '警告', { type: 'error' })
     await jobsApi.clear()
     ElMessage.success('已清空')
+    resetSelection()
     await loadJobs()
   } catch (err) {
     if (!isDialogCancel(err)) {
@@ -85,6 +101,7 @@ async function handleClearByStatus(status, label) {
     await ElMessageBox.confirm(`确认清空所有「${label}」任务？此操作不可恢复！`, '警告', { type: 'error' })
     const res = await jobsApi.clearByStatus(status)
     ElMessage.success(res.message || '已清空')
+    resetSelection()
     await loadJobs()
   } catch (err) {
     if (!isDialogCancel(err)) {
@@ -103,6 +120,7 @@ async function handleClearFailed() {
     ])
     const total = (r1.data?.count || 0) + (r2.data?.count || 0)
     ElMessage.success(`已清空 ${total} 个失败/取消任务`)
+    resetSelection()
     await loadJobs()
   } catch (err) {
     if (!isDialogCancel(err)) {
@@ -112,8 +130,8 @@ async function handleClearFailed() {
 }
 
 function handlePageChange(p) {
+  // 翻页**不清空**选择：row-key + reserve-selection 让勾选跨页累积
   page.value = p
-  selectedJobs.value = []
   loadJobs()
 }
 
@@ -224,6 +242,58 @@ async function handleCancel(jobId) {
 // ============ 多选 + 批量操作 ============
 function handleSelectionChange(selection) {
   selectedJobs.value = selection
+  // 用户手动改动了表格勾选 → 退出「全选筛选结果」模式（避免两套选择集打架）
+  if (selectAllMode.value && selection.length > 0) {
+    selectAllMode.value = false
+    allFilteredJobs.value = []
+  }
+}
+
+/** 清空所有选择（含表格内部勾选状态，否则会出现"已取消但勾还在"的幽灵选择） */
+function resetSelection() {
+  selectAllMode.value = false
+  allFilteredJobs.value = []
+  selectedJobs.value = []
+  tableRef.value?.clearSelection()
+}
+
+/** 一键全选「当前筛选命中的全部任务」——跨页拉全量（后端 limit 上限 200，需分页循环） */
+async function handleSelectAllFiltered() {
+  selectAllLoading.value = true
+  try {
+    const keyword = searchQuery.value.trim()
+    const collected = []
+    let offset = 0
+    let matched = 0
+    while (collected.length < SELECT_ALL_CAP) {
+      const params = { limit: 200, offset }
+      if (keyword) params.keyword = keyword
+      const res = await jobsApi.list(params)
+      matched = res.total || 0
+      const batch = res.jobs || []
+      if (!batch.length) break
+      collected.push(...batch)
+      offset += batch.length
+      if (offset >= matched) break
+    }
+    if (collected.length === 0) {
+      ElMessage.warning('当前筛选没有任务可选')
+      return
+    }
+    tableRef.value?.clearSelection()
+    selectedJobs.value = []
+    allFilteredJobs.value = collected
+    selectAllMode.value = true
+    if (matched > collected.length) {
+      ElMessage.warning(`筛选命中 ${matched} 项，已全选前 ${collected.length} 项（上限 ${SELECT_ALL_CAP}）`)
+    } else {
+      ElMessage.success(`已全选当前筛选的 ${collected.length} 项（可跨页批量操作）`)
+    }
+  } catch (err) {
+    ElMessage.error('全选失败: ' + err.message)
+  } finally {
+    selectAllLoading.value = false
+  }
 }
 
 function _formatBytes(bytesVal) {
@@ -236,12 +306,12 @@ function _formatBytes(bytesVal) {
 }
 
 async function handleBatchCancel() {
-  const running = selectedJobs.value.filter(j => activeStatuses.includes(j.status))
+  const running = activeSelection.value.filter(j => activeStatuses.includes(j.status))
   if (running.length === 0) {
     ElMessage.warning('选中的任务中没有正在运行的')
     return
   }
-  const others = selectedJobs.value.filter(j => !activeStatuses.includes(j.status))
+  const others = activeSelection.value.filter(j => !activeStatuses.includes(j.status))
   let extraMsg = ''
   if (others.length > 0) {
     extraMsg = `\n（另外 ${others.length} 个非运行中状态的任务将跳过）`
@@ -255,7 +325,7 @@ async function handleBatchCancel() {
     const ids = running.map(j => j.id)
     const res = await jobsApi.batchCancel(ids)
     ElMessage.success(`已取消 ${res.cancelled_count} 个任务`)
-    selectedJobs.value = []
+    resetSelection()
     await loadJobs()
   } catch (err) {
     if (!isDialogCancel(err)) ElMessage.error(err?.message || err)
@@ -264,7 +334,7 @@ async function handleBatchCancel() {
 
 async function handleBatchExport() {
   // 只导出已完成且有结果的任务；其余状态由后端兜底跳过，不会报错
-  const exportable = selectedJobs.value.filter(j => j.status === 'completed')
+  const exportable = activeSelection.value.filter(j => j.status === 'completed')
   if (exportable.length === 0) {
     ElMessage.warning('选中的任务中没有已完成且可导出结果的任务')
     return
@@ -278,8 +348,8 @@ async function handleBatchExport() {
 }
 
 async function handleBatchDelete() {
-  if (selectedJobs.value.length === 0) return
-  const ids = selectedJobs.value.map(j => j.id)
+  if (activeSelection.value.length === 0) return
+  const ids = activeSelection.value.map(j => j.id)
 
   // 1. 先 dry_run 获取磁盘信息
   let diskInfo
@@ -323,7 +393,7 @@ async function handleBatchDelete() {
     // 3. 真删
     const res = await jobsApi.batchDelete(ids, false, true)
     ElMessage.success(res.message || `已删除 ${res.deleted_count} 个任务`)
-    selectedJobs.value = []
+    resetSelection()
     await loadJobs()
   } catch (err) {
     if (!isDialogCancel(err)) ElMessage.error(err?.message || err)
@@ -375,21 +445,41 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
 
     <!-- 任务列表（搜索时按 keyword 过滤） -->
     <el-card class="app-card" shadow="never">
-      <!-- 批量操作栏（选中任务时显示） -->
-      <div v-if="selectedJobs.length > 0" class="batch-toolbar">
-        <span class="batch-toolbar__count">已选 {{ selectedJobs.length }} 项</span>
+      <!-- 跨页选择：分页时提供"一键全选当前筛选"，否则只能一页页手点 -->
+      <div v-if="total > pageSize" class="select-all-bar">
+        <el-button size="small" plain :loading="selectAllLoading" @click="handleSelectAllFiltered">
+          全选当前筛选（{{ total }} 项）
+        </el-button>
+        <span class="select-all-bar__hint">翻页 / 改筛选都会保留已勾选项，可跨页累加后再批量操作</span>
+      </div>
+
+      <!-- 批量操作栏（选中任务时显示；全选模式下统计同样生效） -->
+      <div v-if="activeSelection.length > 0" class="batch-toolbar">
+        <span class="batch-toolbar__count">
+          已选 {{ activeSelection.length }} 项{{ selectAllMode ? '（当前筛选全部）' : '' }}
+        </span>
         <el-button size="small" type="warning" @click="handleBatchCancel">
-          批量取消（{{ selectedJobs.filter(j => activeStatuses.includes(j.status)).length }}）
+          批量取消（{{ activeSelection.filter(j => activeStatuses.includes(j.status)).length }}）
         </el-button>
         <el-button size="small" type="danger" @click="handleBatchDelete">批量删除</el-button>
         <el-button size="small" type="success" @click="handleBatchExport">
-          批量导出结果（{{ selectedJobs.filter(j => j.status === 'completed').length }}）
+          批量导出结果（{{ activeSelection.filter(j => j.status === 'completed').length }}）
         </el-button>
-        <el-button size="small" link @click="selectedJobs = []">取消选择</el-button>
+        <el-button size="small" link @click="resetSelection">取消选择</el-button>
       </div>
 
-      <el-table :data="jobs" v-loading="loading" stripe style="width: 100%;" :empty-text="searchQuery.trim() ? '未找到匹配的任务' : '暂无任务'" @selection-change="handleSelectionChange">
-        <el-table-column type="selection" width="40" />
+      <el-table
+        ref="tableRef"
+        :data="jobs"
+        :row-key="row => row.id"
+        v-loading="loading"
+        stripe
+        style="width: 100%;"
+        :empty-text="searchQuery.trim() ? '未找到匹配的任务' : '暂无任务'"
+        @selection-change="handleSelectionChange"
+      >
+        <!-- reserve-selection 必须配 row-key：翻页/换筛选后已勾选项不丢失 -->
+        <el-table-column type="selection" :reserve-selection="true" width="40" />
         <!-- 列宽一律 min-width：容器变窄时由 Element Plus 触发横向滚动，
              固定 width 会在窄窗口被裁切且 fixed 列错位覆盖相邻列 -->
         <el-table-column prop="title" label="标题" min-width="220" show-overflow-tooltip />
@@ -468,6 +558,19 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
 }
 .batch-toolbar__count {
   font-weight: 600;
+}
+
+/* ========== 跨页全选栏 ========== */
+.select-all-bar {
+  margin-bottom: 12px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.select-all-bar__hint {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 
 :root[data-theme="light"] .batch-toolbar {
