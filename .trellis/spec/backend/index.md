@@ -6,7 +6,7 @@
 
 - [ ] 读过 `CONTEXT.md` 文件索引表，定位到目标模块
 - [ ] 跑过 `codegraph explore "<符号>"`（索引不可用时在 task 工件记录原因）
-- [ ] 涉及任务编排时读过 `main.py` 的 `process_job`（信号量并发由 `config.MAX_CONCURRENT_JOBS` 提供，**默认 1 = 严格串行**，环境变量可放开为 2；preview 阶段释放许可的设计勿破坏）
+- [ ] 涉及任务编排时读过 `main.py` 的 `process_job`（信号量并发由 `config.MAX_CONCURRENT_JOBS` 提供，**默认 2**；设 `MAX_CONCURRENT_JOBS=1` 才是严格串行；preview 阶段释放许可的设计勿破坏）
 - [ ] 涉及存储删除时读过 `scripts/cleanup_storage.py`（dry-run + `--apply --confirm DELETE` 双门槛不可绕过）
 
 ## 核心约定
@@ -22,6 +22,15 @@
 - `_fetch_subtitles_via_player_v2` 先走旧版 `x/player/v2`（带 dm_img_str），wbi 降级备用，412 时强制刷新 wbi 密钥重试一次
 - 完整 Chrome UA + 进程级缓存 buvid3/buvid4 + 真实视频页 Referer（`_bili_headers`）
 - OpenAI 兼容流式接口（阿里云 MaaS）末尾会发 `choices: []` 的 usage chunk——取值必须用 `(chunk.get('choices') or [])` 防护，`[0]` 直接索引会越界（dict.get 默认值只在 key 缺失时生效）
+
+### B站字幕重试语义（2026-09-21 定稿，两类失败勿混用）
+
+- **可重试**：下载失败 / HTTP 错误 / 链接过期（换新 auth_key 才有意义）、疑似"风控降级"
+  （body 只剩零星几条，`_SUBTITLE_DEGRADED_MAX_COUNT`=5 以内——稍后同视频能拿到完整内容）。
+- **不可重试**：`_validate_subtitle_body` 硬校验不过且**条目不少**（条目够多但覆盖不足 =
+  B站该视频字幕本身生成不全，实测 `BV17V4y1S7i1` 的 ai-zh 只有 477s/3101s）→ 直接放弃该轨
+  换下一条候选。旧逻辑把这类失败也拿去"换链接重试"9 次（含 412 冷却 20s）→ 白等数分钟仍失败。
+  修复后同一视频字幕阶段从数分钟降到 **3 秒**（21:43:30 提交 → 21:43:33 判完转下载）。
 
 ### 联网检索（2026-09-16 修复，勿回退）
 
@@ -73,8 +82,12 @@
 
 ### 任务编排（2026-08-27 拆分，2026-09-21 串行队列）
 
-- 并发上限来自 `config.MAX_CONCURRENT_JOBS`（**默认 1 = 严格串行**，`MAX_CONCURRENT_JOBS=2` 环境变量即可放开）。
+- 并发上限来自 `config.MAX_CONCURRENT_JOBS`（**默认 2**——串行 1 实测太慢：一个任务卡在字幕阶段时
+  后面全部干等，用户明确否决；设 `MAX_CONCURRENT_JOBS=1` 才是严格串行）。
   超过上限的任务停在 `pending`，由信号量排队——这就是「单任务队列」，**不要另造内存队列/调度器**。
+- ★ **running/pending 不能只看 DB `status`**：字幕/下载阶段任务 status 仍停在 `pending`，
+  只看 status 会把正在跑的任务显示成「排队中」；必须叠加内存标记
+  `RUNNING_JOBS[jid]['status'] == 'processing'`（由 `_process_job_impl` 在拿到信号量后写入）。
 - `process_job` 保持"信号量包装 + finally 单一收尾出口"结构；输入获取已拆为策略函数
   `_handle_text_input`/`_handle_subtitle_file`/`_handle_media_file`/`_handle_url_input`（统一返回
   `(srt_path, txt_path, seg_count, title, platform, files)`），新输入类型加策略函数，不要往
