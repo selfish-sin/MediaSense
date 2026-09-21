@@ -60,6 +60,21 @@ const cancelling = ref(false)
 
 const isProcessing = computed(() => jobStore.isProcessing)
 
+/**
+ * 当前任务的**真实**状态：优先取队列快照（DB 权威），拿不到再回落 jobStore。
+ * jobStore.jobStatus 在提交后停在 'pending'（socket 进度事件不带 status），
+ * 会出现「顶部标签：排队中 / 队列面板：AI处理中」的自相矛盾。
+ */
+const liveJobStatus = computed(() => {
+  const id = jobStore.currentJobId
+  if (id && queue.value) {
+    const item = [...(queue.value.running || []), ...(queue.value.pending || [])]
+      .find(j => j.id === id)
+    if (item?.status) return item.status
+  }
+  return jobStore.jobStatus
+})
+
 /** 取消当前任务：终止后端处理步骤，并把本地状态同步为已取消 */
 async function handleCancel() {
   if (!jobStore.currentJobId) return
@@ -141,8 +156,8 @@ defineExpose({ reveal, refreshQueue })
           <el-tag v-if="jobStore.currentJobId" size="small" type="info" effect="plain" class="mono-tag">
             {{ jobStore.currentJobId }}
           </el-tag>
-          <el-tag v-if="jobStore.jobStatus && jobStore.jobStatus !== 'idle'" size="small" :type="jobStatusTagType(jobStore.jobStatus)" effect="dark">
-            {{ jobStatusLabel(jobStore.jobStatus) }}
+          <el-tag v-if="liveJobStatus && liveJobStatus !== 'idle'" size="small" :type="jobStatusTagType(liveJobStatus)" effect="dark">
+            {{ jobStatusLabel(liveJobStatus) }}
           </el-tag>
           <span v-if="jobStore.jobTitle" class="progress-job-title">
             {{ jobStore.jobTitle }}
