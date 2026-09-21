@@ -68,9 +68,11 @@ const isProcessing = computed(() => jobStore.isProcessing)
 const liveJobStatus = computed(() => {
   const id = jobStore.currentJobId
   if (id && queue.value) {
-    const item = [...(queue.value.running || []), ...(queue.value.pending || [])]
-      .find(j => j.id === id)
-    if (item?.status) return item.status
+    const inRunning = (queue.value.running || []).find(j => j.id === id)
+    // 已占用槽位但 DB status 还停在 pending（字幕/下载阶段）→ 展示「处理中」
+    if (inRunning) return inRunning.status === 'pending' ? 'processing' : inRunning.status
+    const inPending = (queue.value.pending || []).find(j => j.id === id)
+    if (inPending?.status) return inPending.status
   }
   return jobStore.jobStatus
 })

@@ -18,6 +18,14 @@ const running = computed(() => props.queue?.running || [])
 const pending = computed(() => props.queue?.pending || [])
 const total = computed(() => props.queue?.total || 0)
 
+/**
+ * 「正在处理」项的展示状态：DB status 在字幕/下载阶段仍停在 pending，
+ * 但它们已占用处理槽位 → 展示「处理中」而不是「排队中」。
+ */
+function runningStatus(item) {
+  return item.status === 'pending' ? 'processing' : item.status
+}
+
 /** 显示名：标题 → URL 短写（排队中的任务还没拿到 title，只有 URL） */
 function itemLabel(item) {
   const title = (item.title || '').trim()
@@ -57,8 +65,8 @@ function itemLabel(item) {
         <span class="queue-name" :title="itemLabel(item)" @click="emit('select', item.id)">
           {{ itemLabel(item) }}
         </span>
-        <el-tag size="small" :type="jobStatusTagType(item.status)" effect="dark">
-          {{ jobStatusLabel(item.status) }}
+        <el-tag size="small" :type="jobStatusTagType(runningStatus(item))" effect="dark">
+          {{ jobStatusLabel(runningStatus(item)) }}
         </el-tag>
         <el-button size="small" text type="danger" @click="emit('cancel', item.id)">取消</el-button>
       </li>
