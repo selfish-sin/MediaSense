@@ -2,6 +2,7 @@
 downloader 下载服务纯逻辑函数测试
 """
 import asyncio
+import time
 import pytest
 from types import SimpleNamespace
 from pathlib import Path
@@ -40,6 +41,13 @@ from services.downloader import (
     extract_bilibili_subtitles,
     PLATFORM_CONFIG,
     reset_bili_risk_state,
+    _subtitle_retry_delay,
+    _BILI_SUBTITLE_RETRY_MAX,
+    _BILI_RISK_STREAK_THRESHOLD,
+    note_bili_risk_control,
+    note_bili_api_success,
+    bili_risk_snapshot,
+    _wait_bili_risk_cooldown,
 )
 
 
@@ -1215,3 +1223,64 @@ class TestSrtFallbackValidation:
 
         assert result['success'] is True
         assert result['srt_path'].name == 'video.zh-CN.srt'
+
+
+class TestBiliRiskControlAndBackoff:
+    """B站风控冷却 + 字幕递增退避（2026-09-21 批量成功率加固）
+
+    背景：批量日志显示每个视频 412、且同一视频 2 秒内连撞两次；业界实战结论是
+    "限流是递增惩罚，间隔必须递增"。这两组用例锁定该行为，防止回退成固定短间隔。
+    """
+
+    def test_retry_delay_increases_then_caps(self):
+        """首次不等待；随后递增；封顶后不再增长（抖动上限 ±25%）"""
+        assert _subtitle_retry_delay(1) == 0.0
+        assert 3.75 <= _subtitle_retry_delay(2) <= 6.25      # 基准 5s
+        assert 6.0 <= _subtitle_retry_delay(3) <= 10.0       # 基准 8s
+        assert _subtitle_retry_delay(50) <= _BILI_SUBTITLE_RETRY_MAX * 1.25
+
+    def test_risk_streak_escalates_to_long_cooldown(self, monkeypatch):
+        """连续 412 达到阈值 → 冷却升级为长冷却"""
+        monkeypatch.setattr('services.downloader._BILI_RISK_COOLDOWN', 1.0)
+        monkeypatch.setattr('services.downloader._BILI_RISK_LONG_COOLDOWN', 99.0)
+        for _ in range(_BILI_RISK_STREAK_THRESHOLD - 1):
+            assert note_bili_risk_control() == 1.0
+        assert note_bili_risk_control() == 99.0
+        streak, remain = bili_risk_snapshot()
+        assert streak == _BILI_RISK_STREAK_THRESHOLD
+        assert remain > 0
+
+    def test_success_resets_risk_streak(self):
+        """任一接口正常响应 → 连续 412 计数清零"""
+        note_bili_risk_control()
+        note_bili_risk_control()
+        assert bili_risk_snapshot()[0] == 2
+        note_bili_api_success()
+        assert bili_risk_snapshot()[0] == 0
+
+    def test_412_marks_risk_control_end_to_end(self, monkeypatch):
+        """接口返回 -412 → 全局冷却被激活（后续 B站请求会先等待）"""
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {'code': -412, 'message': 'request was banned'}
+
+        monkeypatch.setattr('services.downloader.load_cookies', lambda: {})
+        monkeypatch.setattr('services.downloader._throttle_bili_api', lambda: None)
+        monkeypatch.setattr('services.downloader.httpx.get',
+                            lambda url, headers, timeout: FakeResponse())
+
+        _fetch_subtitles_via_player_v2(1, 2, 'BV1abc123456')
+
+        streak, remain = bili_risk_snapshot()
+        assert streak >= 1
+        assert remain > 0
+
+    def test_cooldown_window_actually_waits(self, monkeypatch):
+        """冷却窗内必须先等待——否则等于在惩罚期继续敲门"""
+        monkeypatch.setattr('services.downloader._BILI_RISK_COOLDOWN_UNTIL',
+                            time.time() + 0.05)
+        started = time.time()
+        _wait_bili_risk_cooldown()
+        assert time.time() - started >= 0.04
