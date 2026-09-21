@@ -28,10 +28,25 @@
 
 ## 1. 字幕优先（仅 URL 输入，downloader.py + main._handle_url_input）
 
-- **B站**：`force_transcribe=true` 跳过字幕直接转录；否则 `extract_bilibili_subtitles`
-  （CC + AI 双路径，旧版 x/player/v2 优先，412 风控六项加固：串行限流≥1s/wbi 刷新/完整
-  Chrome UA+buvid/明确无字幕才跳 yt-dlp；**登录态被 412 时匿名兜底重试一次**——实测带
-  SESSDATA 可能比匿名更严）。字幕选择单点 `downloader._pick_zh_subtitle`：
+**B站字幕链路 = 单一自研路径 + 单一校验出口（2026-09-21 收敛，勿再引入第三方库到关键路径）**：
+
+```
+extract_bilibili_subtitles
+├─① 视频信息 _fetch_video_info_http  (wbi/view → view，纯 httpx，共用指纹+限流)
+├─② 轨列表   _fetch_subtitles_via_player_v2 (legacy player/v2 → wbi player/v2 → 匿名兜底)
+├─③ 选轨     _pick_zh_subtitle (CC优先 · 简体优先 · 剔除 ai_status!=2)
+├─④ 取体     _acquire_bilibili_subtitle (下载→覆盖校验→换新链接重试→候选轨回退)
+└─⑤ 兜底     _extract_bilibili_subtitles_ytdlp (仅①/②全灭时；**必须吃同一套校验**)
+```
+
+- **不使用 `bilibili-api-python`**：它此前被放在①②两个关键位置，**一缺失/一报错就整条链路
+  降级到 yt-dlp**（历史：`except ImportError → yt-dlp` 两处悬崖）。其 `get_info()` 等价于
+  `x/web-interface/wbi/view`，`get_subtitle()` 等价于 `player/wbi/v2`，均为自研实现已覆盖，
+  故移除；`requirements.txt` 里该包已无代码引用（清理见 §7 坑点 19）。
+  **禁止**再把"某可选依赖是否安装"作为链路可用性的前置条件。
+- 412 风控加固：串行限流 ≥1s / wbi 刷新 / 完整 Chrome UA+buvid / 明确无字幕才跳 yt-dlp；
+  **登录态被 412 时匿名兜底重试一次**（实测带 SESSDATA 可能比匿名更严）。
+- 字幕选择单点 `downloader._pick_zh_subtitle`：
   **中文 CC（zh-* 无 ai- 前缀，创作者人工上传永不旧）优先 → 中文 AI（ai-zh）→ 任意 AI
   （外文视频兜底）**，同类内**简体优先**（zh/zh-Hans/zh-CN 排在 zh-TW/zh-Hant 之前），
   绝不把 ai-en/ai-jp 误当中文；**生成中（`ai_status` != 2）的 AI 字幕直接剔除**
@@ -64,6 +79,17 @@
     调用方走转录，**宁缺勿错**。
   - 参数字段名/顺序：`_BILI_SUBTITLE_MAX_ATTEMPTS`（默认 4）、`_BILI_SUBTITLE_RETRY_BASE`（默认
     3s，间隔 = base×(attempt-1)）、`_subtitle_retry_wait()` 单点可 patch。
+- **yt-dlp 兜底必须与主路径同标准（2026-09-21 补齐，此前是最大漏口）**：
+  `_extract_bilibili_subtitles_ytdlp(url, output_dir, sio, job_id, video_duration=0.0)`
+  此前**只判 `srt 大小≥50 字节`**，选轨靠 `max(mtime)`（多语言同时落盘时等于随机挑，可能挑到
+  繁体/外语轨），且**完全绕开**主路径的覆盖校验——"覆盖不到视频一半的旧/残字幕"会被当成功结果
+  直接送进分段/总结。现状：
+  - 选轨用 `_rank_subtitle_file`（与 `_pick_zh_subtitle` 同一套规则：CC 优先 → 简中优先 → 新文件优先）；
+  - 校验用 `_srt_to_entries` / `_parse_srt_time` 解析出 `[{from,to}]` 后喂给
+    `_validate_subtitle_body` 与 `_is_subtitle_body_incomplete`（**与主路径同一套判据**）；
+  - `video_duration` 由调用方传入（元数据已拿到时）；拿不到元数据（①全灭）时不传 → 只退化到
+    非空判断，属已知边界。
+  **教训**：同一不变量必须在所有出口生效。加校验时先列全"字幕从哪些出口产出"，再逐个对齐。
 - **YouTube**：`extract_youtube_subtitles` 拿平台字幕，逻辑同上（无抽查）。
 - 其他平台：直接下载 → 引擎路由。
 - **音频获取单点**：`main._acquire_audio`（断点续传复用 → 按 options 下载），成功返回的
@@ -320,12 +346,27 @@ Whisper **base 是链路里最弱一环**（`asr_whisper_model` 未设置时即�
     所以"多源交叉取链"这条路不成立，字幕获取的对错只能靠**同一源内的新链接 + 时间覆盖自校验**兜。
     （诊断脚本 `backend/scripts/diag/diag_bilibili*.py` 已覆盖该结论；勿重复实验。）
    18. **AI 字幕"轨道在但 body 残"是 B站侧真实状态，不是接口调用姿势问题**（2026-09-21 实证）：
-    `BV1DZeK64ETW`（单分P，`duration=9687s`，`videos=1`）的 `ai-zh` body 只有 **74 条 / 覆盖 137s**，
-    多次刷新链接均为同一份 → 属于 B站生成不全，重试拿不到更全的内容，只能按 `subtitle_incomplete`
-    交转录。判据别放松成"有 body 就用"（那会把前 2 分钟字幕配 2.7 小时视频 = 错字幕）。
-    顺带：`x/web-interface/view` 的 `duration` 与 `pages[i].duration` 对单分P一致；多分P 时
-    `view.duration` 是**各分P之和**，而 `cid` 只对应第 1P——多P 视频取 `video_duration` 必须用
-    `pages[page-1].duration`，否则分P字幕会被整篇误判为"覆盖不足"。
+      `BV1DZeK64ETW`（单分P，`duration=9687s`，`videos=1`）的 `ai-zh` body 只有 **74 条 / 覆盖 137s**，
+      多次刷新链接均为同一份 → 属于 B站生成不全，重试拿不到更全的内容，只能按 `subtitle_incomplete`
+      交转录。判据别放松成"有 body 就用"（那会把前 2 分钟字幕配 2.7 小时视频 = 错字幕）。
+      **补充实证（同日复测）**：约 1 小时后同一视频的 body 变成 **2757 条 / 覆盖 9680s**（完整）——
+      即 `ai_status=2` 但 body 截断是**瞬态**，B站侧还在补写；所以"重试 + 宁缺勿错"是对的：
+      当时拒掉不是误杀，稍后再取就完整了。
+      顺带：`x/web-interface/view` 的 `duration` 与 `pages[i].duration` 对单分P一致；多分P 时
+      `view.duration` 是**各分P之和**（实测 185 分P 的 `BV1Av4y1A796`：`view.duration=327831s`，
+      P1 真实时长仅约 824s），而 `cid` 只对应第 1P——多P 视频取 `video_duration` 必须用
+      `pages[page-1].duration`（`_resolve_video_target` 单点），否则分P字幕会被整篇误判为"覆盖不足"。
+   19. **第三方库不放在关键路径上；同一不变量必须在所有出口生效**（2026-09-21 结构性教训）：
+      `bilibili-api-python` 曾被放在"元数据+轨列表"两个关键位置，结果：①它缺失/报错就整条链路
+      降级到最弱的 yt-dlp（两处 `except ImportError → yt-dlp` 悬崖）；②字幕有两个产出出口
+      （自研 HTTP 路径 / yt-dlp 路径），新加的覆盖校验与选轨规则**只覆盖了前一个**，
+      yt-dlp 出口仍按"文件≥50 字节"放行——加固实际只生效一半。
+      规则：新增/修改字幕类不变量时，先穷举"字幕从哪些出口产出"（当前两处：
+      `_acquire_bilibili_subtitle` 与 `_extract_bilibili_subtitles_ytdlp`），逐个对齐后再收工；
+      加"可选依赖"前先问"它没装会怎样"，答案不能是"链路降级"。
+      附带清理项（未做，涉及打包，需单独决策）：`requirements.txt` 的
+      `bilibili-api-python>=17.4.0` 与 `start.bat` 第 22/26 行的 import 探测列表里，
+      `bilibili_api` 已无代码引用，可移除以缩小安装包与启动探测面。
 
    ## 8. ASR 配置管理 API（模型管理页「ASR 模型」域，2026-09-15）
 
