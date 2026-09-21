@@ -23,15 +23,21 @@ from services.downloader import (
     _ensure_buvid,
     _acquire_bilibili_subtitle,
     _dedupe_urls,
+    _fetch_video_info_http,
     _is_subtitle_body_incomplete,
     _is_subtitle_ready,
     _min_expected_coverage,
     _normalize_subtitle_url,
+    _parse_srt_time,
+    _rank_subtitle_file,
     _refresh_subtitle_urls,
     _resolve_video_target,
+    _srt_to_entries,
     _subtitle_body_stats,
+    _subtitle_file_lan,
     _urls_for_lan,
     _validate_subtitle_body,
+    extract_bilibili_subtitles,
     PLATFORM_CONFIG,
 )
 
@@ -635,6 +641,50 @@ class TestDownloadVideoSections:
         assert '--download-sections' not in calls[0]
 
 
+class TestFetchVideoInfoHttp:
+    """视频信息改由自研 httpx 获取（不再依赖 bilibili-api-python）"""
+
+    @staticmethod
+    def _patch(monkeypatch, responses):
+        calls = []
+        monkeypatch.setattr('services.downloader._throttle_bili_api', lambda: None)
+        monkeypatch.setattr('services.downloader.load_cookies', lambda: {})
+        monkeypatch.setattr('services.downloader._get_wbi_keys', lambda: (None, None))
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        def fake_get(url, headers, timeout):
+            calls.append(url)
+            return FakeResponse(responses[min(len(calls) - 1, len(responses) - 1)])
+
+        monkeypatch.setattr('services.downloader.httpx.get', fake_get)
+        return calls
+
+    def test_prefers_wbi_then_falls_back_to_unsigned(self, monkeypatch):
+        calls = self._patch(monkeypatch, [
+            {'code': -412, 'message': 'request was banned'},
+            {'code': 0, 'data': {'aid': 1, 'cid': 2, 'duration': 100}},
+        ])
+        info = _fetch_video_info_http('BV1abc123456')
+        assert info['aid'] == 1 and info['cid'] == 2
+        assert '/x/web-interface/wbi/view' in calls[0]
+        assert len(calls) == 2
+
+    def test_returns_empty_when_all_sources_fail(self, monkeypatch):
+        self._patch(monkeypatch, [{'code': -412, 'message': 'banned'}])
+        assert _fetch_video_info_http('BV1abc123456') == {}
+
+    def test_rejects_response_without_aid_cid(self, monkeypatch):
+        """code=0 但没有 aid/cid（如被替换成别的响应体）不算有效信息"""
+        self._patch(monkeypatch, [{'code': 0, 'data': {'title': 'x'}}])
+        assert _fetch_video_info_http('BV1abc123456') == {}
+
+
 class TestResolveVideoTarget:
     """多P 时长陷阱：view.duration 是各分P之和，cid 只对应第 1P，必须按 ?p=N 取分P数据"""
 
@@ -973,3 +1023,174 @@ class TestSubtitleUrlRefresh:
 
         assert result['success'] is True
         assert result['body_count'] == 120
+
+
+class TestExtractBilibiliSubtitlesEndToEnd:
+    """extract_bilibili_subtitles 端到端（此前零覆盖）：不依赖第三方库的单一主路径"""
+
+    BILI_URL = 'https://www.bilibili.com/video/BV1abc123456'
+
+    @staticmethod
+    def _stub_meta(monkeypatch, info=None):
+        monkeypatch.setattr('services.downloader.load_cookies', lambda: {'SESSDATA': 's'})
+        monkeypatch.setattr(
+            'services.downloader._fetch_video_info_http',
+            lambda bvid: info if info is not None
+            else {'aid': 1, 'cid': 2, 'title': '标题', 'duration': 600})
+
+    @staticmethod
+    def _stub_ytdlp(monkeypatch):
+        called = {'n': 0}
+
+        async def fake_ytdlp(*args, **kwargs):
+            called['n'] += 1
+            return {'success': False, 'message': 'ytdlp 兜底被调用'}
+
+        monkeypatch.setattr('services.downloader._extract_bilibili_subtitles_ytdlp', fake_ytdlp)
+        return called
+
+    @pytest.mark.asyncio
+    async def test_no_third_party_lib_no_downgrade_to_ytdlp(self, tmp_path, monkeypatch):
+        """库缺失时走自研 HTTP 路径并成功拿到字幕，绝不降级到 yt-dlp（回归锁）"""
+        self._stub_meta(monkeypatch)
+        monkeypatch.setattr(
+            'services.downloader._fetch_subtitles_via_player_v2',
+            lambda aid, cid, bvid: ({'subtitles': [
+                {'lan': 'ai-zh', 'ai_status': 2, 'subtitle_url': '//cdn/a.json'}]}, 600000, True))
+        body = [{'from': i, 'to': i + 1, 'content': 'x'} for i in range(600)]
+
+        async def fake_fetch(url, bvid=''):
+            return body
+
+        monkeypatch.setattr('services.downloader._fetch_subtitle_body', fake_fetch)
+        called = self._stub_ytdlp(monkeypatch)
+
+        result = await extract_bilibili_subtitles(self.BILI_URL, tmp_path)
+
+        assert result['success'] is True
+        assert result['title'] == '标题'
+        assert called['n'] == 0
+        srt_text = (tmp_path / 'bilibili_subtitle.srt').read_text('utf-8')
+        assert srt_text.count('-->') == 600
+
+    @pytest.mark.asyncio
+    async def test_confirmed_no_subtitle_skips_ytdlp(self, tmp_path, monkeypatch):
+        """接口正常响应但无字幕 → 直接判无字幕，不白跑 yt-dlp"""
+        self._stub_meta(monkeypatch)
+        monkeypatch.setattr(
+            'services.downloader._fetch_subtitles_via_player_v2',
+            lambda aid, cid, bvid: ({'subtitles': []}, 600000, True))
+        called = self._stub_ytdlp(monkeypatch)
+
+        result = await extract_bilibili_subtitles(self.BILI_URL, tmp_path)
+
+        assert result['success'] is False
+        assert result['reason'] == 'no_subtitle'
+        assert called['n'] == 0
+
+    @pytest.mark.asyncio
+    async def test_metadata_unavailable_falls_back_to_ytdlp(self, tmp_path, monkeypatch):
+        """视频信息都拿不到（风控/网络）才转 yt-dlp，且此时没有时长可供校验"""
+        self._stub_meta(monkeypatch, info={})
+        seen = {}
+
+        async def fake_ytdlp(url, output_dir, sio=None, job_id='', video_duration=0.0):
+            seen['duration'] = video_duration
+            return {'success': False, 'message': 'ytdlp'}
+
+        monkeypatch.setattr('services.downloader._extract_bilibili_subtitles_ytdlp', fake_ytdlp)
+
+        result = await extract_bilibili_subtitles(self.BILI_URL, tmp_path)
+
+        assert result['success'] is False
+        assert seen['duration'] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_quota_banned_track_api_forwards_duration_to_ytdlp(self, tmp_path, monkeypatch):
+        """轨接口被风控（api_ok=False）转 yt-dlp 时必须把已知时长传下去，供其做覆盖校验"""
+        self._stub_meta(monkeypatch)
+        monkeypatch.setattr(
+            'services.downloader._fetch_subtitles_via_player_v2',
+            lambda aid, cid, bvid: ({}, 600000, False))
+        seen = {}
+
+        async def fake_ytdlp(url, output_dir, sio=None, job_id='', video_duration=0.0):
+            seen['duration'] = video_duration
+            return {'success': False, 'message': 'ytdlp'}
+
+        monkeypatch.setattr('services.downloader._extract_bilibili_subtitles_ytdlp', fake_ytdlp)
+
+        await extract_bilibili_subtitles(self.BILI_URL, tmp_path)
+
+        assert seen['duration'] == 600.0
+
+
+class TestSrtFallbackValidation:
+    """yt-dlp 兜底路径的 SRT 解析与覆盖校验（此前只判 50 字节）"""
+
+    def test_parse_srt_time(self):
+        assert _parse_srt_time('00:01:02,500') == 62.5
+        assert _parse_srt_time('01:00:00,000') == 3600.0
+        assert _parse_srt_time('00:00:05,000 align:start') == 5.0
+        assert _parse_srt_time('bad') is None
+        assert _parse_srt_time('') is None
+
+    def test_srt_to_entries_feeds_coverage_stats(self):
+        text = ("1\n00:00:00,000 --> 00:00:05,000\n甲\n\n"
+                "2\n00:01:00,000 --> 00:01:10,000\n乙\n")
+        entries = _srt_to_entries(text)
+        assert entries == [{'from': 0.0, 'to': 5.0}, {'from': 60.0, 'to': 70.0}]
+        assert _subtitle_body_stats(entries) == (2, 70.0)
+
+    def test_subtitle_file_lan_and_ranking(self, tmp_path):
+        cc_simplified = tmp_path / 'v.zh-CN.srt'
+        cc_traditional = tmp_path / 'v.zh-TW.srt'
+        ai = tmp_path / 'v.ai-zh.srt'
+        en = tmp_path / 'v.en.srt'
+        for path in (cc_simplified, cc_traditional, ai, en):
+            path.write_text('x', encoding='utf-8')
+
+        ranked = sorted([en, ai, cc_traditional, cc_simplified], key=_rank_subtitle_file)
+
+        assert [p.name for p in ranked] == \
+            ['v.zh-CN.srt', 'v.zh-TW.srt', 'v.en.srt', 'v.ai-zh.srt']
+        assert _subtitle_file_lan(ai) == 'ai-zh'
+        assert _subtitle_file_lan(cc_simplified) == 'zh-cn'
+
+    @pytest.mark.asyncio
+    async def test_rejects_srt_whose_coverage_is_too_short(self, tmp_path, monkeypatch):
+        """覆盖 44s / 视频 600s 的 srt 必须被丢弃（旧代码只看 ≥50 字节就放行）"""
+        def fake_run(cmd, capture_output, timeout):
+            (tmp_path / 'video.ai-zh.srt').write_text(
+                '1\n00:00:00,000 --> 00:00:44,000\n只覆盖44秒但字节数够\n', encoding='utf-8')
+            return SimpleNamespace(returncode=0, stderr=b'')
+
+        monkeypatch.setattr('services.downloader.subprocess.run', fake_run)
+        monkeypatch.setattr('services.downloader.load_cookies', lambda: {})
+
+        result = await _extract_bilibili_subtitles_ytdlp(
+            'https://www.bilibili.com/video/BV1abc123456', tmp_path, video_duration=600.0)
+
+        assert result['success'] is False
+
+    @pytest.mark.asyncio
+    async def test_accepts_full_coverage_and_prefers_simplified_cc(self, tmp_path, monkeypatch):
+        """覆盖完整时通过，且简体 CC 优先于繁体（旧代码按 mtime 随机挑）"""
+        body = ''.join(
+            f'{i + 1}\n{_format_srt_time(i)} --> {_format_srt_time(i + 1)}\n行\n\n'
+            for i in range(300)
+        )
+
+        def fake_run(cmd, capture_output, timeout):
+            (tmp_path / 'video.zh-TW.srt').write_text(body, encoding='utf-8')
+            (tmp_path / 'video.zh-CN.srt').write_text(body, encoding='utf-8')
+            return SimpleNamespace(returncode=0, stderr=b'')
+
+        monkeypatch.setattr('services.downloader.subprocess.run', fake_run)
+        monkeypatch.setattr('services.downloader.load_cookies', lambda: {})
+
+        result = await _extract_bilibili_subtitles_ytdlp(
+            'https://www.bilibili.com/video/BV1abc123456', tmp_path, video_duration=300.0)
+
+        assert result['success'] is True
+        assert result['srt_path'].name == 'video.zh-CN.srt'

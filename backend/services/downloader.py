@@ -462,10 +462,45 @@ def _resolve_video_target(info: dict, page: int = 1, fallback_title: str = ''):
     return aid, cid, title, duration
 
 
+def _fetch_video_info_http(bvid: str) -> dict:
+    """取视频信息（aid/cid/标题/时长/pages）——纯 httpx，不依赖 bilibili-api-python。
+
+    先走 wbi 签名版（字段最全，与第三方库内部用的是同一族接口），失败退未签名版；
+    两者共用同一套浏览器指纹（完整 UA + buvid + 真实 Referer）与进程级限流——
+    避免"第三方库/yt-dlp/自研 HTTP"三套指纹并存、风控表现无法归因。
+    全失败返回 {}，由调用方决定兜底（**不再因为"某个可选依赖没装"就整条链路降级**）。
+    """
+    candidates = [
+        _build_wbi_url('https://api.bilibili.com/x/web-interface/wbi/view', {'bvid': bvid}),
+        'https://api.bilibili.com/x/web-interface/view?' + urlencode({'bvid': bvid}),
+    ]
+    for url in candidates:
+        _throttle_bili_api()
+        try:
+            data = httpx.get(url, headers=_bili_headers(bvid), timeout=15.0).json()
+        except Exception as e:
+            logger.warning(f'B站视频信息接口调用失败: {e}')
+            continue
+        if data.get('code') != 0:
+            logger.warning(
+                f'B站视频信息接口返回错误: code={data.get("code")}, msg={data.get("message")}')
+            continue
+        info = data.get('data') or {}
+        if info.get('aid') and info.get('cid'):
+            return info
+    return {}
+
+
 async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_id: str = '') -> dict:
     """
     提取B站字幕（AI字幕 / 创作者上传字幕）
-    策略：bilibili-api-python库（完整wbi签名+风控处理）→ yt-dlp兜底 → 转录流程
+
+    策略（2026-09-21 起收敛为单一路径 + 单校验出口，**不再依赖 bilibili-api-python**）：
+      ①视频信息 `_fetch_video_info_http`（wbi/view → view）→ ②轨列表
+      `_fetch_subtitles_via_player_v2`（legacy player/v2 → wbi player/v2 → 匿名兜底）
+      → ③选轨 `_pick_zh_subtitle`（CC 优先/简体优先/剔除生成中）
+      → ④取体+校验+换链接重试 `_acquire_bilibili_subtitle`
+      → ⑤yt-dlp 仅作最后兜底（且必须过同一套覆盖校验，见 `_extract_bilibili_subtitles_ytdlp`）
     返回 dict: {"success": True/False, "srt_path": Path, "txt_path": Path, "title": str, "message": str}
     """
     match = re.search(r'(BV[A-Za-z0-9]{10})', url)
@@ -496,89 +531,35 @@ async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_i
             page = 1
 
     if sio:
-        from socket_handlers import emit_log, emit_progress
+        from socket_handlers import emit_log
         await emit_log(sio, job_id, f'尝试提取B站AI字幕 (bvid={bvid}, p={page})')
 
-    # 加载登录态 Cookie 构造 Credential（bilibili-api-python 需要）
-    cookies_dict = load_cookies()
-    credential = None
-    if cookies_dict and cookies_dict.get('SESSDATA') and cookies_dict.get('bili_jct') and cookies_dict.get('DedeUserID'):
-        try:
-            from bilibili_api import Credential
-            credential = Credential(
-                sessdata=cookies_dict['SESSDATA'],
-                bili_jct=cookies_dict['bili_jct'],
-                dedeuserid=cookies_dict['DedeUserID'],
-            )
-            if sio:
-                from socket_handlers import emit_log
-                await emit_log(sio, job_id, '✅ 已加载B站登录态Credential')
-        except ImportError:
-            if sio:
-                from socket_handlers import emit_log
-                await emit_log(sio, job_id, '⚠ bilibili-api-python未安装，转yt-dlp兜底')
-            return await _extract_bilibili_subtitles_ytdlp(url, output_dir, sio, job_id)
-    else:
+    if not load_cookies():
         if sio:
             from socket_handlers import emit_log
             await emit_log(sio, job_id, '⚠ 未登录B站，AI字幕可能无法获取（仅CC字幕可用）')
 
-    # bilibili-api-python 库的同步IO需要在线程池里跑，避免阻塞事件循环
-    try:
-        from bilibili_api import video as bili_video, sync as bili_sync
-    except ImportError:
+    # Step 1: 视频信息（aid/cid/标题/时长/pages）——纯 httpx，与本模块其余请求共用指纹与限流
+    info = await asyncio.to_thread(_fetch_video_info_http, bvid)
+    if not info:
         if sio:
             from socket_handlers import emit_log
-            await emit_log(sio, job_id, '⚠ bilibili-api-python未安装，转yt-dlp兜底')
+            await emit_log(sio, job_id, '⚠ 视频信息接口不可用（可能被风控），转yt-dlp兜底')
         return await _extract_bilibili_subtitles_ytdlp(url, output_dir, sio, job_id)
+    aid, cid, video_title, video_duration = _resolve_video_target(info, page, bvid)
 
-    def _do_extract():
-        """同步函数：在线程池中执行，使用 bilibili-api-python 提取字幕"""
-        v = bili_video.Video(bvid=bvid, credential=credential)
-        # Step 1: 获取视频信息（aid/cid/标题/时长，分P取用见 _resolve_video_target）
-        _throttle_bili_api()
-        info = bili_sync(v.get_info())
-        aid, cid, video_title, video_duration = _resolve_video_target(info, page, bvid)
-
-        # Step 2: 获取字幕列表
-        # v17.4.2+: get_subtitle 内部用 player/wbi/v2 需要 SESSDATA，无登录时会抛异常
-        # 无登录态时改用 player/v2 直接调用（无需 WBI 签名）
-        api_ok = False
-        if credential is not None:
-            try:
-                _throttle_bili_api()
-                sub_data = bili_sync(v.get_subtitle(cid=cid))
-                # 库返回了字幕列表结构（即使为空）即视为接口正常响应
-                if isinstance(sub_data, dict) and 'subtitles' in sub_data:
-                    api_ok = True
-            except Exception as e:
-                logger.warning(f'bilibili-api-python 字幕接口失败: {e}')
-                sub_data = {}
-        else:
-            sub_data = {}
-
-        # 账号 Cookie 不完整、接口版本变化或 WBI 签名要求变化时，
-        # 统一回退到直接播放器 API，而不是立刻放弃字幕。
-        if not isinstance(sub_data, dict) or not sub_data.get('subtitles'):
-            fb_data, tl_ms, fb_ok = _fetch_subtitles_via_player_v2(aid, cid, bvid)
-            sub_data = fb_data if fb_data else sub_data
-            api_ok = api_ok or fb_ok
-            if tl_ms:
-                video_duration = tl_ms / 1000.0
-        # sub_data 格式: {"allow_submit":..., "lan":..., "subtitles":[{lan, lan_doc, subtitle_url, ai_status}], ...}
-        subtitles = sub_data.get('subtitles', []) if isinstance(sub_data, dict) else []
-
-        return aid, cid, video_title, _pick_zh_subtitle(subtitles), video_duration, api_ok, subtitles
-
+    # Step 2: 字幕轨列表（唯一轨道来源：legacy player/v2 → wbi player/v2 → 匿名兜底）
     try:
-        aid, cid, video_title, zh_subs, video_duration, api_ok, all_subtitles = \
-            await asyncio.to_thread(_do_extract)
+        sub_data, tl_ms, api_ok = await asyncio.to_thread(
+            _fetch_subtitles_via_player_v2, aid, cid, bvid)
     except Exception as e:
-        logger.warning(f'bilibili-api-python 提取字幕失败: {e}')
-        if sio:
-            from socket_handlers import emit_log
-            await emit_log(sio, job_id, f'⚠ 库提取失败: {e}，转yt-dlp兜底')
-        return await _extract_bilibili_subtitles_ytdlp(url, output_dir, sio, job_id)
+        logger.warning(f'B站字幕轨接口异常: {e}')
+        sub_data, tl_ms, api_ok = {}, 0, False
+    if tl_ms:
+        video_duration = tl_ms / 1000.0
+    # sub_data 格式: {"subtitles":[{lan, lan_doc, subtitle_url, ai_status}], ...}
+    all_subtitles = (sub_data or {}).get('subtitles') or [] if isinstance(sub_data, dict) else []
+    zh_subs = _pick_zh_subtitle(all_subtitles)
 
     if not zh_subs:
         if api_ok:
@@ -593,7 +574,8 @@ async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_i
             from socket_handlers import emit_log
             await emit_log(sio, job_id, '⚠ 字幕接口状态未知（可能被风控/异常），转yt-dlp兜底')
         logger.info(f'B站字幕接口状态未知 bvid={bvid}，转yt-dlp兜底')
-        return await _extract_bilibili_subtitles_ytdlp(url, output_dir, sio, job_id)
+        return await _extract_bilibili_subtitles_ytdlp(
+            url, output_dir, sio, job_id, video_duration=video_duration)
 
     if sio:
         from socket_handlers import emit_log
@@ -983,7 +965,50 @@ async def verify_subtitle_against_audio(txt_path, audio_path, sio=None, job_id: 
         return True, f'抽查不可用（{type(e).__name__}: {e}）'
 
 
-async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None, job_id: str = '') -> dict:
+def _parse_srt_time(value: str) -> Optional[float]:
+    """解析 SRT 时间戳（00:01:02,500）→ 秒；解析失败返回 None（容忍尾随的 cue 设置）。"""
+    m = re.match(r'(\d+):(\d{1,2}):(\d{1,2})[,.](\d{1,3})', (value or '').strip())
+    if not m:
+        return None
+    hours, minutes, seconds, millis = (int(x) for x in m.groups())
+    return hours * 3600 + minutes * 60 + seconds + millis / 1000.0
+
+
+def _srt_to_entries(text: str) -> list:
+    """SRT 文本 → [{'from': 秒, 'to': 秒}]，供 `_subtitle_body_stats` 系列复用。
+
+    目的：让 yt-dlp 兜底路径与主路径**共用同一套时间覆盖校验**——该路径此前只判
+    "文件 ≥50 字节"，是残缺/旧字幕的漏口。
+    """
+    entries = []
+    for line in (text or '').splitlines():
+        if '-->' not in line:
+            continue
+        left, _, right = line.partition('-->')
+        end = _parse_srt_time(right)
+        if end is None:
+            continue
+        entries.append({'from': _parse_srt_time(left) or 0.0, 'to': end})
+    return entries
+
+
+def _subtitle_file_lan(path: Path) -> str:
+    """从 yt-dlp 产出的字幕文件名取语言码（`video.zh-Hans.srt` → `zh-hans`）。"""
+    stem = path.stem.lower()
+    return stem.rsplit('.', 1)[-1] if '.' in stem else ''
+
+
+def _rank_subtitle_file(path: Path):
+    """按**主路径同一套选轨规则**给 yt-dlp 产物排序：CC 优先 → 简中优先 → 新文件优先。
+
+    此前是 `max(mtime)`——多个语言/轨同时落盘时等于随机挑一条，可能挑到繁体或外语轨。
+    """
+    lan = _subtitle_file_lan(path)
+    return (lan.startswith('ai'), _zh_variant_rank(lan), -path.stat().st_mtime)
+
+
+async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None, job_id: str = '',
+                                            video_duration: float = 0.0) -> dict:
     """yt-dlp兜底提取B站字幕（带cookie）
     关键防误认：只认"本次调用新增"的srt，避免把旧任务残留当成成功结果
     """
@@ -1046,9 +1071,10 @@ async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None
                     logger.info(f'yt-dlp {sub_flag} 成功但未生成新srt（可能视频无字幕）')
                 continue  # 没新增就继续试下一个 flag
 
-            # 选最新的新增 srt
+            # 选轨：按主路径同一套规则（CC 优先 → 简中优先 → 新文件优先），
+            # 不再用 mtime 撞运气（多语言同时落盘时会随机挑到繁体/外语轨）
             new_srt_paths = [output_dir / name for name in new_srt_names]
-            srt_path = max(new_srt_paths, key=lambda f: f.stat().st_mtime)
+            srt_path = min(new_srt_paths, key=_rank_subtitle_file)
 
             # ★ 校验 srt 非空（避免拿到空字幕或半成品）
             srt_size = srt_path.stat().st_size
@@ -1057,6 +1083,21 @@ async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None
                 if sio:
                     from socket_handlers import emit_log
                     await emit_log(sio, job_id, f'⚠ 字幕文件过小({srt_size}字节)，丢弃')
+                continue
+
+            # ★ 时间覆盖校验：与主路径共用判据（此前这里只判文件大小，
+            #   导致"覆盖不到视频一半的旧/残字幕"被当成成功结果直接送进分段/总结）
+            lan = _subtitle_file_lan(srt_path)
+            is_ai = lan.startswith('ai')
+            entries = _srt_to_entries(srt_path.read_text(encoding='utf-8', errors='ignore'))
+            ok, reason = _validate_subtitle_body(entries, video_duration, is_ai)
+            incomplete, why = _is_subtitle_body_incomplete(entries, video_duration, is_ai)
+            if not ok or incomplete:
+                detail = reason or why
+                logger.warning(f'yt-dlp 字幕校验未过（{detail}）: {srt_path.name}')
+                if sio:
+                    from socket_handlers import emit_log
+                    await emit_log(sio, job_id, f'⚠ 字幕 {lan or srt_path.stem} 校验未过（{detail}），丢弃')
                 continue
 
             # 生成对应的TXT
