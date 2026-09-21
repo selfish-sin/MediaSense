@@ -22,10 +22,15 @@ from services.downloader import (
     _bili_headers,
     _ensure_buvid,
     _acquire_bilibili_subtitle,
+    _dedupe_urls,
     _is_subtitle_body_incomplete,
     _is_subtitle_ready,
+    _min_expected_coverage,
     _normalize_subtitle_url,
+    _refresh_subtitle_urls,
+    _resolve_video_target,
     _subtitle_body_stats,
+    _urls_for_lan,
     _validate_subtitle_body,
     PLATFORM_CONFIG,
 )
@@ -630,6 +635,40 @@ class TestDownloadVideoSections:
         assert '--download-sections' not in calls[0]
 
 
+class TestResolveVideoTarget:
+    """多P 时长陷阱：view.duration 是各分P之和，cid 只对应第 1P，必须按 ?p=N 取分P数据"""
+
+    def test_single_page_uses_view_duration(self):
+        info = {'aid': 1, 'cid': 2, 'title': 'T', 'duration': 600,
+                'pages': [{'cid': 2, 'page': 1, 'duration': 600, 'part': 'P1'}]}
+        assert _resolve_video_target(info, 1, 'BV1') == (1, 2, 'T', 600.0)
+
+    def test_multi_page_first_page_uses_page_duration_not_sum(self):
+        """P1：用 view.duration(=137+9550) 会把正常的 P1 字幕误判成覆盖不足"""
+        info = {'aid': 1, 'cid': 11, 'title': 'T', 'duration': 9687,
+                'pages': [{'cid': 11, 'page': 1, 'duration': 137, 'part': 'P1'},
+                          {'cid': 12, 'page': 2, 'duration': 9550, 'part': 'P2'}]}
+        assert _resolve_video_target(info, 1, 'BV1') == (1, 11, 'T', 137.0)
+
+    def test_multi_page_nth_page_switches_cid_and_title(self):
+        info = {'aid': 1, 'cid': 11, 'title': 'T', 'duration': 9687,
+                'pages': [{'cid': 11, 'duration': 137, 'part': 'P1'},
+                          {'cid': 12, 'duration': 9550, 'part': '第二讲'}]}
+        assert _resolve_video_target(info, 2, 'BV1') == (1, 12, 'T - P2 第二讲', 9550.0)
+
+    def test_page_out_of_range_falls_back_to_first(self):
+        info = {'aid': 1, 'cid': 11, 'title': 'T', 'duration': 100,
+                'pages': [{'cid': 11, 'duration': 100, 'part': 'P1'}]}
+        assert _resolve_video_target(info, 9, 'BV1')[1] == 11
+
+    def test_missing_pages_keeps_view_values(self):
+        assert _resolve_video_target({'aid': 1, 'cid': 2, 'duration': '600'}, 1, 'BV1') == \
+            (1, 2, 'BV1', 600.0)
+
+    def test_bad_duration_is_zero(self):
+        assert _resolve_video_target({'aid': 1, 'cid': 2, 'duration': 'x'}, 1, 'BV1')[3] == 0.0
+
+
 class TestSubtitleUrlAndReadiness:
     """字幕下载地址补全 + 字幕轨"已生成"判定"""
 
@@ -741,6 +780,15 @@ class TestSubtitleBodyValidation:
     def test_complete_body_is_not_flagged(self):
         assert _is_subtitle_body_incomplete(self._body(120), 600, is_ai=True)[0] is False
 
+    def test_ai_coverage_bar_is_stricter_than_cc(self):
+        """同一份覆盖 60% 时长的字幕：CC 可用，AI 判旧/错（AI 字幕几乎覆盖全部语音）"""
+        body = [{'from': i * 5, 'to': i * 5 + 5, 'content': 'x'} for i in range(72)]  # 覆盖 360s
+        assert _validate_subtitle_body(body, 600, is_ai=False)[0] is True
+        ok, reason = _validate_subtitle_body(body, 600, is_ai=True)
+        assert ok is False and '期望下限' in reason
+        assert _min_expected_coverage(600, True) == 420.0
+        assert _min_expected_coverage(600, False) == 270.0
+
 
 class TestAcquireBilibiliSubtitle:
     """候选字幕轨「下载 → 校验 → 重试」行为"""
@@ -768,11 +816,11 @@ class TestAcquireBilibiliSubtitle:
 
         def fake_refresh(aid, cid, bvid, lan):
             calls['refresh'] += 1
-            return 'https://cdn/new.json'
+            return ['https://cdn/new.json']
 
         monkeypatch.setattr('services.downloader._fetch_subtitle_body', fake_fetch)
         monkeypatch.setattr('services.downloader._subtitle_retry_wait', fake_wait)
-        monkeypatch.setattr('services.downloader._refresh_subtitle_url', fake_refresh)
+        monkeypatch.setattr('services.downloader._refresh_subtitle_urls', fake_refresh)
 
         result = await _acquire_bilibili_subtitle(
             [{'lan': 'ai-zh', 'subtitle_url': 'https://cdn/old.json'}],
@@ -787,7 +835,7 @@ class TestAcquireBilibiliSubtitle:
     async def test_falls_through_to_next_candidate_track(self, tmp_path, monkeypatch):
         """首选轨一直拿不到有效内容 → 自动换下一条候选轨"""
         monkeypatch.setattr('services.downloader._BILI_SUBTITLE_MAX_ATTEMPTS', 2)
-        monkeypatch.setattr('services.downloader._refresh_subtitle_url', lambda *a: '')
+        monkeypatch.setattr('services.downloader._refresh_subtitle_urls', lambda *a: [])
         monkeypatch.setattr('services.downloader._subtitle_retry_wait',
                             lambda _s: asyncio.sleep(0))
         full = self._full_body()
@@ -809,7 +857,7 @@ class TestAcquireBilibiliSubtitle:
     async def test_failure_when_all_candidates_unusable(self, tmp_path, monkeypatch):
         """全部候选轨都拿不到完整内容 → 失败（调用方转转录，宁缺勿错）"""
         monkeypatch.setattr('services.downloader._BILI_SUBTITLE_MAX_ATTEMPTS', 2)
-        monkeypatch.setattr('services.downloader._refresh_subtitle_url', lambda *a: '')
+        monkeypatch.setattr('services.downloader._refresh_subtitle_urls', lambda *a: [])
         monkeypatch.setattr('services.downloader._subtitle_retry_wait',
                             lambda _s: asyncio.sleep(0))
 
@@ -829,7 +877,7 @@ class TestAcquireBilibiliSubtitle:
     async def test_uses_best_effort_body_after_retries(self, tmp_path, monkeypatch):
         """硬校验通过但持续偏稀疏 → 重试耗尽后用覆盖最全的一份，而非直接放弃"""
         monkeypatch.setattr('services.downloader._BILI_SUBTITLE_MAX_ATTEMPTS', 2)
-        monkeypatch.setattr('services.downloader._refresh_subtitle_url', lambda *a: '')
+        monkeypatch.setattr('services.downloader._refresh_subtitle_urls', lambda *a: [])
         monkeypatch.setattr('services.downloader._subtitle_retry_wait',
                             lambda _s: asyncio.sleep(0))
         sparse = [{'from': i * 100, 'to': i * 100 + 10, 'content': 'x'} for i in range(5)]
@@ -860,7 +908,7 @@ class TestAcquireBilibiliSubtitle:
 
         monkeypatch.setattr('services.downloader._subtitle_retry_wait',
                             lambda _s: asyncio.sleep(0))
-        monkeypatch.setattr('services.downloader._refresh_subtitle_url', lambda *a: '')
+        monkeypatch.setattr('services.downloader._refresh_subtitle_urls', lambda *a: [])
         monkeypatch.setattr('services.downloader._fetch_subtitle_body', fake_fetch)
 
         result = await _acquire_bilibili_subtitle(
@@ -869,3 +917,59 @@ class TestAcquireBilibiliSubtitle:
 
         assert result['success'] is True
         assert calls['n'] == 2
+
+
+class TestSubtitleUrlRefresh:
+    """重试取链：换新 auth_key + 同 lan 多条链接（B站字幕只有 player/v2 一条真源）"""
+
+    def test_urls_for_lan_filters_and_normalizes(self):
+        tracks = [
+            {'lan': 'zh-CN', 'subtitle_url': '//cdn/a.json'},
+            {'lan': 'ai-zh', 'subtitle_url': 'https://cdn/b.json'},
+            {'lan': 'zh-CN', 'subtitle_url': 'https://cdn/c.json'},
+        ]
+        assert _urls_for_lan(tracks, 'ZH-cn') == ['https://cdn/a.json', 'https://cdn/c.json']
+        assert _urls_for_lan(tracks, 'ai-zh') == ['https://cdn/b.json']
+        assert _urls_for_lan(None, 'zh-CN') == []
+        assert _dedupe_urls(['a', '', 'a', 'b']) == ['a', 'b']
+
+    def test_refresh_returns_fresh_urls_for_lan(self, monkeypatch):
+        """刷新只取同 lan 的链接并去重（其它 lan 不带回）"""
+        monkeypatch.setattr(
+            'services.downloader._fetch_subtitles_via_player_v2',
+            lambda aid, cid, bvid: ({'subtitles': [
+                {'lan': 'ai-zh', 'subtitle_url': '//cdn/player.json'},
+                {'lan': 'zh-CN', 'subtitle_url': 'https://cdn/cc.json'},
+                {'lan': 'ai-zh', 'subtitle_url': 'https://cdn/player.json'},
+            ]}, 0, True))
+
+        assert _refresh_subtitle_urls(1, 2, 'BV1abc123456', 'ai-zh') == \
+            ['https://cdn/player.json']
+
+    def test_refresh_returns_empty_when_source_fails(self, monkeypatch):
+        monkeypatch.setattr('services.downloader._fetch_subtitles_via_player_v2',
+                            lambda aid, cid, bvid: ({}, 0, False))
+        assert _refresh_subtitle_urls(1, 2, 'BV1abc123456', 'ai-zh') == []
+
+    @pytest.mark.asyncio
+    async def test_retry_with_fresh_url_gets_correct_body(self, tmp_path, monkeypatch):
+        """旧链接的字幕是旧内容（覆盖 44s / 视频 600s）→ 换新链接取回正确字幕"""
+        monkeypatch.setattr('services.downloader._BILI_SUBTITLE_MAX_ATTEMPTS', 2)
+        monkeypatch.setattr('services.downloader._subtitle_retry_wait',
+                            lambda _s: asyncio.sleep(0))
+        stale = [{'from': 0, 'to': 44, 'content': '旧字幕'}]
+        correct = [{'from': i * 5, 'to': i * 5 + 5, 'content': '对'} for i in range(120)]
+
+        async def fake_fetch(url, bvid=''):
+            return stale if 'stale' in url else correct
+
+        monkeypatch.setattr('services.downloader._fetch_subtitle_body', fake_fetch)
+        monkeypatch.setattr('services.downloader._refresh_subtitle_urls',
+                            lambda *a: ['https://cdn/fresh.json'])
+
+        result = await _acquire_bilibili_subtitle(
+            [{'lan': 'zh-CN', 'subtitle_url': 'https://cdn/stale.json'}],
+            1, 2, 'BV1abc123456', 600.0, tmp_path)
+
+        assert result['success'] is True
+        assert result['body_count'] == 120

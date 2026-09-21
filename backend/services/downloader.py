@@ -283,6 +283,11 @@ def detect_platform(url: str) -> Tuple[str, bool]:
 _BILI_SUBTITLE_MAX_ATTEMPTS = int(os.environ.get('BILI_SUBTITLE_MAX_ATTEMPTS', '4'))
 _BILI_SUBTITLE_RETRY_BASE = float(os.environ.get('BILI_SUBTITLE_RETRY_BASE', '3'))
 
+# AI 字幕的时间覆盖下限（占视频时长比例）。AI 字幕几乎覆盖全部语音内容，
+# 覆盖率腰斩基本等价于旧/错字幕；CC 允许创作者只传片段，故阈值宽松得多。
+# 纯请求侧校验：只用"视频时长 + 字幕时间轴"两个接口数据即可判断，不需要音频/ASR。
+_AI_SUBTITLE_MIN_COVERAGE = float(os.environ.get('BILI_SUBTITLE_MIN_COVERAGE', '0.75'))
+
 
 async def _subtitle_retry_wait(seconds: float):
     """字幕重试间隔（独立函数：便于测试 monkeypatch，也便于将来换成指数退避）。"""
@@ -424,6 +429,39 @@ def _fetch_subtitles_via_player_v2(aid, cid, bvid):
     return {}, 0, api_ok
 
 
+def _resolve_video_target(info: dict, page: int = 1, fallback_title: str = ''):
+    """从视频信息里解析 (aid, cid, 标题, 时长秒)。
+
+    **多P 陷阱**：`x/web-interface/view` 的 `duration` 是**各分P时长之和**，而 `cid` 只对应
+    第 1P。若拿整篇时长去校验某个分P的字幕覆盖范围，会把正常的分P字幕误判成"覆盖不足"
+    （反之也会放宽）。故只要 `pages` 存在，cid 与时长一律按 `?p=N` 从 pages 取。
+    `page` 越界时退回第 1P（与旧行为一致）。
+    """
+    aid = info.get('aid', 0)
+    cid = info.get('cid', 0)
+    title = info.get('title') or fallback_title
+    try:
+        duration = float(info.get('duration') or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+
+    pages = info.get('pages') or []
+    if pages:
+        index = page - 1 if 0 < page <= len(pages) else 0
+        page_info = pages[index] or {}
+        if page_info.get('cid'):
+            cid = page_info['cid']
+        if page > 1:
+            title = f'{title} - P{page} {page_info.get("part", "")}'
+        try:
+            page_duration = float(page_info.get('duration') or 0)
+        except (TypeError, ValueError):
+            page_duration = 0.0
+        if page_duration:
+            duration = page_duration
+    return aid, cid, title, duration
+
+
 async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_id: str = '') -> dict:
     """
     提取B站字幕（AI字幕 / 创作者上传字幕）
@@ -497,35 +535,10 @@ async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_i
     def _do_extract():
         """同步函数：在线程池中执行，使用 bilibili-api-python 提取字幕"""
         v = bili_video.Video(bvid=bvid, credential=credential)
-        # Step 1: 获取视频信息（aid/cid/标题/分P列表）
+        # Step 1: 获取视频信息（aid/cid/标题/时长，分P取用见 _resolve_video_target）
         _throttle_bili_api()
         info = bili_sync(v.get_info())
-        aid = info.get('aid', 0)
-        cid = info.get('cid', 0)
-        video_title = info.get('title', bvid)
-        # 视频时长（秒），供字幕时长校验（防旧/错误字幕）
-        try:
-            video_duration = float(info.get('duration') or 0)
-        except (TypeError, ValueError):
-            video_duration = 0.0
-        pages = info.get('pages', []) or []
-
-        # 多P：根据 ?p=N 从 pages 取对应分P的 cid
-        if page > 1 and pages:
-            if len(pages) >= page:
-                page_info = pages[page - 1]
-                page_cid = page_info.get('cid')
-                page_title = page_info.get('part', '')
-                if page_cid:
-                    cid = page_cid
-                    video_title = f'{video_title} - P{page} {page_title}'
-                try:
-                    page_dur = float(page_info.get('duration') or 0)
-                except (TypeError, ValueError):
-                    page_dur = 0.0
-                if page_dur:
-                    video_duration = page_dur
-            # 页数不足则用第1P（已在上方获取）
+        aid, cid, video_title, video_duration = _resolve_video_target(info, page, bvid)
 
         # Step 2: 获取字幕列表
         # v17.4.2+: get_subtitle 内部用 player/wbi/v2 需要 SESSDATA，无登录时会抛异常
@@ -649,20 +662,32 @@ def _subtitle_body_stats(body) -> Tuple[int, float]:
     return count, coverage
 
 
-def _validate_subtitle_body(body, video_duration: float) -> Tuple[bool, str]:
-    """字幕内容硬校验（决定"能不能用"）。
+def _min_expected_coverage(video_duration: float, is_ai: bool) -> float:
+    """字幕时间覆盖的期望下限（秒）——纯请求侧判据（视频时长 + 字幕时间轴，无需音频）。
+
+    AI 字幕几乎覆盖全部语音内容，覆盖率腰斩基本等价于旧/错字幕，故阈值比 CC 严得多；
+    CC 允许创作者只上传片段（历史任务里常见），阈值保持宽松，避免误杀。
+    """
+    ratio = _AI_SUBTITLE_MIN_COVERAGE if is_ai else 0.5
+    return video_duration * ratio - 30
+
+
+def _validate_subtitle_body(body, video_duration: float, is_ai: bool = False) -> Tuple[bool, str]:
+    """字幕内容硬校验（决定"能不能用"）。返回 (是否可用, 不可用原因)。
 
     覆盖范围明显偏离视频时长 → 判定旧/错字幕（B站 AI 字幕换源/重传后可能仍是旧内容，
-    与当前视频对不上却会被一路送进分段/总结）。返回 (是否可用, 不可用原因)。
+    与当前视频对不上却会被一路送进分段/总结）。校验只用请求侧数据，不依赖抽查。
     """
     count, coverage = _subtitle_body_stats(body)
     if count == 0:
         return False, '内容为空'
     if video_duration and coverage:
-        if coverage < video_duration * 0.5 - 30:
-            return False, f'覆盖 {coverage:.0f}s 远低于视频 {video_duration:.0f}s，疑似旧/错误字幕'
         if coverage > video_duration + 120:
             return False, f'覆盖 {coverage:.0f}s 超出视频 {video_duration:.0f}s，疑似非本视频字幕'
+        expected = _min_expected_coverage(video_duration, is_ai)
+        if coverage < expected:
+            return False, (f'覆盖 {coverage:.0f}s 低于视频 {video_duration:.0f}s 的期望下限 '
+                           f'{expected:.0f}s（{"AI" if is_ai else "CC"} 字幕），疑似旧/错误字幕')
     return True, ''
 
 
@@ -676,8 +701,11 @@ def _is_subtitle_body_incomplete(body, video_duration: float, is_ai: bool = True
     count, coverage = _subtitle_body_stats(body)
     if count == 0:
         return True, '内容为空'
-    if video_duration and coverage and coverage < video_duration * 0.6 - 30:
-        return True, f'覆盖 {coverage:.0f}s 明显短于视频 {video_duration:.0f}s'
+    if video_duration and coverage:
+        # 比硬校验下限再高一档：够用但不满时也值得换源重试一次
+        expected = _min_expected_coverage(video_duration, is_ai) + video_duration * 0.1
+        if coverage < expected:
+            return True, f'覆盖 {coverage:.0f}s 明显短于视频 {video_duration:.0f}s'
     if is_ai and coverage >= 60 and coverage / 30 > count:
         # 平均超过 30s 才一条（B站 AI 字幕常态约 5s/条）→ 明显低于正常密度
         return True, f'仅 {count} 条覆盖 {coverage:.0f}s，密度异常'
@@ -701,22 +729,43 @@ async def _fetch_subtitle_body(sub_url: str, bvid: str = '') -> list:
     return []
 
 
-def _refresh_subtitle_url(aid, cid, bvid, lan: str) -> str:
-    """重新请求播放器接口，取指定 lan 轨的**新的** subtitle_url（auth_key 会过期）。
+def _dedupe_urls(urls) -> list:
+    """链接去重（保序），去掉空值。"""
+    out = []
+    for url in urls or []:
+        if url and url not in out:
+            out.append(url)
+    return out
 
-    重试前必须换新链接：旧链接的 auth_key 过期后每次重试都会 403。取不到返回空串，
-    调用方沿用旧链接再试。
+
+def _urls_for_lan(tracks, lan: str) -> list:
+    """从字幕轨列表里取指定 lan 的下载链接（返回列表：同 lan 理论上可有多条）。"""
+    target = (lan or '').lower()
+    urls = []
+    for track in tracks or []:
+        if (track.get('lan') or '').lower() == target:
+            url = _normalize_subtitle_url(track.get('subtitle_url', ''))
+            if url:
+                urls.append(url)
+    return urls
+
+
+def _refresh_subtitle_urls(aid, cid, bvid, lan: str) -> list:
+    """重新请求播放器接口，取指定 lan 轨的**新的**下载链接（重试时调用）。
+
+    必须换新链接：subtitle_url 带时效 auth_key，旧链接过期后每次重试都只会 403。
+    走 `x/player/v2`（内含 wbi 与"登录被风控则匿名兜底"两条二级重试）。
+    返回去重后的链接列表（可能为空，调用方沿用旧链接再试）。
+
+    注：曾尝试把 `x/player/wbi/playurl` 当作第二数据源交叉取链，**2026-09-21 真网实测
+    该接口的 `data.subtitle` 恒为 null（fnval=4048/16 均如此，code=0）**——B站已不在
+    playurl 返回字幕元数据，故不再引入（避免死代码与多余的 412 风险面）。
     """
     subtitle, _tl, _ok = _fetch_subtitles_via_player_v2(aid, cid, bvid)
-    tracks = (subtitle or {}).get('subtitles') or []
-    target = (lan or '').lower()
-    for track in tracks:
-        if (track.get('lan') or '').lower() == target:
-            fresh = _normalize_subtitle_url(track.get('subtitle_url', ''))
-            if fresh:
-                logger.info(f'字幕链接已刷新: lan={lan}')
-                return fresh
-    return ''
+    urls = _dedupe_urls(_urls_for_lan((subtitle or {}).get('subtitles'), lan))
+    if urls:
+        logger.info(f'字幕链接已刷新: lan={lan}, 候选链接 {len(urls)} 条')
+    return urls
 
 
 def _build_subtitle_result(body, output_dir: Path) -> dict:
@@ -734,12 +783,12 @@ def _build_subtitle_result(body, output_dir: Path) -> dict:
 
 async def _acquire_bilibili_subtitle(subtitles, aid, cid, bvid, video_duration,
                                      output_dir: Path, sio=None, job_id: str = '') -> dict:
-    """候选字幕轨上「下载 → 校验 → 重试」，直到拿到完整可用的一份。
+    """候选字幕轨上「下载 → 校验 → 换链接重试」，直到拿到完整可用的一份。
 
-    重试触发条件：链接过期/网络失败、内容为空、覆盖范围不符、疑似"假残缺"。
-    每次重试都先刷新 subtitle_url（换新 auth_key）再退避等待；
+    重试触发条件：链接过期/网络失败、内容为空、时间覆盖不符、疑似"假残缺"。
+    每次重试都重新请求接口换新链接（新 auth_key），优先用尚未试过的链接；
     一条轨重试耗尽后换下一条候选轨。宁缺勿错：全部拿不到完整内容就返回 success=False
-    让调用方走转录，而不是把残缺字幕当成品。
+    让调用方走转录，而不是把残缺/错位字幕当成品。
     """
     from socket_handlers import emit_log
 
@@ -750,38 +799,39 @@ async def _acquire_bilibili_subtitle(subtitles, aid, cid, bvid, video_duration,
 
     best = None  # (coverage, count, body, lan)：硬校验通过但疑似残缺的最优一份，作兜底
     candidates = list(subtitles)[:4]
-    for index, chosen in enumerate(candidates):
+    for chosen in candidates:
         lan = chosen.get('lan', '')
         is_ai = lan.lower().startswith('ai')
-        sub_url = _normalize_subtitle_url(chosen.get('subtitle_url', ''))
-        if not sub_url:
+        urls = _dedupe_urls([_normalize_subtitle_url(chosen.get('subtitle_url', ''))])
+        if not urls:
             await _log(f'  ⚠ 字幕轨 {lan} 无下载地址，换下一条候选轨')
             continue
         for attempt in range(1, _BILI_SUBTITLE_MAX_ATTEMPTS + 1):
             if attempt > 1:
-                # 刷新链接是同步 httpx 调用 → 放线程池，避免阻塞事件循环
-                fresh = await asyncio.to_thread(_refresh_subtitle_url, aid, cid, bvid, lan)
-                if fresh:
-                    sub_url = fresh
+                # 刷新/换源是同步 httpx 调用 → 放线程池，避免阻塞事件循环
+                fresh = await asyncio.to_thread(_refresh_subtitle_urls, aid, cid, bvid, lan)
+                urls = _dedupe_urls(urls + fresh)
                 await _subtitle_retry_wait(_BILI_SUBTITLE_RETRY_BASE * (attempt - 1))
+            # 优先用还没试过的链接（新 auth_key / 另一个数据源），没有新的就复用最后一条
+            sub_url = urls[min(attempt - 1, len(urls) - 1)]
             try:
                 body = await _fetch_subtitle_body(sub_url, bvid)
             except Exception as e:
                 await _log(f'  ⚠ 字幕 {lan} 第{attempt}次下载失败（{_short_error(e)}）')
                 continue
-            ok, reason = _validate_subtitle_body(body, video_duration)
+            ok, reason = _validate_subtitle_body(body, video_duration, is_ai)
             if not ok:
-                await _log(f'  ⚠ 字幕 {lan} 校验未过（{reason}），第{attempt}次尝试结束')
+                await _log(f'  ⚠ 字幕 {lan} 第{attempt}次内容校验未过（{reason}），换新链接重试')
                 continue
             incomplete, why = _is_subtitle_body_incomplete(body, video_duration, is_ai)
             if not incomplete:
                 if attempt > 1:
-                    await _log(f'  ✅ 字幕 {lan} 第{attempt}次重试后拿到完整内容')
+                    await _log(f'  ✅ 字幕 {lan} 第{attempt}次尝试拿到完整内容')
                 return _build_subtitle_result(body, output_dir)
             count, coverage = _subtitle_body_stats(body)
             if best is None or coverage > best[0]:
                 best = (coverage, count, body, lan)
-            await _log(f'  ⚠ 字幕 {lan} 疑似残缺（{why}），稍后重试（第{attempt}/{_BILI_SUBTITLE_MAX_ATTEMPTS}次）')
+            await _log(f'  ⚠ 字幕 {lan} 疑似残缺（{why}），换新链接重试（第{attempt}/{_BILI_SUBTITLE_MAX_ATTEMPTS}次）')
 
     if best is not None:
         _cov, count, body, lan = best
