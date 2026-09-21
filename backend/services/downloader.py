@@ -57,15 +57,19 @@ def _ensure_buvid() -> dict:
     return _BUVID_CACHE
 
 
-def _bili_headers(bvid: str = '') -> dict:
-    """构造尽量接近浏览器的 B站 API 请求头：完整 UA + buvid 指纹 + 真实视频页 Referer"""
+def _bili_headers(bvid: str = '', with_cookies: bool = True) -> dict:
+    """构造尽量接近浏览器的 B站 API 请求头：完整 UA + buvid 指纹 + 真实视频页 Referer
+
+    with_cookies=False：只带 buvid 指纹（匿名请求）——登录态被风控 412 时用于兜底重试。
+    """
     headers = {
         'User-Agent': FULL_CHROME_UA,
         'Referer': f'https://www.bilibili.com/video/{bvid}' if bvid else 'https://www.bilibili.com',
         'Accept': 'application/json, text/plain, */*',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
     }
-    cookies = load_cookies() or {}
+    cookies = (load_cookies() or {}) if with_cookies else {}
+    cookies = dict(cookies)
     cookies.update(_ensure_buvid())
     headers['Cookie'] = '; '.join(f'{k}={v}' for k, v in cookies.items())
     return headers
@@ -272,27 +276,70 @@ def detect_platform(url: str) -> Tuple[str, bool]:
 
 
 # ============ B站字幕提取 ============
+# 字幕体获取的重试策略（对抗"假残缺"/auth_key 过期，2026-09-21）：
+# ①subtitle_url 带有时效 auth_key，过期即 403 → 重试时重新请求 player/v2 换新链接；
+# ②风控降级时"轨道存在但 body 只有几条"（同一视频稍后复查能拿到完整内容）→ 退避重试；
+# ③首选轨彻底不可用时依次尝试后面的候选轨，而不是直接放弃整条字幕。
+_BILI_SUBTITLE_MAX_ATTEMPTS = int(os.environ.get('BILI_SUBTITLE_MAX_ATTEMPTS', '4'))
+_BILI_SUBTITLE_RETRY_BASE = float(os.environ.get('BILI_SUBTITLE_RETRY_BASE', '3'))
+
+
+async def _subtitle_retry_wait(seconds: float):
+    """字幕重试间隔（独立函数：便于测试 monkeypatch，也便于将来换成指数退避）。"""
+    await asyncio.sleep(seconds)
+
+
+def _is_subtitle_ready(sub: dict) -> bool:
+    """字幕轨是否"已生成可用"。
+
+    B站 AI 字幕生成中（``ai_status`` != 2）时 subtitle_url 会返回空/半成品内容，
+    必须剔除，否则会把"还没生成完"的字幕当成成品送进分段/总结。
+    CC（创作者上传）没有 ai_status 或为 0；老接口不返回该字段 → 一律按可用处理。
+    """
+    is_ai = (sub.get('lan') or '').lower().startswith('ai')
+    if not is_ai:
+        return True
+    status = sub.get('ai_status')
+    if status is None or status == '':
+        return True
+    try:
+        return int(status) == 2
+    except (TypeError, ValueError):
+        return True
+
+
+def _zh_variant_rank(lan: str) -> int:
+    """中文变体排序：简体优先（默认输出语言是简体中文），繁体其次，其他最后。"""
+    if lan in ('zh', 'zh-hans', 'zh-cn', 'zh-sg', 'zh-my'):
+        return 0
+    if lan in ('zh-tw', 'zh-hant', 'zh-hk', 'zh-mo'):
+        return 1
+    return 2
+
+
 def _pick_zh_subtitle(subtitles: list) -> list:
     """从中文字幕列表里按优先级挑可用字幕，返回新的排序后列表。
 
     优先级（CC 人工上传永不旧，必须排 AI 之前）：
-    1. 中文 CC 字幕（lan 如 zh-CN/zh-Hans，无 ai- 前缀）
+    1. 中文 CC 字幕（lan 如 zh-CN/zh-Hans，无 ai- 前缀），简体优先于繁体
     2. 中文 AI 字幕（ai-zh）
     3. 兜底：任意 AI 字幕（视频本身可能是外文）
     4. 空列表（调用方走转录流程）
-    绝不把 ai-en / ai-jp 之类的非中文字幕误当中文用。
+    绝不把 ai-en / ai-jp 之类的非中文字幕误当中文用；
+    生成中（ai_status != 2）的 AI 字幕直接剔除，不参与排序。
     """
     def _lan(s):
         return (s.get('lan') or '').lower()
 
+    ready = [s for s in subtitles if _is_subtitle_ready(s)]
     zh_subs = [
-        s for s in subtitles
+        s for s in ready
         if _lan(s).startswith('zh') or _lan(s).startswith('ai-zh')
     ]
-    # CC（非 ai- 前缀）排前面，AI 字幕排后面
-    zh_subs.sort(key=lambda s: _lan(s).startswith('ai-'))
+    # CC（非 ai- 前缀）排前面，AI 字幕排后面；同类内简体优先
+    zh_subs.sort(key=lambda s: (_lan(s).startswith('ai-'), _zh_variant_rank(_lan(s))))
     if not zh_subs:
-        zh_subs = [s for s in subtitles if _lan(s).startswith('ai')]
+        zh_subs = [s for s in ready if _lan(s).startswith('ai')]
     return zh_subs
 
 
@@ -300,18 +347,28 @@ def _fetch_subtitles_via_player_v2(aid, cid, bvid):
     """同步调用 B 站播放器 API 获取字幕列表。
 
     接口顺序：先走实测更稳的旧版 ``player/v2``（带浏览器常参数），
-    wbi/v2 降级为备用；wbi 若被风控(412)则强制刷新签名密钥重试一次。
+    wbi/v2 降级为备用；wbi 若被风控(412)则强制刷新签名密钥重试一次；
+    仍被风控且本机有登录态时，最后用匿名身份再试一次（登录态可能比匿名更严）。
     返回 (subtitle_dict, timelength_ms, api_ok)：
     - timelength 为视频时长（毫秒），用于字幕时长校验（防旧/错误字幕），取不到为 0
     - api_ok 表示是否至少有一个接口正常响应（code==0，即使字幕为空）——
       用于区分“B站确认无字幕”（可跳过 yt-dlp 兜底）和“接口被风控/异常”（必须兜底）
     """
-    headers = _bili_headers(bvid)
+    legacy_url = 'https://api.bilibili.com/x/player/v2?' + urlencode({
+        'aid': aid,
+        'cid': cid,
+        'part': 1,
+        'dm_img_str': 'V2ViR0VuR2FyOlxyZXR1cm4gTmV3cyBLZXkgUGFnZSBMaXN0Ig==',
+        'dm_cover_img_str': '',
+        'dm_img_list': '[]',
+        'dm_img_crypto': '',
+        'web_location': '1315875',
+    })
 
-    def _try(url: str):
+    def _try(url: str, with_cookies: bool = True):
         _throttle_bili_api()
         try:
-            resp = httpx.get(url, headers=headers, timeout=15.0)
+            resp = httpx.get(url, headers=_bili_headers(bvid, with_cookies), timeout=15.0)
             data = resp.json()
         except Exception as e:
             logger.warning(f'B站字幕接口调用失败: {e}')
@@ -330,16 +387,6 @@ def _fetch_subtitles_via_player_v2(aid, cid, bvid):
         return subtitle, sub.get('timelength', 0), True
 
     # 1) 旧版 player/v2 优先（今天实测未被风控，先拿字幕再考虑更严的签名接口）
-    legacy_url = 'https://api.bilibili.com/x/player/v2?' + urlencode({
-        'aid': aid,
-        'cid': cid,
-        'part': 1,
-        'dm_img_str': 'V2ViR0VuR2FyOlxyZXR1cm4gTmV3cyBLZXkgUGFnZSBMaXN0Ig==',
-        'dm_cover_img_str': '',
-        'dm_img_list': '[]',
-        'dm_img_crypto': '',
-        'web_location': '1315875',
-    })
     subtitle, tl, _ = _try(legacy_url)
     if subtitle.get('subtitles'):
         return subtitle, tl, True
@@ -365,6 +412,15 @@ def _fetch_subtitles_via_player_v2(aid, cid, bvid):
             if subtitle.get('subtitles'):
                 return subtitle, tl, True
             api_ok = api_ok or api_ok2
+
+    # 4) 登录态反而比匿名更严（真实踩坑：带 SESSDATA 时 412，匿名能过）→ 匿名再试一次。
+    #    匿名看不到 AI 字幕，所以只认"命中字幕列表"；空列表不能改判 api_ok，
+    #    否则会把"登录被风控"误判成"B站确认无字幕"而跳过 yt-dlp 兜底。
+    if not api_ok and load_cookies():
+        subtitle, tl, _ = _try(legacy_url, with_cookies=False)
+        if subtitle.get('subtitles'):
+            logger.info('登录态被风控，匿名请求命中字幕列表')
+            return subtitle, tl, True
     return {}, 0, api_ok
 
 
@@ -499,10 +555,11 @@ async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_i
         # sub_data 格式: {"allow_submit":..., "lan":..., "subtitles":[{lan, lan_doc, subtitle_url, ai_status}], ...}
         subtitles = sub_data.get('subtitles', []) if isinstance(sub_data, dict) else []
 
-        return aid, cid, video_title, _pick_zh_subtitle(subtitles), video_duration, api_ok
+        return aid, cid, video_title, _pick_zh_subtitle(subtitles), video_duration, api_ok, subtitles
 
     try:
-        aid, cid, video_title, zh_subs, video_duration, api_ok = await asyncio.to_thread(_do_extract)
+        aid, cid, video_title, zh_subs, video_duration, api_ok, all_subtitles = \
+            await asyncio.to_thread(_do_extract)
     except Exception as e:
         logger.warning(f'bilibili-api-python 提取字幕失败: {e}')
         if sio:
@@ -528,86 +585,212 @@ async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_i
     if sio:
         from socket_handlers import emit_log
         sub_info = [(s.get('lan', ''), s.get('lan_doc', '')) for s in zh_subs]
-        await emit_log(sio, job_id, f'找到 {len(zh_subs)} 条字幕: {sub_info}')
-
-    # 下载字幕JSON（库返回的 subtitle_url 可直接下载，库已确保URL正确）
-    chosen = zh_subs[0]
-    sub_url = chosen.get('subtitle_url', '')
-    if not sub_url:
-        return {"success": False, "message": "字幕URL为空"}
-
-    # 处理协议相对URL: //aisubtitle.hdslb.com/...
-    if sub_url.startswith('//'):
-        sub_url = 'https:' + sub_url
-    elif sub_url.startswith('/'):
-        sub_url = 'https://api.bilibili.com' + sub_url
-    elif not sub_url.startswith('http'):
-        sub_url = 'https://' + sub_url
-
-    logger.info(f'字幕下载: bvid={bvid}, aid={aid}, cid={cid}, lan={chosen.get("lan","")}')
-
-    # 下载字幕内容（带上完整浏览器指纹，避免 aisubtitle 也被风控）
-    api_headers = _bili_headers(bvid)
-    try:
-        async with httpx.AsyncClient(timeout=15.0, headers=api_headers) as sub_client:
-            resp = await sub_client.get(sub_url)
-            if resp.status_code != 200:
-                return {"success": False, "message": f"字幕下载失败: HTTP {resp.status_code}"}
-            sub_json = resp.json()
-    except Exception as e:
-        logger.warning(f'字幕下载失败: {e}')
-        return {"success": False, "message": f"字幕下载异常: {e}"}
-
-    # 校验字幕内容非空
-    if isinstance(sub_json, dict):
-        body = sub_json.get('body', [])
-    elif isinstance(sub_json, list):
-        body = sub_json
-    else:
-        body = []
-    if not body:
-        return {"success": False, "message": "字幕JSON内容为空"}
-
-    # ★ 字幕时长校验：B站 AI 字幕在换源/重传后可能仍是旧内容（相当于“历史数据”），
-    # 与当前视频对不上却会被当成转录结果一路送到分段/总结。字幕时间覆盖范围
-    # 明显偏离视频时长时判定可疑，回退本地转录而不是导出错误内容。
-    sub_duration = 0.0
-    try:
-        ends = [
-            float(item['to']) for item in body
-            if isinstance(item, dict) and item.get('to') is not None
+        await emit_log(sio, job_id, f'找到 {len(zh_subs)} 条可用字幕: {sub_info}')
+        pending = [
+            (s.get('lan', ''), s.get('ai_status')) for s in (all_subtitles or [])
+            if not _is_subtitle_ready(s)
         ]
-        if ends:
-            sub_duration = max(ends)
-    except (TypeError, ValueError):
-        pass
-    if video_duration and sub_duration:
-        if sub_duration < video_duration * 0.5 - 30 or sub_duration > video_duration + 120:
-            msg = (f'B站字幕时长校验不通过：字幕覆盖 {sub_duration:.0f}s，'
-                   f'视频 {video_duration:.0f}s，疑似旧/错误字幕，转本地转录')
-            logger.warning(msg)
-            if sio:
-                from socket_handlers import emit_log
-                await emit_log(sio, job_id, f'⚠ {msg}')
-            return {"success": False, "message": "字幕时长与视频时长不匹配，疑似旧字幕", "reason": "duration_mismatch"}
+        if pending:
+            await emit_log(sio, job_id, f'⚠ 跳过 {len(pending)} 条生成未完成的AI字幕: {pending}')
 
-    # 写入SRT和TXT（固定文件名，避免 Windows 非法字符 / ADS 旁路）
-    # 视频标题只存返回字段，不进路径
-    srt_path = output_dir / 'bilibili_subtitle.srt'
-    txt_path = output_dir / 'bilibili_subtitle.txt'
-    _write_subtitle_files(sub_json, srt_path, txt_path)
+    logger.info(f'字幕下载: bvid={bvid}, aid={aid}, cid={cid}, 候选轨={[s.get("lan") for s in zh_subs]}')
+
+    # ★ "下载 → 校验 → 重试"循环：首选轨 auth_key 过期(403)或返回"假残缺"（轨道在但 body
+    #   只有几条）时不直接放弃——重试时重新请求 player/v2 换新链接，并依次尝试后续候选轨。
+    #   全部候选与重试都拿不到完整内容时返回 success=False，由调用方走转录（宁缺勿错）。
+    result = await _acquire_bilibili_subtitle(
+        zh_subs, aid, cid, bvid, video_duration, output_dir, sio, job_id
+    )
+    if not result.get('success'):
+        return result
 
     if sio:
         from socket_handlers import emit_log, emit_progress
-        await emit_log(sio, job_id, f'✅ B站AI字幕提取成功: {video_title} ({len(body)}条)')
-        await emit_progress(sio, job_id, 'transcribe', 100, 'B站AI字幕已获取，跳过本地转录')
+        await emit_log(sio, job_id, f'✅ B站字幕提取成功: {video_title} ({result.get("body_count", 0)}条)')
+        await emit_progress(sio, job_id, 'transcribe', 100, 'B站字幕已获取，跳过本地转录')
 
+    return {
+        "success": True,
+        "srt_path": result['srt_path'],
+        "txt_path": result['txt_path'],
+        "title": video_title,
+        "message": f"字幕提取成功: {video_title}"
+    }
+
+
+def _normalize_subtitle_url(url: str) -> str:
+    """补全字幕下载地址协议（B站常返回 //aisubtitle.hdslb.com/... 或 /x/... 形式）。"""
+    url = (url or '').strip()
+    if not url:
+        return ''
+    if url.startswith('//'):
+        return 'https:' + url
+    if url.startswith('/'):
+        return 'https://api.bilibili.com' + url
+    if not url.startswith('http'):
+        return 'https://' + url
+    return url
+
+
+def _subtitle_body_stats(body) -> Tuple[int, float]:
+    """字幕 body → (条目数, 时间覆盖终点秒数)；非 dict 条目跳过。"""
+    count = 0
+    coverage = 0.0
+    for item in body or []:
+        if not isinstance(item, dict):
+            continue
+        count += 1
+        try:
+            end = float(item.get('to'))
+        except (TypeError, ValueError):
+            continue
+        if end > coverage:
+            coverage = end
+    return count, coverage
+
+
+def _validate_subtitle_body(body, video_duration: float) -> Tuple[bool, str]:
+    """字幕内容硬校验（决定"能不能用"）。
+
+    覆盖范围明显偏离视频时长 → 判定旧/错字幕（B站 AI 字幕换源/重传后可能仍是旧内容，
+    与当前视频对不上却会被一路送进分段/总结）。返回 (是否可用, 不可用原因)。
+    """
+    count, coverage = _subtitle_body_stats(body)
+    if count == 0:
+        return False, '内容为空'
+    if video_duration and coverage:
+        if coverage < video_duration * 0.5 - 30:
+            return False, f'覆盖 {coverage:.0f}s 远低于视频 {video_duration:.0f}s，疑似旧/错误字幕'
+        if coverage > video_duration + 120:
+            return False, f'覆盖 {coverage:.0f}s 超出视频 {video_duration:.0f}s，疑似非本视频字幕'
+    return True, ''
+
+
+def _is_subtitle_body_incomplete(body, video_duration: float, is_ai: bool = True) -> Tuple[bool, str]:
+    """字幕是否疑似"假残缺"（硬校验能过，但内容明显被降级截断）。
+
+    表现：风控降级返回时轨道存在、body 只有零星几条；单独复查同一视频能拿到完整内容。
+    密度判断只对 AI 字幕生效——CC（创作者上传）本身可以很稀疏（歌词/章节式），不能误杀。
+    返回 (是否残缺, 原因)。
+    """
+    count, coverage = _subtitle_body_stats(body)
+    if count == 0:
+        return True, '内容为空'
+    if video_duration and coverage and coverage < video_duration * 0.6 - 30:
+        return True, f'覆盖 {coverage:.0f}s 明显短于视频 {video_duration:.0f}s'
+    if is_ai and coverage >= 60 and coverage / 30 > count:
+        # 平均超过 30s 才一条（B站 AI 字幕常态约 5s/条）→ 明显低于正常密度
+        return True, f'仅 {count} 条覆盖 {coverage:.0f}s，密度异常'
+    return False, ''
+
+
+async def _fetch_subtitle_body(sub_url: str, bvid: str = '') -> list:
+    """下载字幕 JSON 并返回 body 列表（非 200 抛异常，交给调用方决定是否重试）。
+
+    带完整浏览器指纹，避免 aisubtitle CDN 侧也被风控。
+    """
+    async with httpx.AsyncClient(timeout=15.0, headers=_bili_headers(bvid)) as client:
+        resp = await client.get(sub_url)
+    if resp.status_code != 200:
+        raise RuntimeError(f'HTTP {resp.status_code}')
+    data = resp.json()
+    if isinstance(data, dict):
+        return data.get('body') or []
+    if isinstance(data, list):
+        return data
+    return []
+
+
+def _refresh_subtitle_url(aid, cid, bvid, lan: str) -> str:
+    """重新请求播放器接口，取指定 lan 轨的**新的** subtitle_url（auth_key 会过期）。
+
+    重试前必须换新链接：旧链接的 auth_key 过期后每次重试都会 403。取不到返回空串，
+    调用方沿用旧链接再试。
+    """
+    subtitle, _tl, _ok = _fetch_subtitles_via_player_v2(aid, cid, bvid)
+    tracks = (subtitle or {}).get('subtitles') or []
+    target = (lan or '').lower()
+    for track in tracks:
+        if (track.get('lan') or '').lower() == target:
+            fresh = _normalize_subtitle_url(track.get('subtitle_url', ''))
+            if fresh:
+                logger.info(f'字幕链接已刷新: lan={lan}')
+                return fresh
+    return ''
+
+
+def _build_subtitle_result(body, output_dir: Path) -> dict:
+    """把字幕 body 写成 SRT/TXT（固定文件名，避免 Windows 非法字符 / ADS 旁路）。"""
+    srt_path = output_dir / 'bilibili_subtitle.srt'
+    txt_path = output_dir / 'bilibili_subtitle.txt'
+    _write_subtitle_files({'body': body}, srt_path, txt_path)
     return {
         "success": True,
         "srt_path": srt_path,
         "txt_path": txt_path,
-        "title": video_title,
-        "message": f"字幕提取成功: {video_title}"
+        "body_count": len(body),
+    }
+
+
+async def _acquire_bilibili_subtitle(subtitles, aid, cid, bvid, video_duration,
+                                     output_dir: Path, sio=None, job_id: str = '') -> dict:
+    """候选字幕轨上「下载 → 校验 → 重试」，直到拿到完整可用的一份。
+
+    重试触发条件：链接过期/网络失败、内容为空、覆盖范围不符、疑似"假残缺"。
+    每次重试都先刷新 subtitle_url（换新 auth_key）再退避等待；
+    一条轨重试耗尽后换下一条候选轨。宁缺勿错：全部拿不到完整内容就返回 success=False
+    让调用方走转录，而不是把残缺字幕当成品。
+    """
+    from socket_handlers import emit_log
+
+    async def _log(msg: str):
+        logger.info(msg)
+        if sio:
+            await emit_log(sio, job_id, msg)
+
+    best = None  # (coverage, count, body, lan)：硬校验通过但疑似残缺的最优一份，作兜底
+    candidates = list(subtitles)[:4]
+    for index, chosen in enumerate(candidates):
+        lan = chosen.get('lan', '')
+        is_ai = lan.lower().startswith('ai')
+        sub_url = _normalize_subtitle_url(chosen.get('subtitle_url', ''))
+        if not sub_url:
+            await _log(f'  ⚠ 字幕轨 {lan} 无下载地址，换下一条候选轨')
+            continue
+        for attempt in range(1, _BILI_SUBTITLE_MAX_ATTEMPTS + 1):
+            if attempt > 1:
+                # 刷新链接是同步 httpx 调用 → 放线程池，避免阻塞事件循环
+                fresh = await asyncio.to_thread(_refresh_subtitle_url, aid, cid, bvid, lan)
+                if fresh:
+                    sub_url = fresh
+                await _subtitle_retry_wait(_BILI_SUBTITLE_RETRY_BASE * (attempt - 1))
+            try:
+                body = await _fetch_subtitle_body(sub_url, bvid)
+            except Exception as e:
+                await _log(f'  ⚠ 字幕 {lan} 第{attempt}次下载失败（{_short_error(e)}）')
+                continue
+            ok, reason = _validate_subtitle_body(body, video_duration)
+            if not ok:
+                await _log(f'  ⚠ 字幕 {lan} 校验未过（{reason}），第{attempt}次尝试结束')
+                continue
+            incomplete, why = _is_subtitle_body_incomplete(body, video_duration, is_ai)
+            if not incomplete:
+                if attempt > 1:
+                    await _log(f'  ✅ 字幕 {lan} 第{attempt}次重试后拿到完整内容')
+                return _build_subtitle_result(body, output_dir)
+            count, coverage = _subtitle_body_stats(body)
+            if best is None or coverage > best[0]:
+                best = (coverage, count, body, lan)
+            await _log(f'  ⚠ 字幕 {lan} 疑似残缺（{why}），稍后重试（第{attempt}/{_BILI_SUBTITLE_MAX_ATTEMPTS}次）')
+
+    if best is not None:
+        _cov, count, body, lan = best
+        await _log(f'  ⚠ 多次重试后仍偏稀疏，使用覆盖最全的一份（lan={lan}, {count}条）')
+        return _build_subtitle_result(body, output_dir)
+    return {
+        "success": False,
+        "message": "字幕内容不完整或校验未通过（已重试全部候选轨）",
+        "reason": "subtitle_incomplete",
     }
 
 

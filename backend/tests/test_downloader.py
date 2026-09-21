@@ -1,6 +1,7 @@
 """
 downloader 下载服务纯逻辑函数测试
 """
+import asyncio
 import pytest
 from types import SimpleNamespace
 from pathlib import Path
@@ -20,6 +21,12 @@ from services.downloader import (
     _pick_zh_subtitle,
     _bili_headers,
     _ensure_buvid,
+    _acquire_bilibili_subtitle,
+    _is_subtitle_body_incomplete,
+    _is_subtitle_ready,
+    _normalize_subtitle_url,
+    _subtitle_body_stats,
+    _validate_subtitle_body,
     PLATFORM_CONFIG,
 )
 
@@ -327,7 +334,8 @@ class TestPickZhSubtitle:
     def test_empty_input_returns_empty(self):
         assert _pick_zh_subtitle([]) == []
 
-    def test_keeps_original_order_within_same_kind(self):
+    def test_simplified_preferred_over_traditional(self):
+        """同类内简体优先：默认输出语言是简体中文，别优先拿繁体字幕"""
         subs = [
             {"lan": "ai-zh"},
             {"lan": "zh-TW"},
@@ -335,7 +343,23 @@ class TestPickZhSubtitle:
             {"lan": "zh-CN"},
         ]
         picked = _pick_zh_subtitle(subs)
-        assert [s["lan"] for s in picked] == ["zh-TW", "zh-CN", "ai-zh", "ai-zh-Hans"]
+        assert [s["lan"] for s in picked] == ["zh-CN", "zh-TW", "ai-zh", "ai-zh-Hans"]
+
+    def test_drops_ai_subtitle_still_generating(self):
+        """AI 字幕生成中（ai_status!=2）时 body 为空/半成品，必须剔除"""
+        subs = [
+            {"lan": "ai-zh", "ai_status": 1},
+            {"lan": "zh-CN"},
+        ]
+        assert [s["lan"] for s in _pick_zh_subtitle(subs)] == ["zh-CN"]
+
+    def test_drops_generating_ai_when_it_is_the_only_track(self):
+        assert _pick_zh_subtitle([{"lan": "ai-zh", "ai_status": 0}]) == []
+
+    def test_keeps_ready_ai_and_cc_without_ai_status(self):
+        subs = [{"lan": "ai-zh", "ai_status": 2}, {"lan": "zh-Hans"}]
+        assert [s["lan"] for s in _pick_zh_subtitle(subs)] == ["zh-Hans", "ai-zh"]
+
 
 
 class TestBiliFingerprint:
@@ -604,3 +628,244 @@ class TestDownloadVideoSections:
 
         assert len(calls) == 1
         assert '--download-sections' not in calls[0]
+
+
+class TestSubtitleUrlAndReadiness:
+    """字幕下载地址补全 + 字幕轨"已生成"判定"""
+
+    def test_normalize_subtitle_url(self):
+        assert _normalize_subtitle_url('//aisubtitle.hdslb.com/x.json') == \
+            'https://aisubtitle.hdslb.com/x.json'
+        assert _normalize_subtitle_url('/x/player/sub') == 'https://api.bilibili.com/x/player/sub'
+        assert _normalize_subtitle_url('aisubtitle.hdslb.com/x') == 'https://aisubtitle.hdslb.com/x'
+        assert _normalize_subtitle_url('https://a.com/x') == 'https://a.com/x'
+        assert _normalize_subtitle_url('') == ''
+
+    def test_ready_flag_follows_ai_status(self):
+        assert _is_subtitle_ready({'lan': 'zh-CN'}) is True            # CC 无 ai_status
+        assert _is_subtitle_ready({'lan': 'ai-zh', 'ai_status': 2}) is True
+        assert _is_subtitle_ready({'lan': 'ai-zh', 'ai_status': 1}) is False   # 生成中
+        assert _is_subtitle_ready({'lan': 'ai-en', 'ai_status': '0'}) is False
+        assert _is_subtitle_ready({'lan': 'ai-zh'}) is True            # 老接口无该字段按可用
+
+    def test_anonymous_retry_after_login_banned(self, monkeypatch):
+        """登录态被 412 时匿名兜底重试（真实踩坑：带 SESSDATA 反而更严）"""
+        seen = []
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        banned = {'code': -412, 'message': 'request was banned'}
+        hit = {'code': 0, 'data': {'subtitle': {'subtitles': [{'lan': 'zh-CN'}]}}}
+
+        monkeypatch.setattr('services.downloader.load_cookies', lambda: {'SESSDATA': 's'})
+        monkeypatch.setattr('services.downloader._throttle_bili_api', lambda: None)
+
+        def fake_get(url, headers, timeout):
+            logged_in = 'SESSDATA=s' in (headers.get('Cookie') or '')
+            seen.append(logged_in)
+            return FakeResponse(banned if logged_in else hit)
+
+        monkeypatch.setattr('services.downloader.httpx.get', fake_get)
+
+        subtitle, _tl, api_ok = _fetch_subtitles_via_player_v2(1, 2, 'BV1abc123456')
+
+        assert subtitle['subtitles'][0]['lan'] == 'zh-CN'
+        assert api_ok is True
+        assert seen[-1] is False    # 最后一次是匿名请求
+
+    def test_no_anonymous_retry_when_interface_healthy(self, monkeypatch):
+        """接口正常响应（code=0 空列表）时不额外发匿名请求"""
+        seen = []
+
+        class FakeResponse:
+            def json(self):
+                return {'code': 0, 'data': {'subtitle': {'subtitles': []}}}
+
+        monkeypatch.setattr('services.downloader.load_cookies', lambda: {'SESSDATA': 's'})
+        monkeypatch.setattr('services.downloader._throttle_bili_api', lambda: None)
+
+        def fake_get(url, headers, timeout):
+            seen.append('SESSDATA=s' in (headers.get('Cookie') or ''))
+            return FakeResponse()
+
+        monkeypatch.setattr('services.downloader.httpx.get', fake_get)
+
+        subtitle, _tl, api_ok = _fetch_subtitles_via_player_v2(1, 2, 'BV1abc123456')
+
+        assert subtitle == {} and api_ok is True
+        assert seen and all(seen)   # 全部带登录态，没有匿名请求
+
+
+class TestSubtitleBodyValidation:
+    """字幕 body 统计 / 硬校验 / "假残缺"判定（纯逻辑）"""
+
+    @staticmethod
+    def _body(count, step=5):
+        return [
+            {'from': i * step, 'to': i * step + step, 'content': f'第{i}句'}
+            for i in range(count)
+        ]
+
+    def test_stats_counts_and_coverage(self):
+        count, coverage = _subtitle_body_stats(self._body(4))
+        assert count == 4 and coverage == 20.0
+        assert _subtitle_body_stats(['bad', None]) == (0, 0.0)
+
+    def test_validate_rejects_empty_and_short_coverage(self):
+        assert _validate_subtitle_body([], 600)[0] is False
+        ok, reason = _validate_subtitle_body(self._body(5), 600)     # 仅覆盖 25s
+        assert ok is False and '疑似旧' in reason
+
+    def test_validate_accepts_covering_body(self):
+        assert _validate_subtitle_body(self._body(600, step=1), 600)[0] is True
+
+    def test_validate_rejects_overrun_body(self):
+        ok, reason = _validate_subtitle_body([{'from': 0, 'to': 900, 'content': 'x'}], 600)
+        assert ok is False and '超出' in reason
+
+    def test_incomplete_detects_truncated_coverage(self):
+        incomplete, why = _is_subtitle_body_incomplete(self._body(20), 600, is_ai=True)
+        assert incomplete is True and '短于' in why
+
+    def test_incomplete_density_only_applies_to_ai(self):
+        """覆盖整段但只有 5 条：AI 判残缺，CC 不判（CC 本来就可以很稀疏）"""
+        sparse = [{'from': i * 100, 'to': i * 100 + 10, 'content': 'x'} for i in range(5)]
+        assert _is_subtitle_body_incomplete(sparse, 500, is_ai=True)[0] is True
+        assert _is_subtitle_body_incomplete(sparse, 500, is_ai=False)[0] is False
+
+    def test_complete_body_is_not_flagged(self):
+        assert _is_subtitle_body_incomplete(self._body(120), 600, is_ai=True)[0] is False
+
+
+class TestAcquireBilibiliSubtitle:
+    """候选字幕轨「下载 → 校验 → 重试」行为"""
+
+    @staticmethod
+    def _full_body(duration=600, step=5):
+        return [
+            {'from': i * step, 'to': i * step + step, 'content': f'句{i}'}
+            for i in range(int(duration // step))
+        ]
+
+    @pytest.mark.asyncio
+    async def test_retries_truncated_body_after_refreshing_url(self, tmp_path, monkeypatch):
+        """首次返回"假残缺" → 换新 auth_key 链接重试 → 拿到完整内容"""
+        calls = {'fetch': 0, 'refresh': 0}
+        truncated = [{'from': i * 5, 'to': i * 5 + 5, 'content': 'x'} for i in range(20)]
+        full = self._full_body()
+
+        async def fake_fetch(url, bvid=''):
+            calls['fetch'] += 1
+            return truncated if calls['fetch'] == 1 else full
+
+        async def fake_wait(_seconds):
+            return None
+
+        def fake_refresh(aid, cid, bvid, lan):
+            calls['refresh'] += 1
+            return 'https://cdn/new.json'
+
+        monkeypatch.setattr('services.downloader._fetch_subtitle_body', fake_fetch)
+        monkeypatch.setattr('services.downloader._subtitle_retry_wait', fake_wait)
+        monkeypatch.setattr('services.downloader._refresh_subtitle_url', fake_refresh)
+
+        result = await _acquire_bilibili_subtitle(
+            [{'lan': 'ai-zh', 'subtitle_url': 'https://cdn/old.json'}],
+            1, 2, 'BV1abc123456', 600.0, tmp_path)
+
+        assert result['success'] is True
+        assert result['body_count'] == len(full)
+        assert calls == {'fetch': 2, 'refresh': 1}
+        assert (tmp_path / 'bilibili_subtitle.srt').exists()
+
+    @pytest.mark.asyncio
+    async def test_falls_through_to_next_candidate_track(self, tmp_path, monkeypatch):
+        """首选轨一直拿不到有效内容 → 自动换下一条候选轨"""
+        monkeypatch.setattr('services.downloader._BILI_SUBTITLE_MAX_ATTEMPTS', 2)
+        monkeypatch.setattr('services.downloader._refresh_subtitle_url', lambda *a: '')
+        monkeypatch.setattr('services.downloader._subtitle_retry_wait',
+                            lambda _s: asyncio.sleep(0))
+        full = self._full_body()
+
+        async def fake_fetch(url, bvid=''):
+            return [] if 'broken' in url else full
+
+        monkeypatch.setattr('services.downloader._fetch_subtitle_body', fake_fetch)
+
+        result = await _acquire_bilibili_subtitle(
+            [{'lan': 'zh-CN', 'subtitle_url': 'https://cdn/broken.json'},
+             {'lan': 'ai-zh', 'subtitle_url': 'https://cdn/good.json'}],
+            1, 2, 'BV1abc123456', 600.0, tmp_path)
+
+        assert result['success'] is True
+        assert result['body_count'] == len(full)
+
+    @pytest.mark.asyncio
+    async def test_failure_when_all_candidates_unusable(self, tmp_path, monkeypatch):
+        """全部候选轨都拿不到完整内容 → 失败（调用方转转录，宁缺勿错）"""
+        monkeypatch.setattr('services.downloader._BILI_SUBTITLE_MAX_ATTEMPTS', 2)
+        monkeypatch.setattr('services.downloader._refresh_subtitle_url', lambda *a: '')
+        monkeypatch.setattr('services.downloader._subtitle_retry_wait',
+                            lambda _s: asyncio.sleep(0))
+
+        async def fake_fetch(url, bvid=''):
+            return []
+
+        monkeypatch.setattr('services.downloader._fetch_subtitle_body', fake_fetch)
+
+        result = await _acquire_bilibili_subtitle(
+            [{'lan': 'ai-zh', 'subtitle_url': 'https://cdn/a.json'}],
+            1, 2, 'BV1abc123456', 600.0, tmp_path)
+
+        assert result['success'] is False
+        assert result['reason'] == 'subtitle_incomplete'
+
+    @pytest.mark.asyncio
+    async def test_uses_best_effort_body_after_retries(self, tmp_path, monkeypatch):
+        """硬校验通过但持续偏稀疏 → 重试耗尽后用覆盖最全的一份，而非直接放弃"""
+        monkeypatch.setattr('services.downloader._BILI_SUBTITLE_MAX_ATTEMPTS', 2)
+        monkeypatch.setattr('services.downloader._refresh_subtitle_url', lambda *a: '')
+        monkeypatch.setattr('services.downloader._subtitle_retry_wait',
+                            lambda _s: asyncio.sleep(0))
+        sparse = [{'from': i * 100, 'to': i * 100 + 10, 'content': 'x'} for i in range(5)]
+
+        async def fake_fetch(url, bvid=''):
+            return sparse
+
+        monkeypatch.setattr('services.downloader._fetch_subtitle_body', fake_fetch)
+
+        result = await _acquire_bilibili_subtitle(
+            [{'lan': 'ai-zh', 'subtitle_url': 'https://cdn/a.json'}],
+            1, 2, 'BV1abc123456', 500.0, tmp_path)
+
+        assert result['success'] is True
+        assert result['body_count'] == 5
+
+    @pytest.mark.asyncio
+    async def test_download_exception_is_retried(self, tmp_path, monkeypatch):
+        """下载异常（链接 403/网络）也要重试，不能一次失败就放弃"""
+        calls = {'n': 0}
+        full = self._full_body()
+
+        async def fake_fetch(url, bvid=''):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise RuntimeError('HTTP 403')
+            return full
+
+        monkeypatch.setattr('services.downloader._subtitle_retry_wait',
+                            lambda _s: asyncio.sleep(0))
+        monkeypatch.setattr('services.downloader._refresh_subtitle_url', lambda *a: '')
+        monkeypatch.setattr('services.downloader._fetch_subtitle_body', fake_fetch)
+
+        result = await _acquire_bilibili_subtitle(
+            [{'lan': 'ai-zh', 'subtitle_url': 'https://cdn/a.json'}],
+            1, 2, 'BV1abc123456', 600.0, tmp_path)
+
+        assert result['success'] is True
+        assert calls['n'] == 2
