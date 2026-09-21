@@ -277,13 +277,28 @@ async def job_queue():
     单任务也排队：全局信号量上限（``config.MAX_CONCURRENT_JOBS``，默认 1）之外的
     任务停在 pending，前端「任务进度」卡下方展示「正在处理 + 排队中」。
 
-    ★ 数据源是 DB 任务状态（不另造内存队列）——刷新/切页后队列仍在。
+    ★ 数据源是 DB 任务状态（不另造内存队列）——刷新/切页后队列仍在；
+      但 running 判定要叠加内存的 `RUNNING_JOBS[jid]['status'] == 'processing'`，
+      因为字幕/下载阶段 DB status 还停在 pending（否则正在跑的任务会被误报成排队中）。
     ★ 本路由必须注册在 ``GET /{job_id}`` **之前**：它是单段路径，注册晚了会被
       ``/{job_id}`` 捕获（job_id='queue'）→ 404。与既有的 ``/running`` 同因。
     """
+    from main import RUNNING_JOBS
+
     snapshot = get_queue_snapshot()
-    running = snapshot["running"]
-    pending = snapshot["pending"]
+    running = list(snapshot["running"])
+    pending = []
+    for job in snapshot["pending"]:
+        # ★ DB status 在字幕/下载阶段**可能仍停在 'pending'**（这些步骤不更新 status），
+        #   只按 status 分类会把正在处理的任务误报成「排队中」——实测 4 个任务看着全在排队，
+        #   其实第一个已经在跑字幕重试。用内存注册表补正：只有真正拿到信号量的任务才会被
+        #   `_process_job_impl` 打上 `status='processing'`（等信号量时该字段不存在）。
+        entry = RUNNING_JOBS.get(job["id"]) or {}
+        if entry.get("status") == "processing":
+            running.append({**job, "live": True})
+        else:
+            pending.append(job)
+    running.sort(key=lambda j: (j.get("created_at") or "", j.get("id") or ""))
     return {
         "concurrency": MAX_CONCURRENT_JOBS,
         "running": running,

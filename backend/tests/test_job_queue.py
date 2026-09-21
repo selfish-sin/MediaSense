@@ -80,6 +80,35 @@ class TestQueueSnapshot:
         assert resp.status_code == 200
         assert "pending" in resp.json()
 
+    def test_live_pending_job_counts_as_running(self, client, monkeypatch):
+        """DB status 还停在 pending、但内存已标记 processing 的任务必须算「正在处理」。
+
+        实战（2026-09-21）：字幕/下载阶段不更新 DB status，界面上 4 个任务看着全在排队，
+        其实第一个已经在跑字幕——只按 status 分类会误报。
+        """
+        _insert("live1", "pending", "2026-09-21 12:00:01")
+        _insert("wait1", "pending", "2026-09-21 12:00:02")
+        import main
+        monkeypatch.setitem(main.RUNNING_JOBS, "live1",
+                            {"task": object(), "status": "processing"})
+
+        data = client.get("/api/jobs/queue").json()
+
+        assert [j["id"] for j in data["running"]] == ["live1"]
+        assert data["running"][0]["live"] is True
+        assert [j["id"] for j in data["pending"]] == ["wait1"]
+
+    def test_waiting_slot_job_stays_pending(self, client, monkeypatch):
+        """已 start_job 但还在等信号量（无 processing 标记）→ 仍是「排队中」。"""
+        _insert("w1", "pending", "2026-09-21 12:00:01")
+        import main
+        monkeypatch.setitem(main.RUNNING_JOBS, "w1", {"task": object()})
+
+        data = client.get("/api/jobs/queue").json()
+
+        assert data["running"] == []
+        assert [j["id"] for j in data["pending"]] == ["w1"]
+
     def test_queue_items_exclude_heavy_text_columns(self, client):
         _insert("p1", "pending", "2026-09-21 12:00:01")
 
