@@ -135,6 +135,44 @@ def get_running_jobs() -> List[Dict[str, Any]]:
     return [_row_to_dict(r) for r in rows]
 
 
+# 队列快照字段：与列表瘦身同口径，不带 result_text/preview_text 等大文本列
+_QUEUE_COLUMNS = (
+    "id, title, platform, input_url, status, model, summary_type, "
+    "progress_msg, error, created_at, updated_at"
+)
+# 运行态（占用信号量槽位的状态）；pending 单独成队列
+_QUEUE_RUNNING_STATUSES = ('downloading', 'transcribing', 'preview', 'summarizing')
+
+
+def get_queue_snapshot() -> Dict[str, List[Dict[str, Any]]]:
+    """处理队列快照：``running`` + ``pending``，两侧都按 created_at **升序**。
+
+    ★ 队列语义是先进先出：pending 用 ASC 排序，界面顺序 = 实际获槽顺序
+      （列表页 / running 用 DESC，不能复用同一查询）。
+    ★ 排序带 `rowid` 兜底：`created_at` 是 SQLite `CURRENT_TIMESTAMP`（**秒级**精度），
+      同一秒连续提交的多个任务时间戳相同，只按 created_at 排序顺序不稳定——
+      加 rowid（插入顺序）才是真正 FIFO。
+    ★ 只取轻量列，不返回大文本，避免队列轮询把几 MB JSON 打到前端。
+    """
+    conn = get_connection()
+    try:
+        running_rows = conn.execute(
+            f"SELECT {_QUEUE_COLUMNS} FROM jobs WHERE status IN (?, ?, ?, ?) "
+            "ORDER BY created_at ASC, rowid ASC",
+            _QUEUE_RUNNING_STATUSES,
+        ).fetchall()
+        pending_rows = conn.execute(
+            f"SELECT {_QUEUE_COLUMNS} FROM jobs WHERE status = 'pending' "
+            "ORDER BY created_at ASC, rowid ASC",
+        ).fetchall()
+        return {
+            "running": [_row_to_dict(r) for r in running_rows],
+            "pending": [_row_to_dict(r) for r in pending_rows],
+        }
+    finally:
+        conn.close()
+
+
 def get_cleanup_jobs(read_only: bool = False) -> List[Dict[str, Any]]:
     '''Return one consistent job snapshot for storage cleanup planning.'''
     conn = get_readonly_connection() if read_only else get_connection()

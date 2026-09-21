@@ -24,7 +24,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from starlette.middleware.cors import CORSMiddleware
 
-from config import SERVER_HOST, SERVER_PORT, STATIC_DIR, DOWNLOAD_DIR, DEFAULT_MODEL, DATA_DIR
+from config import (
+    SERVER_HOST, SERVER_PORT, STATIC_DIR, DOWNLOAD_DIR, DEFAULT_MODEL, DATA_DIR,
+    MAX_CONCURRENT_JOBS,
+)
 import config
 from db.database import init_db, get_connection
 from db.job_repo import create_job, get_job, update_job, finish_job, fail_interrupted_jobs
@@ -107,11 +110,9 @@ apply_proxy_bypass_hosts()
 RUNNING_JOBS: Dict[str, Dict[str, Any]] = {}
 
 # ============ 全局并发限制 ============
-# ★ 批量任务或用户快速连续提交时，避免同时跑太多任务把 CPU/网络/磁盘 IO 拖垮
-#   RTX 3060 + 6900HX 同时跑 2-3 个 Whisper 转录已接近上限
-#   超过此数的任务会在 pending 状态排队，等信号量释放
-MAX_CONCURRENT_JOBS = 2
-_job_semaphore = None  # 在 startup 里创建（需要 event loop）
+# ★ 上限由 config.MAX_CONCURRENT_JOBS 提供（默认 1 = 严格串行，环境变量可覆盖为 2）。
+#   批量任务或用户快速连续提交时，超过上限的任务停在 pending 状态排队，等信号量释放。
+_job_semaphore = None  # 懒加载创建（需要 event loop）
 
 
 def get_job_semaphore():

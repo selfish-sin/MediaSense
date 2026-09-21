@@ -17,9 +17,9 @@ from models.schemas import (
     JobCreate, JobSubmitResponse, JobListResponse,
     SuccessResponse
 )
-from db.job_repo import create_job, get_job, get_jobs, get_running_jobs, delete_job, clear_jobs, clear_jobs_by_status, update_job, find_job_by_url, delete_jobs_batch, get_jobs_disk_info, claim_staged_upload, get_cleanup_jobs
+from db.job_repo import create_job, get_job, get_jobs, get_running_jobs, get_queue_snapshot, delete_job, clear_jobs, clear_jobs_by_status, update_job, find_job_by_url, delete_jobs_batch, get_jobs_disk_info, claim_staged_upload, get_cleanup_jobs
 from db.model_repo import get_default_model_key
-from config import DOWNLOAD_DIR
+from config import DOWNLOAD_DIR, MAX_CONCURRENT_JOBS
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -268,6 +268,28 @@ async def running_jobs():
     """获取运行中的任务"""
     jobs = get_running_jobs()
     return {"jobs": jobs, "count": len(jobs)}
+
+
+@router.get("/queue")
+async def job_queue():
+    """处理队列快照：``running``（占用槽位）+ ``pending``（等待槽位，FIFO）。
+
+    单任务也排队：全局信号量上限（``config.MAX_CONCURRENT_JOBS``，默认 1）之外的
+    任务停在 pending，前端「任务进度」卡下方展示「正在处理 + 排队中」。
+
+    ★ 数据源是 DB 任务状态（不另造内存队列）——刷新/切页后队列仍在。
+    ★ 本路由必须注册在 ``GET /{job_id}`` **之前**：它是单段路径，注册晚了会被
+      ``/{job_id}`` 捕获（job_id='queue'）→ 404。与既有的 ``/running`` 同因。
+    """
+    snapshot = get_queue_snapshot()
+    running = snapshot["running"]
+    pending = snapshot["pending"]
+    return {
+        "concurrency": MAX_CONCURRENT_JOBS,
+        "running": running,
+        "pending": pending,
+        "total": len(running) + len(pending),
+    }
 
 
 @router.get("/{job_id}")

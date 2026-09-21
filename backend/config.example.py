@@ -65,6 +65,11 @@ ASR_FREE_MODEL = "XingChenAGI/XingChenASR-V3.2-Ultra"
 SERVER_PORT = 7001
 SERVER_HOST = "0.0.0.0"
 
+# ============ 任务并发上限 ============
+# ★ 默认 1 = 严格串行（单任务也排队逐个处理，对 B站风控更安全）；
+#   需要并行时设环境变量 MAX_CONCURRENT_JOBS=2 放开，无需改代码。
+MAX_CONCURRENT_JOBS = max(1, int(os.getenv('MAX_CONCURRENT_JOBS', '1')))
+
 # ============ 智谱 API Key（从环境变量读取，避免泄露到 Git） ============
 ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "")
 
