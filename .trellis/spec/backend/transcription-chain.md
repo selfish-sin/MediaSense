@@ -45,7 +45,8 @@ extract_bilibili_subtitles
   故移除；`requirements.txt` 里该包已无代码引用（清理见 §7 坑点 19）。
   **禁止**再把"某可选依赖是否安装"作为链路可用性的前置条件。
 - 412 风控加固：串行限流 ≥1s / wbi 刷新 / 完整 Chrome UA+buvid / 明确无字幕才跳 yt-dlp；
-  **登录态被 412 时匿名兜底重试一次**（实测带 SESSDATA 可能比匿名更严）。
+  **登录态被 412 时匿名兜底重试一次**（实测带 SESSDATA 可能比匿名更严）；
+  **412 后主动冷却（进程级冷却窗，连续触发升级为长冷却），不再立刻换接口重试**（见下）。
 - 字幕选择单点 `downloader._pick_zh_subtitle`：
   **中文 CC（zh-* 无 ai- 前缀，创作者人工上传永不旧）优先 → 中文 AI（ai-zh）→ 任意 AI
   （外文视频兜底）**，同类内**简体优先**（zh/zh-Hans/zh-CN 排在 zh-TW/zh-Hant 之前），
@@ -77,8 +78,19 @@ extract_bilibili_subtitles
     （CC 可以很稀疏，不误杀）；
   - 全部候选与重试都拿不到完整内容时返回 `success=False`（`reason=subtitle_incomplete`）→
     调用方走转录，**宁缺勿错**。
-  - 参数字段名/顺序：`_BILI_SUBTITLE_MAX_ATTEMPTS`（默认 4）、`_BILI_SUBTITLE_RETRY_BASE`（默认
-    3s，间隔 = base×(attempt-1)）、`_subtitle_retry_wait()` 单点可 patch。
+  - **递增退避（2026-09-21 对齐批量实战）**：`_subtitle_retry_delay(attempt)` 纯函数——首次不等待，
+    随后 `5s + 3s×(n-2)` 线性递增、单次封顶 30s、叠加 ±25% 抖动；默认
+    `_BILI_SUBTITLE_MAX_ATTEMPTS=9`（总窗口约 2 分钟）。**勿回退成固定短间隔**：风控是递增惩罚，
+    固定间隔只会让惩罚越来越重（业界批量实测：递增退避后 128/128 全成功）。
+    参数字段：`BILI_SUBTITLE_MAX_ATTEMPTS` / `BILI_SUBTITLE_RETRY_BASE` / `_RETRY_STEP` /
+    `_RETRY_MAX` / `_RETRY_JITTER`；`_subtitle_retry_wait()` 单点可 patch。
+  - **412 风控冷却（2026-09-21）**：412 不再"立刻换接口再敲一次"，而是记账并进入**进程级共享
+    冷却窗**——`note_bili_risk_control()`（在 `_fetch_subtitles_via_player_v2._try` 内，
+    HTTP 412 与 body `code=-412` 两种形态都记账）→ 连续 412 达 `BILI_RISK_STREAK_THRESHOLD`
+    （默认 5）升级为长冷却（默认 120s，否则 20s）；`_throttle_bili_api` 前置
+    `_wait_bili_risk_cooldown()`，所有 B站请求共享该窗口（批量任务因此整体减速而非齐射）。
+    任一接口 `code==0` → `note_bili_api_success()` 清零 streak。冷却状态经 `bili_risk_snapshot()`
+    透出给用户（"非故障，正在减速重试"）。
 - **yt-dlp 兜底必须与主路径同标准（2026-09-21 补齐，此前是最大漏口）**：
   `_extract_bilibili_subtitles_ytdlp(url, output_dir, sio, job_id, video_duration=0.0)`
   此前**只判 `srt 大小≥50 字节`**，选轨靠 `max(mtime)`（多语言同时落盘时等于随机挑，可能挑到
@@ -285,6 +297,14 @@ Whisper **base 是链路里最弱一环**（`asr_whisper_model` 未设置时即�
 | `ASR_CLOUD_TIMEOUT` | 180s | 单片单次超时 |
 | `FIRERED_NUM_THREADS` / `FIRERED_DECODE_WORKERS` | 3 / 6 | 本地识别线程/并行度（扫参甜点勿动） |
 | `BILI_API_MIN_INTERVAL` | 1s | B站接口限流间隔 |
+| `BILI_RISK_COOLDOWN` | 20s | 单次 412 后的冷却窗 |
+| `BILI_RISK_LONG_COOLDOWN` | 120s | 连续 412 达阈值后的长冷却窗 |
+| `BILI_RISK_STREAK_THRESHOLD` | 5 | 连续 412 几次后升级为长冷却 |
+| `BILI_SUBTITLE_MAX_ATTEMPTS` | 9 | 单轨字幕重试上限（总窗口约 2 分钟） |
+| `BILI_SUBTITLE_RETRY_BASE` | 5s | 递增退避首步（attempt=2 的基准） |
+| `BILI_SUBTITLE_RETRY_STEP` | 3s | 每多一次尝试的递增步长 |
+| `BILI_SUBTITLE_RETRY_MAX` | 30s | 单次退避封顶 |
+| `BILI_SUBTITLE_RETRY_JITTER` | 0.25 | 退避抖动比例（±25%） |
 | `subtitle_check`（options） | true | B站字幕内容抽查开关 |
 | `force_transcribe`（options） | false | 跳过B站字幕直接转录 |
 | `download_video(max_seconds)` | 无 | 只取开头 N 秒片段（抽查用 90s；失败自动回退完整下载） |
@@ -367,8 +387,16 @@ Whisper **base 是链路里最弱一环**（`asr_whisper_model` 未设置时即�
       附带清理项（未做，涉及打包，需单独决策）：`requirements.txt` 的
       `bilibili-api-python>=17.4.0` 与 `start.bat` 第 22/26 行的 import 探测列表里，
       `bilibili_api` 已无代码引用，可移除以缩小安装包与启动探测面。
+   20. **412 风控是"递增惩罚"，必须冷却而不是立刻重试**（2026-09-21 批量实测）：
+      真实日志（批量任务 `8bb3004f`）显示每个视频的 `x/player/wbi/v2` 必现 412，且同一视频
+      **2 秒内连撞两次**——原实现 412 后立即换接口重试，等于在惩罚窗口内反复敲门，越敲越严。
+      旧退避是 `3s×(attempt-1)` 共 4 次（总窗口约 18s），比批量实战（递增到 41s、12 次）弱一个
+      数量级。修复：①`_throttle_bili_api` 前置进程级冷却窗，412 记账后升级冷却（20s → 连续 5 次
+      后 120s），所有 B站请求共享；②字幕重试改递增退避 + 抖动、上限 9 次。
+      **判据边界**：拿不到完整字幕仍走 `subtitle_incomplete` 转转录（宁缺勿错），不因加长重试
+      而放宽覆盖校验。
 
-   ## 8. ASR 配置管理 API（模型管理页「ASR 模型」域，2026-09-15）
+  ## 8. ASR 配置管理 API（模型管理页「ASR 模型」域，2026-09-15）
 
 只读 `routers/asr.py`，写操作 `routers/asr_admin.py`（同挂 `/api/asr` 前缀，对外路径连续）：
 
