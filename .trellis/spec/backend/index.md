@@ -6,7 +6,7 @@
 
 - [ ] 读过 `CONTEXT.md` 文件索引表，定位到目标模块
 - [ ] 跑过 `codegraph explore "<符号>"`（索引不可用时在 task 工件记录原因）
-- [ ] 涉及任务编排时读过 `main.py` 的 `process_job`（信号量并发=2，preview 阶段释放许可的设计勿破坏）
+- [ ] 涉及任务编排时读过 `main.py` 的 `process_job`（信号量并发由 `config.MAX_CONCURRENT_JOBS` 提供，**默认 1 = 严格串行**，环境变量可放开为 2；preview 阶段释放许可的设计勿破坏）
 - [ ] 涉及存储删除时读过 `scripts/cleanup_storage.py`（dry-run + `--apply --confirm DELETE` 双门槛不可绕过）
 
 ## 核心约定
@@ -71,14 +71,30 @@
 - 出错一律走「可行动文案」：provider 配置类错误要指名到「模型管理 → ASR 模型」哪个 provider 的
   哪一项，不能只甩 HTTP 码（`transcribe_file` 的 401/403/404 分支是范例）
 
-### 任务编排（2026-08-27 拆分）
+### 任务编排（2026-08-27 拆分，2026-09-21 串行队列）
 
+- 并发上限来自 `config.MAX_CONCURRENT_JOBS`（**默认 1 = 严格串行**，`MAX_CONCURRENT_JOBS=2` 环境变量即可放开）。
+  超过上限的任务停在 `pending`，由信号量排队——这就是「单任务队列」，**不要另造内存队列/调度器**。
 - `process_job` 保持"信号量包装 + finally 单一收尾出口"结构；输入获取已拆为策略函数
   `_handle_text_input`/`_handle_subtitle_file`/`_handle_media_file`/`_handle_url_input`（统一返回
   `(srt_path, txt_path, seg_count, title, platform, files)`），新输入类型加策略函数，不要往
   `_process_job_impl` 回填大段 if/else
 - 批量任务终态推送走 `_emit_batch_progress`（`process_job` finally 调用，负载复用
   `get_batch_summary` 单一事实源）；新增批量面板数据字段时同步改 summary 而不是另造事件
+- **队列查询**：`GET /api/jobs/queue`（`routers/jobs.py`，注册在 `GET /{job_id}` 之前，否则被单段路径捕获）
+  是队列唯一数据源，负载由 `db.job_repo.get_queue_snapshot()` 提供（running 4 态 + pending，
+  排序 `created_at ASC, rowid ASC`——`CURRENT_TIMESTAMP` 只有秒级精度，同秒提交必须靠 rowid 保 FIFO）。
+  **不新增 socket 事件**：队列是任务状态的投影，前端用既有 `progress`/`log` 事件触发 debounce 刷新 + 断线 10s 轮询。
+
+### 文件命名（2026-09-21 统一）
+
+- 导出/下载的文件名**只能**走 `services/naming.py`（`safe_basename` / `export_basename`），
+  禁止再写第二份清洗逻辑（旧 `routers/export.py._sanitize_title` 会把《》、，、- 等标点全删掉、
+  硬截断 50 字符，长标题变成不可读的粘连文字，是用户明确投诉点）。
+- 规则：只剔除 Windows 非法字符（`\ / : * ? " < > |`）与控制字符，**保留中文标点与空格**；
+  兜底链 `title` → 平台视频 ID（BV / YouTube id）→ `job_{id}`，不允许出现无信息量名字。
+- **磁盘名与下载名解耦**：磁盘落盘名附唯一后缀（job_id 短码/时间戳）防互相覆盖，
+  `FileResponse(filename=...)` 用可读名。磁盘名不进 `FileResponse`。
 
 ## Quality Check
 
