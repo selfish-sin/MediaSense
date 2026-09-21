@@ -39,7 +39,16 @@ from services.downloader import (
     _validate_subtitle_body,
     extract_bilibili_subtitles,
     PLATFORM_CONFIG,
+    reset_bili_risk_state,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_bili_risk_state():
+    """风控冷却是进程级共享状态：每个用例前后复位，避免跨用例串味。"""
+    reset_bili_risk_state()
+    yield
+    reset_bili_risk_state()
 
 
 class TestDetectPlatform:
@@ -256,6 +265,8 @@ class TestExtractBilibiliSubtitlesYtdlp:
         calls = []
 
         class FakeResponse:
+            status_code = 200
+
             def json(self):
                 return {"code": 0, "data": {"subtitle": {"subtitles": [{"lan": "zh-CN"}]}}}
 
@@ -278,6 +289,8 @@ class TestExtractBilibiliSubtitlesYtdlp:
 
     def test_player_api_confirms_no_subtitle_when_code_ok(self, monkeypatch):
         class FakeResponse:
+            status_code = 200
+
             def json(self):
                 return {"code": 0, "data": {"subtitle": {"subtitles": []}}}
 
@@ -295,6 +308,8 @@ class TestExtractBilibiliSubtitlesYtdlp:
 
     def test_player_api_marks_banned_on_412(self, monkeypatch):
         class FakeResponse:
+            status_code = 200
+
             def json(self):
                 return {"code": -412, "message": "request was banned"}
 
@@ -652,6 +667,8 @@ class TestFetchVideoInfoHttp:
         monkeypatch.setattr('services.downloader._get_wbi_keys', lambda: (None, None))
 
         class FakeResponse:
+            status_code = 200
+
             def __init__(self, payload):
                 self._payload = payload
 
@@ -742,6 +759,8 @@ class TestSubtitleUrlAndReadiness:
         seen = []
 
         class FakeResponse:
+            status_code = 200
+
             def __init__(self, payload):
                 self._payload = payload
 
@@ -772,6 +791,8 @@ class TestSubtitleUrlAndReadiness:
         seen = []
 
         class FakeResponse:
+            status_code = 200
+
             def json(self):
                 return {'code': 0, 'data': {'subtitle': {'subtitles': []}}}
 

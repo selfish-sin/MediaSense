@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import sys
@@ -81,10 +82,77 @@ _BILI_API_LOCK = threading.Lock()
 _BILI_API_LAST_TS = 0.0
 _BILI_API_MIN_INTERVAL = float(os.environ.get('BILI_API_MIN_INTERVAL', '1.0'))
 
+# ── B站风控冷却（2026-09-21）────────────────────────────────────────────────
+# 412（request was banned）是**递增惩罚**：连续高频请求会让惩罚越来越重
+# （业界批量实测：递增退避 + 足够重试深度后 128/128 全成功，固定短间隔则持续被拦）。
+# 触发后的正确姿势是主动冷却，而不是"立刻换个接口再敲一次"——真实日志里同一
+# 视频 2 秒内连撞两次 412，正是这个错误姿势的结果。
+# 冷却窗**进程级共享**：批量任务因此自然整体减速，风控惩罚才有机会衰减。
+_BILI_RISK_LOCK = threading.Lock()
+_BILI_RISK_STREAK = 0             # 连续 412 次数（任一接口正常响应即清零）
+_BILI_RISK_COOLDOWN_UNTIL = 0.0   # 全局冷却截止时间戳
+_BILI_RISK_COOLDOWN = float(os.environ.get('BILI_RISK_COOLDOWN', '20'))
+_BILI_RISK_LONG_COOLDOWN = float(os.environ.get('BILI_RISK_LONG_COOLDOWN', '120'))
+_BILI_RISK_STREAK_THRESHOLD = int(os.environ.get('BILI_RISK_STREAK_THRESHOLD', '5'))
+
+
+def note_bili_risk_control() -> float:
+    """记账一次 412 风控：升级全局冷却窗，返回本次生效的冷却秒数。
+
+    连续 412 达到阈值后升级为长冷却（默认 120s）——此时说明出口 IP 已被持续
+    标记，短冷却不足以让惩罚衰减，继续硬敲只会让惩罚更重。
+    """
+    global _BILI_RISK_STREAK, _BILI_RISK_COOLDOWN_UNTIL
+    with _BILI_RISK_LOCK:
+        _BILI_RISK_STREAK += 1
+        escalated = _BILI_RISK_STREAK >= _BILI_RISK_STREAK_THRESHOLD
+        cooldown = _BILI_RISK_LONG_COOLDOWN if escalated else _BILI_RISK_COOLDOWN
+        deadline = time.time() + cooldown
+        if deadline > _BILI_RISK_COOLDOWN_UNTIL:
+            _BILI_RISK_COOLDOWN_UNTIL = deadline
+        if escalated:
+            logger.warning(
+                f'B站风控连续 {_BILI_RISK_STREAK} 次 412，升级为长冷却 {cooldown:.0f}s')
+        return cooldown
+
+
+def note_bili_api_success():
+    """任一 B站接口正常响应（code==0）→ 连续 412 计数清零。"""
+    global _BILI_RISK_STREAK
+    with _BILI_RISK_LOCK:
+        _BILI_RISK_STREAK = 0
+
+
+def bili_risk_snapshot() -> Tuple[int, float]:
+    """(当前连续 412 次数, 冷却剩余秒数)——供调用方告知用户"在等风控"而非静默卡住。"""
+    with _BILI_RISK_LOCK:
+        return _BILI_RISK_STREAK, max(0.0, _BILI_RISK_COOLDOWN_UNTIL - time.time())
+
+
+def reset_bili_risk_state():
+    """复位风控冷却状态（测试隔离 / 运维手动解除冷却用）。"""
+    global _BILI_RISK_STREAK, _BILI_RISK_COOLDOWN_UNTIL
+    with _BILI_RISK_LOCK:
+        _BILI_RISK_STREAK = 0
+        _BILI_RISK_COOLDOWN_UNTIL = 0.0
+
+
+def _wait_bili_risk_cooldown():
+    """全局冷却窗内等待（B站请求前的统一入口，见 `_throttle_bili_api`）。"""
+    with _BILI_RISK_LOCK:
+        remain = _BILI_RISK_COOLDOWN_UNTIL - time.time()
+    if remain > 0:
+        logger.warning(f'B站风控冷却中：等待 {remain:.0f}s 后重试')
+        time.sleep(remain)
+
 
 def _throttle_bili_api():
-    """串行化 + 限速 B站 API 调用；可被测试 monkeypatch 为 no-op"""
+    """串行化 + 限速 B站 API 调用；可被测试 monkeypatch 为 no-op
+
+    顺序：先等风控冷却窗（惩罚期内不敲门），再做常规最小间隔限速。
+    """
     global _BILI_API_LAST_TS
+    _wait_bili_risk_cooldown()
     with _BILI_API_LOCK:
         wait = _BILI_API_MIN_INTERVAL - (time.time() - _BILI_API_LAST_TS)
         if wait > 0:
@@ -280,13 +348,32 @@ def detect_platform(url: str) -> Tuple[str, bool]:
 # ①subtitle_url 带有时效 auth_key，过期即 403 → 重试时重新请求 player/v2 换新链接；
 # ②风控降级时"轨道存在但 body 只有几条"（同一视频稍后复查能拿到完整内容）→ 退避重试；
 # ③首选轨彻底不可用时依次尝试后面的候选轨，而不是直接放弃整条字幕。
-_BILI_SUBTITLE_MAX_ATTEMPTS = int(os.environ.get('BILI_SUBTITLE_MAX_ATTEMPTS', '4'))
-_BILI_SUBTITLE_RETRY_BASE = float(os.environ.get('BILI_SUBTITLE_RETRY_BASE', '3'))
+# 重试深度与退避对齐批量实战：递增退避 + 足够深度时成功率大幅提升，
+# 固定短间隔则会在风控"递增惩罚"下持续失败。默认 9 次 ≈ 总等待 2 分钟（单次封顶 30s）。
+_BILI_SUBTITLE_MAX_ATTEMPTS = int(os.environ.get('BILI_SUBTITLE_MAX_ATTEMPTS', '9'))
+_BILI_SUBTITLE_RETRY_BASE = float(os.environ.get('BILI_SUBTITLE_RETRY_BASE', '5'))
+_BILI_SUBTITLE_RETRY_STEP = float(os.environ.get('BILI_SUBTITLE_RETRY_STEP', '3'))
+_BILI_SUBTITLE_RETRY_MAX = float(os.environ.get('BILI_SUBTITLE_RETRY_MAX', '30'))
+_BILI_SUBTITLE_RETRY_JITTER = float(os.environ.get('BILI_SUBTITLE_RETRY_JITTER', '0.25'))
 
 # AI 字幕的时间覆盖下限（占视频时长比例）。AI 字幕几乎覆盖全部语音内容，
 # 覆盖率腰斩基本等价于旧/错字幕；CC 允许创作者只传片段，故阈值宽松得多。
 # 纯请求侧校验：只用"视频时长 + 字幕时间轴"两个接口数据即可判断，不需要音频/ASR。
 _AI_SUBTITLE_MIN_COVERAGE = float(os.environ.get('BILI_SUBTITLE_MIN_COVERAGE', '0.75'))
+
+
+def _subtitle_retry_delay(attempt: int) -> float:
+    """第 attempt 次尝试之后到下一次的等待秒数（attempt 从 1 起；首次不等待）。
+
+    递增退避 + 抖动：B站风控是递增惩罚，固定短间隔只会让惩罚越来越重；
+    抖动避免固定节奏本身成为可识别的脚本特征。
+    """
+    if attempt <= 1:
+        return 0.0
+    delay = _BILI_SUBTITLE_RETRY_BASE + _BILI_SUBTITLE_RETRY_STEP * (attempt - 2)
+    delay = min(delay, _BILI_SUBTITLE_RETRY_MAX)
+    jitter = delay * _BILI_SUBTITLE_RETRY_JITTER
+    return max(0.0, delay + random.uniform(-jitter, jitter))
 
 
 async def _subtitle_retry_wait(seconds: float):
@@ -374,6 +461,11 @@ def _fetch_subtitles_via_player_v2(aid, cid, bvid):
         _throttle_bili_api()
         try:
             resp = httpx.get(url, headers=_bili_headers(bvid, with_cookies), timeout=15.0)
+            if resp.status_code == 412:
+                # 有时 412 是 HTTP 状态码（响应体不是可解析 JSON）——同样记账并冷却
+                note_bili_risk_control()
+                logger.warning('B站风控拦截(HTTP 412)，冷却后回退备用接口')
+                return {}, 0, False
             data = resp.json()
         except Exception as e:
             logger.warning(f'B站字幕接口调用失败: {e}')
@@ -381,12 +473,14 @@ def _fetch_subtitles_via_player_v2(aid, cid, bvid):
         code = data.get('code')
         if code != 0:
             if code == -412:
-                logger.warning('B站风控拦截(412 request was banned)，自动回退备用接口')
+                note_bili_risk_control()
+                logger.warning('B站风控拦截(412 request was banned)，冷却后回退备用接口')
             else:
                 logger.warning(
                     f'B站字幕接口返回错误: code={code}, msg={data.get("message")}'
                 )
             return {}, 0, False
+        note_bili_api_success()
         sub = data.get('data', {}) or {}
         subtitle = sub.get('subtitle', {})
         return subtitle, sub.get('timelength', 0), True
@@ -533,6 +627,12 @@ async def extract_bilibili_subtitles(url: str, output_dir: Path, sio=None, job_i
     if sio:
         from socket_handlers import emit_log
         await emit_log(sio, job_id, f'尝试提取B站AI字幕 (bvid={bvid}, p={page})')
+        streak, remain = bili_risk_snapshot()
+        if streak or remain:
+            await emit_log(
+                sio, job_id,
+                f'⚠ B站风控中（连续 {streak} 次 412），全局冷却剩余 {remain:.0f}s——'
+                f'非故障，正在减速重试')
 
     if not load_cookies():
         if sio:
@@ -793,7 +893,12 @@ async def _acquire_bilibili_subtitle(subtitles, aid, cid, bvid, video_duration,
                 # 刷新/换源是同步 httpx 调用 → 放线程池，避免阻塞事件循环
                 fresh = await asyncio.to_thread(_refresh_subtitle_urls, aid, cid, bvid, lan)
                 urls = _dedupe_urls(urls + fresh)
-                await _subtitle_retry_wait(_BILI_SUBTITLE_RETRY_BASE * (attempt - 1))
+                delay = _subtitle_retry_delay(attempt)
+                streak, remain = bili_risk_snapshot()
+                if streak or remain:
+                    await _log(f'  ⏳ B站风控冷却中（连续 {streak} 次 412，剩余 {remain:.0f}s），'
+                               f'{delay:.0f}s 后重试 {lan}（第{attempt}/{_BILI_SUBTITLE_MAX_ATTEMPTS}次）')
+                await _subtitle_retry_wait(delay)
             # 优先用还没试过的链接（新 auth_key / 另一个数据源），没有新的就复用最后一条
             sub_url = urls[min(attempt - 1, len(urls) - 1)]
             try:
