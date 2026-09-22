@@ -14,6 +14,7 @@ import { useBatchProgress } from '../composables/useBatchProgress'
 import { isTerminalStatus } from '../utils/batchProgress'
 import { useJobRestore } from '../composables/useJobRestore'
 import { createFailureNotifier } from '../utils/errorNotice'
+import { isSubmitShortcut } from '../utils/shortcut'
 import BackendLogPanel from '../components/BackendLogPanel.vue'
 import HomeAdvancedOptions from '../components/HomeAdvancedOptions.vue'
 import HomeInputPanel from '../components/HomeInputPanel.vue'
@@ -150,6 +151,9 @@ onMounted(async () => {
   // ★ 路由参数处理（rerun / restore 检测 + 任务恢复）
   await handleRouteQuery()
 
+  // 全局快捷键：Ctrl/Cmd + Enter 直接提交（不用滚到底部提交按钮）
+  window.addEventListener('keydown', handleShortcutKeydown)
+
   // ============ Socket 事件监听 ============
   // ★ 关键改动：preview 事件不再仅限 currentJobId，任何任务进入 preview 都自动切换跟踪
   // onProgress/onLog 监听已随进度卡迁至 components/JobProgressPanel.vue（2026-09-12 slice-4）
@@ -232,6 +236,7 @@ onUnmounted(() => {
   // ★ 只移除本组件注册的 socket 监听（不用全局 removeAllListeners，避免误清 keep-alive 其他组件）
   socketUnsubs.forEach(off => off())
   socketUnsubs = []
+  window.removeEventListener('keydown', handleShortcutKeydown)
 })
 
 // ============ 桌面通知 ============
@@ -402,6 +407,21 @@ async function handleSubmit() {
   } finally {
     submitting.value = false
   }
+}
+
+// ============ 快捷键：Ctrl/Cmd + Enter 直接提交 ============
+// 目的：在顶部输入区粘完链接即可开始，不必滚到底部提交按钮（与按钮同一入口 handleSubmit）。
+// 两道守卫：
+//  - 路由守卫：HomeView 被 keep-alive 缓存（App.vue include=['HomeView']），window 监听切页后仍存活，
+//    只在 home 路由响应，避免历史/模型页误提交；
+//  - 追问框守卫：ChatPanel 输入区内 Ctrl+Enter 语义属于聊天，不劫持以免误提交新任务。
+function handleShortcutKeydown(e) {
+  if (route.name !== 'home') return
+  if (!isSubmitShortcut(e)) return
+  if (e.target instanceof HTMLElement && e.target.closest('.chat-input-area')) return
+  if (submitting.value) return
+  e.preventDefault()
+  handleSubmit()
 }
 
 // ============ 文件上传 ============
@@ -576,6 +596,7 @@ const tokenPanelRef = ref(null)
       @cancel-preview="cancelBatchPreview"
       @cancel-job="cancelBatchJob"
       @cancel-batch="cancelBatchRemaining"
+      @submit="handleSubmit"
     />
 
     <!-- 总结配置 -->

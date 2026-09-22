@@ -5,11 +5,13 @@
  *   经 6 个 v-model 双向绑定（inputType/inputUrl/inputText/batchUrls/uploadedFilePath/uploadedFileName）
  * - 上传交互（进行中状态/文件名校验/请求）内聚本组件，成功/移除经 v-model 写回父组件
  * - 批量面板 BatchResultPanel 事件原样转发：refresh / view-job / confirm-preview / cancel-preview / cancel-job / cancel-batch
+ * - 提交不落在本组件：URL 单行框回车 / 头部快捷键提示均只 emit('submit')，由 HomeView 走同一套 handleSubmit
  */
 import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { UploadCloud, Check, X } from 'lucide-vue-next'
 import { uploadRejectReason } from '../utils/uploadRules'
+import { shortcutHint } from '../utils/shortcut'
 import BatchResultPanel from './BatchResultPanel.vue'
 
 const props = defineProps({
@@ -35,7 +37,11 @@ const emit = defineEmits([
   'cancel-preview',
   'cancel-job',
   'cancel-batch',
+  'submit',
 ])
+
+// 头部快捷键提示（macOS 显示 ⌘，其余 Ctrl）
+const shortcutText = shortcutHint(navigator.platform || navigator.userAgent || '')
 
 // ── 双向绑定代理（保持模板 v-model 书写形态与原 HomeView 一致） ──
 const inputTypeModel = computed({
@@ -103,6 +109,13 @@ function handleFileRemove() {
   emit('update:uploadedFilePath', '')
   emit('update:uploadedFileName', '')
 }
+
+// 单行 URL 输入框内回车直接提交（多行输入框不接管回车，避免吞掉换行；
+// 多行场景统一用全局 Ctrl + Enter）。输入法候选确认的回车不触发。
+function handleUrlEnter(e) {
+  if (e.isComposing) return
+  emit('submit')
+}
 </script>
 
 <template>
@@ -110,6 +123,10 @@ function handleFileRemove() {
     <template #header>
       <div class="card-head-row">
         <span class="wb-card-title">输入</span>
+        <!-- 快捷键提示放在输入区：粘完链接即可发现，无需滚到底部提交按钮 -->
+        <span class="card-head-actions">
+          <span class="card-head-hint shortcut-hint">{{ shortcutText }}</span>
+        </span>
       </div>
     </template>
 
@@ -124,10 +141,11 @@ function handleFileRemove() {
     <el-input
       v-if="inputType === 'url'"
       v-model="inputUrlModel"
-      placeholder="粘贴视频 URL"
+      placeholder="粘贴视频 URL（回车直接开始）"
       size="large"
       clearable
       class="input-main"
+      @keydown.enter="handleUrlEnter"
     >
       <template #prepend>URL</template>
     </el-input>
@@ -192,6 +210,15 @@ function handleFileRemove() {
 
 <style scoped>
 /* 输入区（自 HomeView 迁入，2026-09-12 slice-A；.input-main 已提升 App.vue 全局） */
+/* 快捷键提示做成轻量键帽：与普通 card-head-hint 文案区分，可扫读 */
+.shortcut-hint {
+  font-family: ui-monospace, Consolas, monospace;
+  padding: 2px 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-progress-meter-bg, transparent);
+  white-space: nowrap;
+}
 .input-type-tabs {
   margin-bottom: 14px;
   display: flex;
