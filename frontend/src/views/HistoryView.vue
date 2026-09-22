@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Eye, Search, ArrowDown } from 'lucide-vue-next'
@@ -12,6 +12,8 @@ import {
 } from '../utils/jobActions'
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
 import { isDialogCancel } from '../utils/errorNotice'
+import { useContainerWidth } from '../composables/useContainerWidth'
+import { HISTORY_COLUMN_BREAKPOINTS, resolveTableLayout } from '../utils/tableLayout'
 
 const router = useRouter()
 
@@ -400,19 +402,16 @@ async function handleBatchDelete() {
   }
 }
 
-// 窄窗口（< 1240px）隐藏次要列：全列宽约 870px，低于该宽度时 Element Plus
-// 会裁切超出部分并让 fixed 操作列覆盖相邻列（视觉重叠），这里降级为关键列
-const COMPACT_WIDTH = 1240
-const isCompact = ref(window.innerWidth < COMPACT_WIDTH)
-function updateCompact() {
-  isCompact.value = window.innerWidth < COMPACT_WIDTH
-}
+// ★ 列布局按「表格容器实际宽度」分档（不是窗口宽度：侧栏 200px + 卡片内边距会吃掉 200~300px，
+//   用窗口宽度判断会在容器已经很窄时误判，Element Plus 就会用 fixed 操作列覆盖相邻列）
+//   full 全列 / compact 隐藏平台·模型·创建时间 / narrow 状态并入标题单元格、操作列不吸边
+const tableWrapRef = ref(null)
+const tableWidth = useContainerWidth(tableWrapRef, window.innerWidth)
+const layout = computed(() => resolveTableLayout(tableWidth.value, HISTORY_COLUMN_BREAKPOINTS))
 
 onMounted(() => {
-  window.addEventListener('resize', updateCompact)
   loadJobs()
 })
-onUnmounted(() => window.removeEventListener('resize', updateCompact))
 </script>
 
 <template>
@@ -468,6 +467,7 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
         <el-button size="small" link @click="resetSelection">取消选择</el-button>
       </div>
 
+      <div ref="tableWrapRef" class="table-wrap">
       <el-table
         ref="tableRef"
         :data="jobs"
@@ -480,24 +480,44 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
       >
         <!-- reserve-selection 必须配 row-key：翻页/换筛选后已勾选项不丢失 -->
         <el-table-column type="selection" :reserve-selection="true" width="40" />
-        <!-- 列宽一律 min-width：容器变窄时由 Element Plus 触发横向滚动，
-             固定 width 会在窄窗口被裁切且 fixed 列错位覆盖相邻列 -->
-        <el-table-column prop="title" label="标题" min-width="220" show-overflow-tooltip />
-        <el-table-column v-if="!isCompact" prop="platform" label="平台" min-width="80" />
-        <el-table-column label="状态" min-width="84">
+        <!-- 标题列：narrow 档位把状态标签并进本单元格第二行（少一列就不必横向滚动） -->
+        <el-table-column
+          prop="title"
+          label="标题"
+          :min-width="layout === 'narrow' ? 168 : 220"
+          :show-overflow-tooltip="layout !== 'narrow'"
+        >
+          <template #default="{ row }">
+            <div v-if="layout === 'narrow'" class="cell-stack">
+              <span class="cell-stack__text" :title="row.title">{{ row.title }}</span>
+              <span class="cell-stack__row">
+                <el-tag :type="jobStatusTagType(row.status)" size="small" effect="plain" round>
+                  {{ jobStatusLabel(row.status) }}
+                </el-tag>
+              </span>
+            </div>
+            <span v-else>{{ row.title }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="layout === 'full'" prop="platform" label="平台" min-width="80" />
+        <el-table-column v-if="layout !== 'narrow'" label="状态" min-width="84">
           <template #default="{ row }">
             <el-tag :type="jobStatusTagType(row.status)" size="small" effect="plain" round>
               {{ jobStatusLabel(row.status) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column v-if="!isCompact" prop="model" label="模型" min-width="120" show-overflow-tooltip />
-        <el-table-column v-if="!isCompact" label="创建时间" min-width="150">
+        <el-table-column v-if="layout === 'full'" prop="model" label="模型" min-width="120" show-overflow-tooltip />
+        <el-table-column v-if="layout === 'full'" label="创建时间" min-width="150">
           <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
         </el-table-column>
-        <!-- 操作列：只保留主操作，「更多」下拉收纳次要操作（重新处理/取消/详情/删除），
-             避免 5 个按钮挤在一列导致窄窗口下覆盖相邻列 -->
-        <el-table-column label="操作" min-width="176" fixed="right">
+        <!-- 操作列：只保留主操作，「更多」下拉收纳次要操作（重新处理/取消/详情/删除）；
+             narrow 档位不吸边（列宽不够时靠横向滚动，而不是覆盖相邻列） -->
+        <el-table-column
+          label="操作"
+          :min-width="layout === 'narrow' ? 152 : 176"
+          :fixed="layout === 'narrow' ? false : 'right'"
+        >
           <template #default="{ row }">
             <el-button size="small" type="primary" link :icon="Eye" @click="handlePrimaryAction(row)">
               {{ actionFor(row).primaryLabel }}
@@ -520,6 +540,7 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
           </template>
         </el-table-column>
       </el-table>
+      </div>
 
       <el-pagination
         v-if="total > pageSize"
@@ -549,15 +570,29 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
 
 /* ========== 批量操作工具栏 ========== */
 .batch-toolbar {
-  margin-bottom: 12px;
   display: flex;
   gap: 8px;
   align-items: center;
+  /* ★ 必须允许换行：按钮默认 nowrap 撑住不缩，唯一可压缩的就是计数文字，
+     不换行时它会被挤成「已/选/5/项」竖排（按钮越多越明显） */
+  flex-wrap: wrap;
   padding: 10px 14px;
   border-radius: 8px;
 }
+/* 计数做成胶囊：不压缩、不换行，且比纯文本更像「状态」而非可点元素 */
 .batch-toolbar__count {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
   font-weight: 600;
+  background: rgba(var(--app-accent-1-rgb, 56, 189, 248), 0.16);
+  color: var(--app-accent-1, #38bdf8);
+}
+/* flex gap 已负责间距，清掉 Element Plus 相邻按钮的 margin-left，换行后间距才均匀 */
+.batch-toolbar :deep(.el-button + .el-button) {
+  margin-left: 0;
 }
 
 /* ========== 跨页全选栏 ========== */

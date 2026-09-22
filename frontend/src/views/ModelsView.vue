@@ -1,11 +1,13 @@
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { RefreshCcw, Eye, EyeOff, ArrowDown } from 'lucide-vue-next'
 import { useModelStore } from '../stores/modelStore'
 import { modelsApi } from '../utils/api'
 import { modelDisplayName } from '../utils/modelDisplay'
 import { isDialogCancel } from '../utils/errorNotice'
+import { useContainerWidth } from '../composables/useContainerWidth'
+import { MODELS_COLUMN_BREAKPOINTS, resolveTableLayout } from '../utils/tableLayout'
 import AsrPanel from '../components/models/AsrPanel.vue'
 
 const modelStore = useModelStore()
@@ -298,19 +300,15 @@ async function handleQuickAdd(modelId) {
   }
 }
 
-// 窄窗口（< 1240px）隐藏次要列：全列宽约 820px，低于该宽度时 Element Plus
-// 会裁切超出部分并让 fixed 操作列覆盖相邻列（视觉重叠），这里降级为关键列
-const COMPACT_WIDTH = 1240
-const isCompact = ref(window.innerWidth < COMPACT_WIDTH)
-function updateCompact() {
-  isCompact.value = window.innerWidth < COMPACT_WIDTH
-}
+// ★ 列布局按「表格容器实际宽度」分档（同历史页：窗口宽度会被侧栏/内边距误导）
+//   full 全列 / compact 隐藏模型ID·默认 / narrow 端点并入名称单元格、操作列不吸边
+const tableWrapRef = ref(null)
+const tableWidth = useContainerWidth(tableWrapRef, window.innerWidth)
+const layout = computed(() => resolveTableLayout(tableWidth.value, MODELS_COLUMN_BREAKPOINTS))
 
 onMounted(() => {
-  window.addEventListener('resize', updateCompact)
   modelStore.loadModels()
 })
-onUnmounted(() => window.removeEventListener('resize', updateCompact))
 </script>
 
 <template>
@@ -337,25 +335,30 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
             <span class="wb-card-title">LLM 文本模型</span>
             <span class="card-head-hint">用于总结、AI 校正、打标签、思维导图与追问</span>
           </div>
+          <div ref="tableWrapRef" class="table-wrap">
           <el-table :data="modelStore.models" v-loading="modelStore.loading" stripe style="width: 100%;">
-      <!-- 列宽一律 min-width：容器变窄时由 Element Plus 触发横向滚动（固定 width 会被裁切） -->
-      <el-table-column label="名称" min-width="200" show-overflow-tooltip>
+      <!-- 列宽一律 min-width：容器变窄时由 Element Plus 触发横向滚动（固定 width 会被裁切）；
+           narrow 档位把端点并入「名称」单元格第二行，少一列就不必横向滚动 -->
+      <el-table-column label="名称" min-width="200" :show-overflow-tooltip="layout !== 'narrow'">
         <template #default="{ row }">
-          <div style="display: flex; align-items: center; gap: 6px;">
-            <span>{{ modelDisplayName(row) }}</span>
-            <el-tag v-if="row.key_broken" type="danger" size="small" effect="plain">密钥无效</el-tag>
+          <div class="cell-stack">
+            <span class="cell-stack__row">
+              <span class="cell-stack__text">{{ modelDisplayName(row) }}</span>
+              <el-tag v-if="row.key_broken" type="danger" size="small" effect="plain">密钥无效</el-tag>
+            </span>
+            <span v-if="layout === 'narrow'" class="cell-stack__sub" :title="row.endpoint">{{ row.endpoint }}</span>
           </div>
         </template>
       </el-table-column>
-      <el-table-column prop="endpoint" label="端点" min-width="240" show-overflow-tooltip />
-      <el-table-column v-if="!isCompact" prop="model_id" label="模型ID" min-width="130" show-overflow-tooltip />
-      <el-table-column v-if="!isCompact" label="默认" min-width="60" align="center">
+      <el-table-column v-if="layout !== 'narrow'" prop="endpoint" label="端点" min-width="240" show-overflow-tooltip />
+      <el-table-column v-if="layout === 'full'" prop="model_id" label="模型ID" min-width="130" show-overflow-tooltip />
+      <el-table-column v-if="layout === 'full'" label="默认" min-width="60" align="center">
         <template #default="{ row }">
           <el-tag v-if="isDefaultModel(row)" type="success" size="small">默认</el-tag>
         </template>
       </el-table-column>
-      <!-- 操作列：编辑常显，「更多」下拉收纳测试/设默认/删除，避免窄窗口下覆盖相邻列 -->
-      <el-table-column label="操作" min-width="130" fixed="right">
+      <!-- 操作列：编辑常显，「更多」下拉收纳测试/设默认/删除；narrow 档位不吸边（靠横向滚动而非覆盖相邻列） -->
+      <el-table-column label="操作" min-width="130" :fixed="layout === 'narrow' ? false : 'right'">
         <template #default="{ row }">
           <el-button size="small" link type="primary" @click="openEditDialog(row)">编辑</el-button>
           <el-dropdown class="row-more-dropdown" trigger="click" @command="(cmd) => handleRowCommand(cmd, row)">
@@ -373,6 +376,7 @@ onUnmounted(() => window.removeEventListener('resize', updateCompact))
         </template>
       </el-table-column>
           </el-table>
+          </div>
         </el-card>
       </el-tab-pane>
 

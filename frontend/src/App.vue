@@ -731,6 +731,51 @@ body::after {
   background-color: rgba(var(--app-dim-color), 0.25) !important;
 }
 
+/* ============ 表格 fixed 列：取消 sticky 吸边（2026-09-22） ============
+ * 本 App 的表格是「透明卡片透出背景图」风格，fixed 列背景是半透明的。列宽总和超过容器时
+ * Element Plus 不会横向滚动，而是让 fixed 列 sticky 覆盖相邻列 —— 被覆盖的文字 / 标签会从
+ * 半透明背景里透出来，视觉上变成「叠字」（历史页状态列、模型页端点列都踩过）。
+ * 取消 sticky 后超出部分交给横向滚动，任何时候都不会互相覆盖；列宽足够（本来就无横向滚动）
+ * 时 static 与 sticky 的渲染位置完全一致，故可全局施加、无需按宽度分档。 */
+.el-table .el-table__cell.el-table-fixed-column--right,
+.el-table .el-table__cell.el-table-fixed-column--left {
+  position: static !important;
+}
+
+/* ============ 表格单元格「主信息 + 次要信息」堆叠（2026-09-22） ============
+ * 窄容器下把次要列（状态 / 端点）并入主列第二行：少一列就不需要横向滚动，
+ * 历史页与模型页共用（Promote 到全局的原因同其它表格类）。 */
+.cell-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.cell-stack__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+/* 行内标签不参与压缩，压缩全部让给主文本（否则「密钥无效」会被挤成两行） */
+.cell-stack__row > .el-tag {
+  flex: 0 0 auto;
+}
+.cell-stack__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cell-stack__sub {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--app-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 页面标题 */
 h2, h3 { color: var(--app-text-heading) !important; }
 
