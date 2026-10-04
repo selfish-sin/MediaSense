@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/frontend/index.md", "reason": "前端规范入口：组件纪律、composable 拆分、复制唯一入口、EP 交互坑点、四态覆盖要求"}
+{"file": ".trellis/tasks/10-05-theme-skin-system/research/external-experience.md", "reason": "玻璃拟态参数区间（blur/saturate/描边）、scrim 多层渐变与中性黑做法、Catppuccin 色板与语义映射、Lively 可借鉴结构"}
+{"file": ".trellis/tasks/10-05-theme-skin-system/design.md", "reason": "token 清单、皮肤 JSON schema、派生规则表、IndexedDB 迁移方案与关键决策"}
+{"file": ".trellis/tasks/10-05-theme-skin-system/exec-flow.md", "reason": "L 级阶段顺序与各阶段完成定义，Phase 2 为风险闸门"}

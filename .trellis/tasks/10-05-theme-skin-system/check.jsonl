@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/frontend/index.md", "reason": "核对四态覆盖、禁止静默失败、EP 交互坑点、vitest 必须经 run-vitest.mjs 运行"}
+{"file": ".trellis/tasks/10-05-theme-skin-system/research/external-experience.md", "reason": "核对玻璃/scrim 参数是否落在业界共识区间、对比度是否达 WCAG AA"}
+{"file": ".trellis/tasks/10-05-theme-skin-system/design.md", "reason": "核对 token 名冻结、20 个既有组件零改动、迁移 write-then-clean 是否落实"}
+{"file": ".trellis/tasks/10-05-theme-skin-system/prd.md", "reason": "逐条核对验收标准 A1-A9 与不做项边界"}
