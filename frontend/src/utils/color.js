@@ -110,11 +110,16 @@ export function deriveAccentPair(hex) {
 export async function extractPalette(imgSrc, { count = 5, sampleSize = 48 } = {}) {
   return new Promise((resolve) => {
     const img = new Image()
-    img.crossOrigin = 'anonymous'
+    // ★ 只对 http(s) 远端图请求 CORS：data:/blob: 是本地源，设 crossOrigin 在部分浏览器会直接加载失败
+    if (/^https?:/i.test(imgSrc)) img.crossOrigin = 'anonymous'
     img.onload = () => {
       try {
+        const iw = img.naturalWidth || img.width
+        const ih = img.naturalHeight || img.height
+        // 无固有尺寸（如只有 viewBox 的 SVG）→ 算不出采样高度，直接放弃而不是产出 NaN 画布
+        if (!iw || !ih) { resolve([]); return }
         const w = sampleSize
-        const h = Math.max(1, Math.round(sampleSize * img.height / img.width))
+        const h = Math.max(1, Math.round(sampleSize * ih / iw))
         const canvas = document.createElement('canvas')
         canvas.width = w
         canvas.height = h
