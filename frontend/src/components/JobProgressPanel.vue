@@ -7,7 +7,7 @@
  * - 生命周期注意：本组件在 v-if 下挂载/卸载（无任务时卸载 → 监听随之注销），
  *   与 HomeView 原 socketUnsubs（onUnmounted 清理）语义一致；keep-alive 切页不卸载。
  */
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useJobStore } from '../stores/jobStore'
 import { onProgress, onLog } from '../utils/socket'
@@ -47,6 +47,7 @@ async function handleQueueCancel(jobId) {
 /** 切换到队列中另一个任务的进度视图（用户点击队列项） */
 async function handleQueueSelect(jobId) {
   if (!jobId || jobId === jobStore.currentJobId) return
+  manualSwitchLock.value = true  // 用户手动选择优先，暂停自动接力
   try {
     await jobStore.loadJob(jobId)
   } catch {
@@ -60,6 +61,36 @@ const cancelling = ref(false)
 
 const isProcessing = computed(() => jobStore.isProcessing)
 
+/** 比队列快照「处理中」更细的阶段态（由 progress 事件 step 推出） */
+const FINE_GRAINED_STATUSES = ['downloading', 'transcribing', 'summarizing']
+/** 终态：当前跟踪任务已跑到终态且队列里还有别的任务在跑时，自动接力跟踪 */
+const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled', 'idle']
+
+/**
+ * 日志/进度接力：串行队列下前一个任务终态后，自动切到队列里正在处理的任务。
+ * ★ 否则会出现「队列显示 A 在跑、日志面板停在已完成的 B」的错位观感。
+ * 用户手动点选队列项后加锁，不再自动抢切（manualSwitchLock）。
+ */
+const manualSwitchLock = ref(false)
+watch(
+  () => [queue.value?.running?.[0]?.id, jobStore.currentJobId, jobStore.jobStatus, jobStore.isProcessing],
+  async ([runningId, currentId, status, processing]) => {
+    const targetId = runningId || ''
+    if (manualSwitchLock.value || !targetId || targetId === currentId) return
+    if (processing || !TERMINAL_STATUSES.includes(status || 'idle')) return
+    try {
+      await jobStore.loadJob(targetId)
+    } catch {
+      // 切换失败不影响主流程（用户可手动点选队列项）
+    }
+  }
+)
+// 新任务被跟踪（提交后 pending）→ 解除手动锁，恢复自动接力
+watch(
+  () => [jobStore.currentJobId, jobStore.jobStatus],
+  ([, status]) => { if (status === 'pending') manualSwitchLock.value = false }
+)
+
 /**
  * 当前任务的**真实**状态：优先取队列快照（DB 权威），拿不到再回落 jobStore。
  * jobStore.jobStatus 在提交后停在 'pending'（socket 进度事件不带 status），
@@ -70,7 +101,15 @@ const liveJobStatus = computed(() => {
   if (id && queue.value) {
     const inRunning = (queue.value.running || []).find(j => j.id === id)
     // 已占用槽位但 DB status 还停在 pending（字幕/下载阶段）→ 展示「处理中」
-    if (inRunning) return inRunning.status === 'pending' ? 'processing' : inRunning.status
+    if (inRunning) {
+      const snapshotStatus = inRunning.status === 'pending' ? 'processing' : inRunning.status
+      // 队列快照只给得出「处理中」这种模糊态时，回落到 jobStore 的细分阶段
+      // （下载/转录/AI），否则顶部标签会退化成笼统的「处理中」
+      if (snapshotStatus === 'processing' && FINE_GRAINED_STATUSES.includes(jobStore.jobStatus)) {
+        return jobStore.jobStatus
+      }
+      return snapshotStatus
+    }
     const inPending = (queue.value.pending || []).find(j => j.id === id)
     if (inPending?.status) return inPending.status
   }
