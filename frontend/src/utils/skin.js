@@ -27,6 +27,15 @@ function shift(hex, dl = 0, ds = 0) {
   return hslToHex([hsl[0], clampNum(hsl[1] + ds, 0, 100), clampNum(hsl[2] + dl, 0, 100)])
 }
 
+/**
+ * 前景强调微调：dark **提亮**、light **加深**。
+ * 浅色底上"提亮"会降低对比度，方向必须按材质翻转
+ * （dark/light 是两套独立材质，不能简单反转——与 effects 层的材质补偿同一原则）。
+ */
+function emphasis(hex, amount, mode) {
+  return shift(hex, mode === 'light' ? -amount : amount)
+}
+
 /** hex → "r, g, b" 三元组（供 `rgba(var(--x), a)` 形式消费）。 */
 function triple(hex) {
   const rgb = hexToRgb(hex)
@@ -66,7 +75,7 @@ export const DERIVE_RULES = {
   '--app-table-header-bg': (p) => shift(p.surface0, -2),
   // —— 文字 ——
   '--app-text': (p) => p.text,
-  '--app-text-heading': (p) => shift(p.text, 5),
+  '--app-text-heading': (p, mode) => emphasis(p.text, 5, mode),
   '--app-text-secondary': (p) => p.subtext0,
   '--app-text-placeholder': (p) => p.overlay0,
   // —— 滚动条 ——
@@ -90,12 +99,12 @@ export const DERIVE_RULES = {
   // —— 日志 ——
   '--app-log-bg': (p) => p.crust,
   '--app-log-text': (p) => p.subtext1,
-  '--app-log-time': (p) => shift(p.blue, 12),
+  '--app-log-time': (p, mode) => emphasis(p.blue, 12, mode),
   '--app-log-border': (p) => p.surface0,
   '--app-log-line-border': (p) => shift(p.surface0, -3),
   // —— 代码 ——
   '--app-code-bg': (p) => p.surface0,
-  '--app-code-text': (p) => shift(p.blue, 10),
+  '--app-code-text': (p, mode) => emphasis(p.blue, 10, mode),
   // —— 进度 ——
   '--app-progress-card-bg-a': (p) => p.mantle,
   '--app-progress-card-bg-b': (p) => p.base,
@@ -108,7 +117,7 @@ export const DERIVE_RULES = {
   '--app-search-hl-active-text': (p) => p.crust,
   // —— 思考态 ——
   '--app-thinking-bg': () => 'rgba(var(--app-accent-1-rgb, 56, 189, 248), 0.10)',
-  '--app-thinking-text': (p) => shift(p.blue, 8),
+  '--app-thinking-text': (p, mode) => emphasis(p.blue, 8, mode),
   // —— 引擎状态（绿=可用 / 红=错误）——
   '--app-engine-ok-bg': (p, mode) => rgba(p.green, mode === 'light' ? 0.18 : 0.14),
   '--app-engine-ok-text': (p, mode) => (mode === 'light' ? shift(p.green, -8) : p.green),
