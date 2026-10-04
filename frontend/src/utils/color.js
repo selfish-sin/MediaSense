@@ -108,6 +108,17 @@ export function deriveAccentPair(hex) {
  * @returns {Promise<string[]>} hex 数组，失败返回 []
  */
 export async function extractPalette(imgSrc, { count = 5, sampleSize = 48 } = {}) {
+  const sample = await sampleImagePixels(imgSrc, sampleSize)
+  return sample ? paletteFromPixels(sample.data, count) : []
+}
+
+/**
+ * 采样图片像素（缩放到 sampleSize 宽度）。
+ * 抽为独立函数供 extractPalette / imageFit 共用——**不写第二份采样**。
+ * 失败返回 null（无固有尺寸的 SVG、跨域污染、解码失败）：
+ * 调用方据此走降级，而不是拿到 NaN 画布。
+ */
+export function sampleImagePixels(imgSrc, sampleSize = 48) {
   return new Promise((resolve) => {
     const img = new Image()
     // ★ 只对 http(s) 远端图请求 CORS：data:/blob: 是本地源，设 crossOrigin 在部分浏览器会直接加载失败
@@ -116,8 +127,8 @@ export async function extractPalette(imgSrc, { count = 5, sampleSize = 48 } = {}
       try {
         const iw = img.naturalWidth || img.width
         const ih = img.naturalHeight || img.height
-        // 无固有尺寸（如只有 viewBox 的 SVG）→ 算不出采样高度，直接放弃而不是产出 NaN 画布
-        if (!iw || !ih) { resolve([]); return }
+        // 无固有尺寸（如只有 viewBox 的 SVG）→ 算不出采样高度，直接放弃
+        if (!iw || !ih) { resolve(null); return }
         const w = sampleSize
         const h = Math.max(1, Math.round(sampleSize * ih / iw))
         const canvas = document.createElement('canvas')
@@ -126,22 +137,59 @@ export async function extractPalette(imgSrc, { count = 5, sampleSize = 48 } = {}
         const ctx = canvas.getContext('2d', { willReadFrequently: true })
         ctx.drawImage(img, 0, 0, w, h)
         const { data } = ctx.getImageData(0, 0, w, h)
-        resolve(paletteFromPixels(data, count))
+        resolve({ data, width: w, height: h })
       } catch {
         // 跨域污染等导致 getImageData 失败
-        resolve([])
+        resolve(null)
       }
     }
-    img.onerror = () => resolve([])
+    img.onerror = () => resolve(null)
     img.src = imgSrc
   })
+}
+
+/**
+ * 统计像素的亮度/对比/饱和（背景图适配推荐用，纯计算）。
+ * @returns {{avgLuma:number, contrast:number, saturation:number, samples:number}}
+ * - avgLuma   0-1，越高图越亮
+ * - contrast  0-1，亮度极差，越大图越"花"
+ * - saturation 0-1，平均饱和度，越高越艳
+ */
+export function analyzePixels(data) {
+  let sum = 0
+  let satSum = 0
+  let count = 0
+  let min = 1
+  let max = 0
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] < 125) continue
+    const r = data[i] / 255
+    const g = data[i + 1] / 255
+    const b = data[i + 2] / 255
+    const luma = 0.299 * r + 0.587 * g + 0.114 * b
+    const mx = Math.max(r, g, b)
+    const mn = Math.min(r, g, b)
+    const sat = mx === 0 ? 0 : (mx - mn) / mx
+    sum += luma
+    satSum += sat
+    count += 1
+    if (luma < min) min = luma
+    if (luma > max) max = luma
+  }
+  if (!count) return { avgLuma: 0, contrast: 0, saturation: 0, samples: 0 }
+  return {
+    avgLuma: sum / count,
+    contrast: max - min,
+    saturation: satSum / count,
+    samples: count,
+  }
 }
 
 /**
  * 中位切分（median-cut）算法：从 RGBA 像素数组提取 count 种主色。
  * 同时丢弃接近纯黑/纯白/低饱和的噪音色。
  */
-function paletteFromPixels(data, count) {
+export function paletteFromPixels(data, count = 5) {
   // 收集像素，跳过近透明像素
   const pixels = []
   for (let i = 0; i < data.length; i += 4) {
