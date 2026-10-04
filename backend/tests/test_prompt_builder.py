@@ -84,6 +84,19 @@ class TestRecipes:
         assert "术语原貌" in tcm_tpl
         assert "剂量" in tcm_tpl
 
+    def test_tcm_discern_recipe_and_modules(self):
+        """医理辨析预设：辨析者角色 + 辨析特化模式 + 对比表格输出，补注不外加内容"""
+        r = next(x for x in RECIPES if x["key"] == "tcm_discern")
+        assert r["dimensions"]["role"] == "tcm_analyst"
+        assert r["dimensions"]["mode"] == "tcm_discern"
+        assert r["dimensions"]["output"] == "comparison"
+        role_tpl = _get_module_template("role", "tcm_analyst")
+        assert "辨析" in role_tpl
+        assert "补注" in role_tpl
+        mode_tpl = _get_module_template("mode", "tcm_discern")
+        assert "补注纪律" in mode_tpl
+        assert "不下定论" in mode_tpl
+
     def test_tcm_mode_module(self):
         """中医认知模式：mode=tcm 模块存在，选中时框架注入提示词"""
         mode_mods = [m["key"] for m in PROMPT_DIMENSIONS["mode"]["modules"]]
