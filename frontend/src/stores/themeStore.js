@@ -1,18 +1,22 @@
 import { defineStore } from 'pinia'
-import { ref, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { deriveAccentPair, hexToRgb } from '../utils/color'
 import { renderBuiltin } from '../utils/backgrounds'
+import { resolveSkin, skinMode, composeTokens, writeTokens, skinForMode } from '../utils/skin'
+import { DEFAULT_SKIN_ID } from '../utils/skins'
 
 /**
- * 主题管理：日间/夜间 + 主色调 + 桌面背景。
- * - theme: 'dark' | 'light'
- * - accent: 主色 hex（如 #38BDF8），驱动 --app-accent-1/2 及背景
- * - background: { type:'builtin'|'custom'|'none', id?, url?, dim, blur }
+ * 主题管理：皮肤 + 主色调 + 桌面背景。
+ * - skinId: 当前皮肤 id（BUILTIN_SKINS 之一），决定整套 --app-* 取值
+ * - theme: 由皮肤派生的明暗分支（'dark' | 'light'），对外 API 与重构前一致
+ * - accent: 主色 hex（如 #38BDF8），覆盖皮肤自带主色，驱动 --app-accent-1/2 及背景
+ * - background: { type:'builtin'|'custom'|'none', id?, url?, dim, blur, cardOpacity }
  *
+ * 应用顺序 applySkin()：皮肤 tokens → data-theme → accent（主色最后写，优先级最高）。
  * 持久化到 localStorage；切换时写 CSS 变量到 :root，组件直接用 var()。
  */
 
-const THEME_KEY = 'mediasense_theme'
+const SKIN_KEY = 'mediasense_skin'
 const ACCENT_KEY = 'mediasense_accent'
 const BG_KEY = 'mediasense_background'
 
@@ -31,11 +35,16 @@ function loadJson(key, fallback) {
 }
 
 export const useThemeStore = defineStore('theme', () => {
-  const theme = ref(localStorage.getItem(THEME_KEY) || 'dark')
+  const skinId = ref(localStorage.getItem(SKIN_KEY) || DEFAULT_SKIN_ID)
   const accent = ref(localStorage.getItem(ACCENT_KEY) || DEFAULT_ACCENT)
   const background = ref(loadJson(BG_KEY, { ...DEFAULT_BG }))
   /** 持久化失败原因（配额溢出等）——必须可见，否则"设置没保存"变成看不见的幽灵问题 */
   const storageError = ref('')
+
+  /** 当前皮肤对象（未知 id 自动回退内置默认）。 */
+  const skin = computed(() => resolveSkin(skinId.value))
+  /** 明暗分支：由皮肤声明派生，取代重构前独立可写的 theme 状态。 */
+  const theme = computed(() => skinMode(skin.value))
 
   function persist(key, value) {
     try {
@@ -97,19 +106,32 @@ export const useThemeStore = defineStore('theme', () => {
     root.style.setProperty('--app-card-opacity', `${(bg.cardOpacity ?? 100) / 100}`)
   }
 
-  // 初始化：应用一次
-  applyTheme(theme.value)
-  applyAccent(accent.value)
-  // 背景需在 DOM 就绪后应用；store 在 main.js import 时 body 可能尚未渲染，
-  // 但 CSS 变量设在 :root 上即生效，无需等待。
+  /**
+   * 把当前皮肤完整应用到 :root。
+   * 顺序不可调换：皮肤 tokens 先写，主色最后写（皮肤里的 accent 值是兜底默认，
+   * 用户选定的主色优先级最高）。
+   */
+  function applySkin() {
+    writeTokens(composeTokens(skin.value))
+    applyTheme(theme.value)
+    applyAccent(accent.value)
+  }
+
+  // 初始化：应用一次（CSS 变量设在 :root 上即生效，无需等 DOM 就绪）
+  applySkin()
   applyBackground(background.value)
 
-  // —— 主题模式 ——
-  function toggle() {
-    theme.value = theme.value === 'dark' ? 'light' : 'dark'
+  // —— 皮肤 / 明暗分支 ——
+  /** 直接指定皮肤（面板选择用）。 */
+  function setSkin(id) {
+    skinId.value = id
   }
+  /** 切到指定明暗分支——在同 family 内换肤，无同族则回退默认皮肤。 */
   function setTheme(t) {
-    theme.value = t
+    skinId.value = skinForMode(skin.value, t).id
+  }
+  function toggle() {
+    setTheme(theme.value === 'dark' ? 'light' : 'dark')
   }
 
   // —— 主色调 ——
@@ -126,9 +148,9 @@ export const useThemeStore = defineStore('theme', () => {
   }
 
   // 监听并持久化
-  watch(theme, (t) => {
-    applyTheme(t)
-    persist(THEME_KEY, t)
+  watch(skinId, (id) => {
+    applySkin()
+    persist(SKIN_KEY, id)
   })
 
   watch(accent, (hex) => {
@@ -144,8 +166,8 @@ export const useThemeStore = defineStore('theme', () => {
   }, { deep: true })
 
   return {
-    theme, accent, background, storageError,
-    toggle, setTheme,
+    skinId, skin, theme, accent, background, storageError,
+    toggle, setTheme, setSkin,
     setAccent,
     setBackground, resetBackground,
   }
