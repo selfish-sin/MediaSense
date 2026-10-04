@@ -34,6 +34,23 @@ export const useThemeStore = defineStore('theme', () => {
   const theme = ref(localStorage.getItem(THEME_KEY) || 'dark')
   const accent = ref(localStorage.getItem(ACCENT_KEY) || DEFAULT_ACCENT)
   const background = ref(loadJson(BG_KEY, { ...DEFAULT_BG }))
+  /** 持久化失败原因（配额溢出等）——必须可见，否则"设置没保存"变成看不见的幽灵问题 */
+  const storageError = ref('')
+
+  function persist(key, value) {
+    try {
+      localStorage.setItem(key, value)
+      storageError.value = ''
+      return true
+    } catch (err) {
+      // 不静默吞：localStorage 配额约 5MB，背景图 dataURL 超限会走到这里
+      console.error('[themeStore] 持久化失败:', key, err)
+      storageError.value = err?.name === 'QuotaExceededError'
+        ? '浏览器本地存储已满，本次设置不会被保存（换一张小一些的图即可）'
+        : '本地存储写入失败，本次设置不会被保存'
+      return false
+    }
+  }
 
   /** 把一个 hex 主色写成 --app-accent-1/2 及 -rgb 三元组到 :root。 */
   function applyAccent(hex) {
@@ -111,23 +128,23 @@ export const useThemeStore = defineStore('theme', () => {
   // 监听并持久化
   watch(theme, (t) => {
     applyTheme(t)
-    localStorage.setItem(THEME_KEY, t)
+    persist(THEME_KEY, t)
   })
 
   watch(accent, (hex) => {
     applyAccent(hex)
-    localStorage.setItem(ACCENT_KEY, hex)
+    persist(ACCENT_KEY, hex)
     // 内置背景跟随主色重渲染（自定义图不联动）
     if (background.value.type === 'builtin') applyBackground(background.value)
   })
 
   watch(background, (bg) => {
     applyBackground(bg)
-    localStorage.setItem(BG_KEY, JSON.stringify(bg))
+    persist(BG_KEY, JSON.stringify(bg))
   }, { deep: true })
 
   return {
-    theme, accent, background,
+    theme, accent, background, storageError,
     toggle, setTheme,
     setAccent,
     setBackground, resetBackground,
