@@ -12,6 +12,7 @@ import { Check, X, Upload, Sparkles, RotateCcw, ImageIcon, Palette } from 'lucid
 import { useThemeStore } from '../stores/themeStore'
 import { BUILTIN_BACKGROUNDS } from '../utils/backgrounds'
 import { extractPalette } from '../utils/color'
+import { prepareBackgroundImage } from '../utils/image'
 
 const theme = useThemeStore()
 
@@ -52,9 +53,12 @@ function onAccent(hex) {
   theme.setAccent(hex)
 }
 
-function onFileChange(e) {
-  const file = e.target.files?.[0]
+async function onFileChange(e) {
+  const input = e.target
+  const file = input.files?.[0]
   if (!file) return
+  // ★ 清空 value：否则连续选同一个文件不会再触发 change（表现为"点了没反应"）
+  input.value = ''
   if (!file.type.startsWith('image/')) {
     ElMessage.warning('请选择图片文件')
     return
@@ -64,28 +68,26 @@ function onFileChange(e) {
     return
   }
   uploading.value = true
-  const reader = new FileReader()
-  reader.onload = async () => {
-    const url = reader.result
-    customPreview.value = url
+  try {
+    // 先压到可持久化的体积：整张原图 base64 会撑爆 localStorage 配额（详见 utils/image.js）
+    const { dataUrl, compressed } = await prepareBackgroundImage(file)
+    customPreview.value = dataUrl
+    theme.setBackground({ type: 'custom', url: dataUrl })
     uploading.value = false
-    // 应用为背景
-    theme.setBackground({ type: 'custom', url })
-    ElMessage.success('背景已应用，正在提取配色…')
-    // 提取色板
+    ElMessage.success(compressed ? '背景已应用（大图已压缩以减轻存储占用）' : '背景已应用')
+
     extracting.value = true
-    const colors = await extractPalette(url, { count: 6, sampleSize: 64 })
+    const colors = await extractPalette(dataUrl, { count: 6, sampleSize: 64 })
     palette.value = colors
     extracting.value = false
     if (!colors.length) {
-      ElMessage.info('未能提取配色（图片可能跨域），可手动选色')
+      ElMessage.info('未能提取配色（图片像素无法读取），可在下方手动选色')
     }
-  }
-  reader.onerror = () => {
+  } catch (err) {
     uploading.value = false
-    ElMessage.error('图片读取失败')
+    extracting.value = false
+    ElMessage.error(err?.message || '图片处理失败')
   }
-  reader.readAsDataURL(file)
 }
 
 function applyPaletteColor(hex) {
@@ -183,6 +185,8 @@ const cardOpacity = computed({
         </div>
       </div>
       <div v-else-if="extracting" class="bp-palette-hint">正在提取配色…</div>
+      <!-- 持久化失败必须可见（localStorage 配额溢出等），否则"设置没保存"无从察觉 -->
+      <div v-if="theme.storageError" class="bp-storage-error">{{ theme.storageError }}</div>
     </section>
 
     <!-- 调节 -->
@@ -354,6 +358,15 @@ const cardOpacity = computed({
   white-space: nowrap;
 }
 .bp-palette-hint { font-size: 12px; color: var(--app-text-secondary); }
+.bp-storage-error {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
 
 /* 滑块行 */
 .bp-slider-row {
