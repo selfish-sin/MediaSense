@@ -835,9 +835,13 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
 
         # ===== Step 1: 获取转录文本（按输入类型分发到策略函数） =====
         if input_type == 'text':
+            # ★ 标题带正文摘要：纯「文本输入」在队列/历史页无法区分多个文本任务
+            #   （压缩空白并截断，避免换行/长文本把标题撑爆）
+            _brief = ' '.join((input_text or '').split())[:20]
+            _text_title = f'文本输入 · {_brief}' if _brief else '文本输入'
             srt_path, txt_path, seg_count, title, platform, step_files = await _handle_text_input(
                 input_text, job_dir, sio, job_id,
-                title='文本输入', platform='纯文本', progress_msg='文本已准备',
+                title=_text_title, platform='纯文本', progress_msg='文本已准备',
             )
         elif input_type == 'file':
             from services.storage_cleanup import validate_job_input_path
