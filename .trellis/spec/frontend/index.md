@@ -37,6 +37,17 @@
 - `el-tooltip` / `el-popover` 包裹**内部带 `v-if`** 的元素时，条件为假会触发
   `[ElOnlyChild] no valid child node found` 警告 → `v-if` 要提到 tooltip 外层。
 
+### 主题 / 皮肤 / 效果（2026-10-05 固化）
+
+- **`--app-*` token 名与语义冻结**：21 个组件直接 `var(--app-*)` 消费，改 token 名＝全站回归。新增 token 只增不改；确需改语义时先加别名过渡。
+- **皮肤是纯数据**：`utils/skins/` 下每套皮肤只声明 `palette`（约 18 个原始色）或 `tokens`（全量覆盖），其余由 `utils/skin.js` 的 `DERIVE_RULES` 表驱动派生。**新增皮肤＝加数据、不改组件**；新增 token 时在 `DERIVE_RULES` 加一行即可让全部皮肤自动支持。
+- **唯一写入点**：只有 `themeStore.applyVisuals()` 写 `:root` 内联样式（优先级高于样式表，故皮肤能覆盖 `App.vue` 的 `:root[data-theme=...]` 兜底）。顺序＝皮肤 token → data-theme → 效果变量 → accent（**accent 最后**，用户主色优先）。
+- **效果层与皮肤层职责分离**：配色归皮肤，氛围（遮罩/暗角/玻璃/透明度）归 `utils/effects.js`；效果参数独立存 `mediasense_effects`，与背景媒体解耦。
+- **遮罩必须用中性黑/白**（`--app-scrim-rgb`）——带色相的遮罩会把任何背景图统一染成同一种脏色（重构前"背景发灰蒙"的根因）。
+- **玻璃卡片必须比背景亮**：dark 模式靠 `--app-glass-sheen`（极淡白高光层）+ 高光描边 + 常态投影（`--app-card-rest`）才浮得起来；深色半透明卡片在深色背景上等于隐形。
+- **dark / light 是两套独立材质**（不能简单反转）：light 需要更高的不透明度（surface 基准 +12%）、更深的投影，且描边用主题深色而非白色高光。
+- **皮肤导入一律走 `utils/skinSchema.normalizeSkin()`**：失败必须给可行动原因（禁止静默失败、禁止半途应用半套皮肤）；归一化只保留白名单字段，防止外部文件夹带数据。
+
 ### 状态与 API
 
 - 跨视图共享状态进 Pinia store（jobStore/modelStore/settingsStore/themeStore/asrStore），视图私有状态留在视图

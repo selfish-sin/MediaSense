@@ -9,13 +9,13 @@
   "preflightCommand": "git status --porcelain",
   "framework": "vue3-spa (frontend) + fastapi (backend)",
   "componentLibrary": "Element Plus",
-  "tokenSource": "frontend/src/style.css CSS variables + data-theme attr",
+  "tokenSource": "frontend/src/App.vue 的 --app-* CSS 变量（样式表兜底）+ frontend/src/utils/skin.js 皮肤层派生（写 :root 内联覆盖）+ frontend/src/utils/effects.js 效果层",
   "contractSource": "none (single-repo local app, no external API contract)",
   "deliveryState": "prototype",
-  "verifyCommand": "cd backend && venv/Scripts/python.exe -m pytest && cd ../frontend && npm run test && npm run build",
-  "verifyFullCommand": "cd backend && venv/Scripts/python.exe -m pytest && cd ../frontend && npm run test && npm run build",
+  "verifyCommand": "python verify.py",
+  "verifyFullCommand": "python verify.py",
   "browserSmokeCommand": "cd backend && python main.py (port 7001) → http://localhost:7001",
   "frontendFoundation": "none",
   "createdAt": "2026-08-09",
-  "lastUpdated": "2026-08-27"
+  "lastUpdated": "2026-10-05"
 }
