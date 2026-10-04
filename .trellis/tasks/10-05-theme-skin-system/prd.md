@@ -1,5 +1,8 @@
 # 背景与皮肤系统重构 - PRD
 
+> **范围收缩（2026-10-05，用户确认）**：IndexedDB 背景图库（含数据迁移）拆分到独立子任务，本任务等级由 **L → M1**。
+> 本任务只做「皮肤 token 层 + 效果层 + 内置皮肤包 + 背景类型扩展」，**不涉及任何数据迁移**，回滚退化为单纯 revert。
+
 ## 需求
 
 我要解决什么问题：现有"背景系统"实际只是「换主色 + 传一张图 + 拉两个滑块」，背景图被单色遮罩平涂成灰蒙一片、卡片玻璃感缺失、整体只有一套配色，导致自定义背景观感差（用户原话"好丑"）。需要把它升级为三层解耦的**皮肤 / 效果 / 背景**系统。
@@ -16,14 +19,15 @@
 - [ ] A2 背景遮罩由「单色平涂」升级为「渐变 scrim + 径向暗角」多层合成，遮罩浓度为 0 时完全不压暗图片，为最大时内容区文字对比度 ≥ 4.5:1。
 - [ ] A3 卡片玻璃为三件套（blur + saturate + 高光描边）且分 3 档 surface，视觉层级可辨（宿主卡片 > 内嵌块 > chip）。
 - [ ] A4 皮肤为纯数据（JSON），新增一套皮肤不改任何组件代码；面板可见并可切换；皮肤可导出为 `.json` 文件、可再导入生效。
-- [ ] A5 背景图可保存多张（≥5 张）并在面板中切换，不受 localStorage ~5MB 配额限制；旧版本已存的自定义背景升级后仍能正常显示。
+- [ ] ~~A5 背景图可保存多张并切换~~ → **移交子任务 `背景图库（IndexedDB）`**
 - [ ] A6 背景支持「程序化动态」（至少 1 种 Canvas/CSS 动画预设）与「静态图」两类，动态背景在窗口失焦时暂停。
 - [ ] A7 上传背景图后自动给出推荐遮罩强度与卡片透明度（基于图片平均亮度），用户可一键采用。
 - [ ] A8 `npm run lint` / `npm run test` / `npm run build` 全绿；后端 pytest 不受影响（本任务不应触碰后端）。
-- [ ] A9 无静默失败：IndexedDB 不可用、图片解码失败、皮肤 JSON 非法等均给出用户可见提示。
+- [ ] A9 无静默失败：图片解码失败、皮肤 JSON 非法等均给出用户可见提示；localStorage 配额溢出沿用现有可见提示。
 
 ## 不做项
 
+- **不做 IndexedDB 背景图库与数据迁移**（移交子任务）。
 - 不做 Windows 桌面层动态壁纸（Lively/Wallpaper Engine 式注入 WorkerW），背景只在 WebView 内渲染。
 - 不做 GLSL/WebGL shader 背景（至少本版不做），动态背景限 Canvas 2D / CSS 动画。
 - 不做皮肤市场 / 在线下载 / 社区分享。
@@ -34,18 +38,15 @@
 ## 影响范围
 
 - 直接改动：`frontend/src/stores/themeStore.js`、`frontend/src/utils/backgrounds.js`、`frontend/src/utils/color.js`、`frontend/src/components/BackgroundPanel.vue`、`frontend/src/App.vue`（主题变量块 + body 背景层 + 卡片类）。
-- 新增：`frontend/src/utils/skin.js`（派生器）、`frontend/src/utils/skins/`（皮肤数据）、`frontend/src/utils/bgStore.js`（IndexedDB）、`frontend/src/utils/imageFit.js`（亮度分析），若干测试。
-- 间接受影响：**21 个消费 `var(--app-*)` 的组件**——本设计以「变量名与语义不变」为前提，组件预期零改动；Phase 1 等价重构必须证明这一点。
+- 新增：`frontend/src/utils/skin.js`（派生器）、`frontend/src/utils/skins/`（皮肤数据）、`frontend/src/utils/skinSchema.js`（校验）、`frontend/src/utils/effects.js`、`frontend/src/utils/imageFit.js` 与配套测试。
+- 间接受影响：**21 个消费 `var(--app-*)` 的组件**——本设计以「变量名与语义不变」为前提，组件预期零改动；Phase 2 等价重构必须证明这一点。
 - 构建产物：`backend/static/` 需重新 build（同源 SPA，用户实际看到的是构建产物）。
 
 ## 风险与回滚
 
-- 风险等级：**L**（用户本轮确认）。触发 L 的要素：①数据迁移（自定义背景 dataURL → IndexedDB）；②核心架构变更（写死双主题 → 数据驱动皮肤层）；③影响面覆盖全站 CSS。
-- 不可逆操作：
-  - 旧 localStorage `mediasense_background.url`（dataURL）迁移后清理 —— **迁移必须"先写入 IndexedDB 成功、再清理旧字段"**，失败则保留旧字段继续用旧路径渲染。
-  - 全局 CSS 变量语义调整 —— 不删除任何既有变量名，只新增；如需改语义须加别名过渡。
+- 风险等级：**M1**（原 L 级，2026-10-05 用户确认降级——拆分 IndexedDB 后本任务不含数据迁移与不可逆操作）。
+- 不可逆操作：**无**。全程只改前端源码与 CSS 变量，无数据迁移、无 schema 变更、无后端改动。
 - 回滚方式：
-  - 每阶段独立 commit；Phase 1（等价重构）出问题 → `git revert` 单阶段 commit 即可恢复原实现。
-  - 皮肤层设计为"可控降级"：`skinId` 缺失/非法 → 回退到内置「午夜青蓝」默认皮肤；渲染路径与旧版逐值等价。
-  - 背景 IndexedDB 不可用 → 退回 localStorage 单图路径（保留该分支代码，不删）。
-  - 全局兜底：本任务开启独立分支/worktree，`main` 保持可发布状态。
+  - 每阶段独立 commit；任一阶段出问题 → `git revert` 该 commit 即恢复。
+  - 皮肤层设计为"可控降级"：`skinId` 缺失/非法 → 回退内置「午夜青蓝」默认皮肤，渲染路径与旧版逐值等价。
+  - 整体：本任务在 `feat/theme-skin-system` worktree 分支进行，`master` 保持可发布；不合并不影响线上。

@@ -3,7 +3,7 @@
   "name": "theme-skin-system",
   "title": "背景与皮肤系统重构",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -18,7 +18,9 @@
   "commit": null,
   "pr_url": null,
   "subtasks": [],
-  "children": [],
+  "children": [
+    "10-05-bg-gallery-indexeddb"
+  ],
   "parent": null,
   "relatedFiles": [],
   "notes": "",
