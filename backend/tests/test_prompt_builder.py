@@ -73,7 +73,7 @@ class TestRecipes:
             assert r["dimensions"].get("language") == "简体中文", r["key"]
 
     def test_tcm_recipe_and_role_module(self):
-        """中医预设：专用角色模块 + 原貌保留型维度组合"""
+        """中医预设：专用角色模块 + 原貌保留与辨析补注型维度组合"""
         r = next(x for x in RECIPES if x["key"] == "tcm_lecture")
         assert r["dimensions"]["role"] == "tcm"
         assert r["dimensions"]["mode"] == "tcm"
@@ -83,18 +83,20 @@ class TestRecipes:
         tcm_tpl = _get_module_template("role", "tcm")
         assert "术语原貌" in tcm_tpl
         assert "剂量" in tcm_tpl
+        assert "辨析" in tcm_tpl
+        assert "补注" in tcm_tpl
 
-    def test_tcm_discern_recipe_and_modules(self):
-        """医理辨析预设：辨析者角色 + 辨析特化模式 + 对比表格输出，补注不外加内容"""
-        r = next(x for x in RECIPES if x["key"] == "tcm_discern")
-        assert r["dimensions"]["role"] == "tcm_analyst"
-        assert r["dimensions"]["mode"] == "tcm_discern"
-        assert r["dimensions"]["output"] == "comparison"
-        role_tpl = _get_module_template("role", "tcm_analyst")
-        assert "辨析" in role_tpl
-        assert "补注" in role_tpl
-        mode_tpl = _get_module_template("mode", "tcm_discern")
-        assert "补注纪律" in mode_tpl
+    def test_tcm_discern_merged_no_separate_recipe(self):
+        """医理辨析已融入中医讲堂：单一配方、单一 tcm 角色/认知模块，无对比表格、无独立辨析配方"""
+        assert not any(x["key"] == "tcm_discern" for x in RECIPES)
+        r = next(x for x in RECIPES if x["key"] == "tcm_lecture")
+        assert r["dimensions"]["output"] == "chapters"
+        assert r["dimensions"]["rules"] == "deep"
+        role_mods = [m["key"] for m in PROMPT_DIMENSIONS["role"]["modules"]]
+        mode_mods = [m["key"] for m in PROMPT_DIMENSIONS["mode"]["modules"]]
+        assert "tcm_analyst" not in role_mods
+        assert "tcm_discern" not in mode_mods
+        mode_tpl = _get_module_template("mode", "tcm")
         assert "不下定论" in mode_tpl
 
     def test_tcm_mode_module(self):
