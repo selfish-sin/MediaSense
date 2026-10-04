@@ -142,13 +142,6 @@ function onExportSkin() {
   skinNotice.value = { kind: 'ok', text: `已导出 ${theme.skinId}.json` }
 }
 
-function onRemoveSkin() {
-  const res = theme.removeUserSkin(theme.skinId)
-  skinNotice.value = res.ok
-    ? { kind: 'ok', text: '已删除该皮肤并回退默认皮肤' }
-    : { kind: 'err', text: res.error }
-}
-
 function resetAll() {
   theme.resetBackground()
   theme.resetEffects()
@@ -204,13 +197,6 @@ const bgBlur = effectModel('bgBlur', 0)
         </label>
         <button class="bp-skin-btn" @click="onExportSkin">
           <Sparkles :size="13" /> 导出当前
-        </button>
-        <button
-          v-if="theme.userSkins.some((s) => s.id === theme.skinId)"
-          class="bp-skin-btn bp-skin-danger"
-          @click="onRemoveSkin"
-        >
-          <X :size="13" /> 删除该皮肤
         </button>
       </div>
       <div v-if="skinNotice" class="bp-skin-notice" :class="skinNotice.kind">{{ skinNotice.text }}</div>
@@ -416,7 +402,6 @@ const bgBlur = effectModel('bgBlur', 0)
   transition: color 0.15s, border-color 0.15s;
 }
 .bp-skin-btn:hover { color: var(--app-text); border-color: var(--app-accent-1); }
-.bp-skin-danger:hover { color: #f87171; border-color: #f87171; }
 .bp-skin-notice { font-size: 12px; padding: 6px 10px; border-radius: 8px; line-height: 1.4; }
 .bp-skin-notice.ok {
   color: #4ade80;

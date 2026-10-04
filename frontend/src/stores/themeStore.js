@@ -170,16 +170,6 @@ export const useThemeStore = defineStore('theme', () => {
     return { ok: true, skin: next }
   }
 
-  /** 删除用户导入的皮肤；若正用它则回退默认皮肤。 */
-  function removeUserSkin(id) {
-    const isBuiltin = BUILTIN_SKINS.some((s) => s.id === id)
-    if (isBuiltin) return { ok: false, error: '内置皮肤不可删除' }
-    userSkins.value = userSkins.value.filter((s) => s.id !== id)
-    persist(USER_SKINS_KEY, JSON.stringify(userSkins.value))
-    if (skinId.value === id) setSkin(DEFAULT_SKIN_ID)
-    return { ok: true }
-  }
-
   /** 导出皮肤为 JSON 文本（用于下载/分享）。 */
   function exportSkinJson(id) {
     return skinToJson(resolveSkin(id, userSkins.value))
@@ -234,7 +224,7 @@ export const useThemeStore = defineStore('theme', () => {
     skinId, skin, theme, accent, background, effects, storageError,
     availableSkins, userSkins,
     toggle, setTheme, setSkin,
-    importSkin, removeUserSkin, exportSkinJson,
+    importSkin, exportSkinJson,
     setAccent,
     setEffect, resetEffects,
     setBackground, resetBackground,

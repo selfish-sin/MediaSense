@@ -50,13 +50,13 @@
 `--app-scrim-rgb=255, 255, 255`（中性白）、`--app-surface-1-opacity=0.840`（light 材质补偿自动生效）
 → **PASS**（皮肤 → 明暗分支 → 效果层材质全链路联动）
 
-### 5. 导入导出（四条路径，全部实测）
+### 5. 导入导出（实测；含一条已移除的能力）
 | 场景 | 结果 |
 |---|---|
 | 导入合法皮肤（`.json`，palette 模式） | 提示「已导入并应用皮肤「我的纸感皮肤」」；卡片 6→**7**；`mediasense_skin=my-paper`；已持久化 → **PASS** |
 | 导入缺色皮肤 | 提示「导入失败：palette 缺少或格式错误的必需色：mantle、surface0、…（共需 16 个）」；**卡片数不变、当前皮肤不变、存储未污染** → **PASS** |
 | 导入与内置同 id | 提示「id "catppuccin-mocha" 与内置皮肤冲突，请修改文件中的 id 后重试」→ **PASS** |
-| 删除用户皮肤 | 提示「已删除该皮肤并回退默认皮肤」；卡片 7→**6**；`mediasense_skin` 回 `legacy-dark`；存储清空 → **PASS** |
+| ~~删除用户皮肤~~ | 曾实测通过（提示「已删除并回退默认」、卡片 7→6、存储清空），**用户当日要求移除该功能，已从 UI 与 store 删除**（见偏差 6） |
 
 ### 6. 用户皮肤解析
 `resolveSkin('my-skin', [custom])` 命中；不传 extra 时回退默认（单测覆盖）→ **PASS**
@@ -68,3 +68,4 @@
 3. **`allTokenNames` 断言放宽**：原测试断言 `toHaveLength(59)`，现为「至少覆盖 legacy 全部 token 且无重复」——因为 palette 派生规则名与 legacy tokens 名有并集关系，硬编码长度会随皮肤增加而脆弱。
 4. **导出按钮会真实触发浏览器下载**：UI 测试只验证点击无报错；导出内容的正确性由 `skinToJson` 往返单测覆盖（导出→再导入结果 `toEqual` 原皮肤）。
 5. **Catppuccin 主色选 mauve 而非 blue**：Catppuccin 官方对多数应用推荐 mauve/pink 作强调色，且与本站默认青蓝有区分度；若观感不佳，改 `catppuccin.js` 的 `accent` 一行即可。
+6. **移除「删除用户皮肤」功能**（用户当日明确要求，Bug 修复式小改动）：删除 UI 按钮、`onRemoveSkin` 处理函数、`.bp-skin-danger` 样式与 `themeStore.removeUserSkin` 方法（含 return 导出）。移除后 `npm run lint` 与 195 个单测复查全绿。用户若不想要某套导入的皮肤，可用「导入同 id 皮肤」覆盖。
