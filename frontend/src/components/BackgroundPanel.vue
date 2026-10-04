@@ -63,8 +63,8 @@ async function onFileChange(e) {
     ElMessage.warning('请选择图片文件')
     return
   }
-  if (file.size > 8 * 1024 * 1024) {
-    ElMessage.warning('图片需小于 8MB')
+  if (file.size > 30 * 1024 * 1024) {
+    ElMessage.warning('图片需小于 30MB')
     return
   }
   uploading.value = true
@@ -162,7 +162,7 @@ const cardOpacity = computed({
         <div class="bp-upload-inner">
           <Upload :size="22" />
           <span>{{ uploading ? '读取中…' : '点击上传图片' }}</span>
-          <span class="bp-upload-hint">支持 JPG / PNG / WebP，&lt;8MB</span>
+          <span class="bp-upload-hint">支持 JPG / PNG / WebP，&lt;30MB（大图会自动压缩后保存）</span>
         </div>
       </label>
       <!-- 提取的色板 -->
