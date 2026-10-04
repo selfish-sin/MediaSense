@@ -97,24 +97,26 @@ function applyPaletteColor(hex) {
 
 function resetAll() {
   theme.resetBackground()
+  theme.resetEffects()
   theme.setAccent('#38BDF8')
   customPreview.value = ''
   palette.value = []
 }
 
-// 调节滑块
-const dim = computed({
-  get: () => theme.background.dim ?? 0,
-  set: (v) => theme.setBackground({ dim: v }),
-})
-const blur = computed({
-  get: () => theme.background.blur ?? 0,
-  set: (v) => theme.setBackground({ blur: v }),
-})
-const cardOpacity = computed({
-  get: () => theme.background.cardOpacity ?? 100,
-  set: (v) => theme.setBackground({ cardOpacity: v }),
-})
+// 调节滑块：效果参数独立于背景媒体（见 utils/effects.js）
+function effectModel(key, fallback) {
+  return computed({
+    get: () => theme.effects[key] ?? fallback,
+    set: (v) => theme.setEffect({ [key]: v }),
+  })
+}
+const dim = effectModel('dim', 26)
+const vignette = effectModel('vignette', 55)
+const top = effectModel('top', 12)
+const bottom = effectModel('bottom', 22)
+const cardOpacity = effectModel('cardOpacity', 72)
+const glassBlur = effectModel('glassBlur', 14)
+const bgBlur = effectModel('bgBlur', 0)
 </script>
 
 <template>
@@ -189,25 +191,52 @@ const cardOpacity = computed({
       <div v-if="theme.storageError" class="bp-storage-error">{{ theme.storageError }}</div>
     </section>
 
-    <!-- 调节 -->
+    <!-- 氛围遮罩：四层 scrim 各自可调，配合出"背景作为氛围层"的观感 -->
     <section class="bp-section">
       <div class="bp-section-head">
-        <span>背景调节</span>
+        <span>氛围遮罩</span>
       </div>
       <div class="bp-slider-row">
-        <label>遮罩浓度</label>
-        <el-slider v-model="dim" :min="0" :max="70" :step="1" style="flex:1" />
+        <label>整体浓度</label>
+        <el-slider v-model="dim" :min="0" :max="100" :step="1" style="flex:1" />
         <span class="bp-slider-val">{{ dim }}%</span>
       </div>
       <div class="bp-slider-row">
+        <label>径向暗角</label>
+        <el-slider v-model="vignette" :min="0" :max="100" :step="1" style="flex:1" />
+        <span class="bp-slider-val">{{ vignette }}%</span>
+      </div>
+      <div class="bp-slider-row">
+        <label>顶部渐晕</label>
+        <el-slider v-model="top" :min="0" :max="100" :step="1" style="flex:1" />
+        <span class="bp-slider-val">{{ top }}%</span>
+      </div>
+      <div class="bp-slider-row">
+        <label>底部渐晕</label>
+        <el-slider v-model="bottom" :min="0" :max="100" :step="1" style="flex:1" />
+        <span class="bp-slider-val">{{ bottom }}%</span>
+      </div>
+      <div class="bp-slider-row">
         <label>背景模糊</label>
-        <el-slider v-model="blur" :min="0" :max="20" :step="1" style="flex:1" />
-        <span class="bp-slider-val">{{ blur }}px</span>
+        <el-slider v-model="bgBlur" :min="0" :max="20" :step="1" style="flex:1" />
+        <span class="bp-slider-val">{{ bgBlur }}px</span>
+      </div>
+    </section>
+
+    <!-- 卡片材质：透明度基准驱动 surface-1/2/3 三档 -->
+    <section class="bp-section">
+      <div class="bp-section-head">
+        <span>卡片材质</span>
       </div>
       <div class="bp-slider-row">
         <label>卡片透明度</label>
         <el-slider v-model="cardOpacity" :min="20" :max="100" :step="1" style="flex:1" />
         <span class="bp-slider-val">{{ cardOpacity }}%</span>
+      </div>
+      <div class="bp-slider-row">
+        <label>玻璃模糊</label>
+        <el-slider v-model="glassBlur" :min="0" :max="24" :step="1" style="flex:1" />
+        <span class="bp-slider-val">{{ glassBlur }}px</span>
       </div>
     </section>
 

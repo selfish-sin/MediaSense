@@ -117,7 +117,9 @@ export const legacyLight = {
     // 描边 / 阴影
     '--app-border': '#dce4ee',
     '--app-card-header-border': '#e8eef6',
-    '--app-card-glow': '0 8px 24px rgba(15, 23, 42, 0.08)',
+    // 浅色模式下卡片与背景同为浅色，层次只能靠投影建立（业界共识：dark/light 是两套材质）。
+    // 相比重构前的 0.08 加深，否则白卡片压在浅色背景上边界消失。
+    '--app-card-glow': '0 10px 30px rgba(15, 23, 42, 0.16)',
     // 输入
     '--app-input-bg': '#ffffff',
     '--app-input-border': '#cbd6e5',

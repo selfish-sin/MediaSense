@@ -4,26 +4,31 @@ import { deriveAccentPair, hexToRgb } from '../utils/color'
 import { renderBuiltin } from '../utils/backgrounds'
 import { resolveSkin, skinMode, composeTokens, writeTokens, skinForMode } from '../utils/skin'
 import { DEFAULT_SKIN_ID } from '../utils/skins'
+import { DEFAULT_EFFECTS, effectVars, loadEffects } from '../utils/effects'
 
 /**
- * 主题管理：皮肤 + 主色调 + 桌面背景。
- * - skinId: 当前皮肤 id（BUILTIN_SKINS 之一），决定整套 --app-* 取值
- * - theme: 由皮肤派生的明暗分支（'dark' | 'light'），对外 API 与重构前一致
- * - accent: 主色 hex（如 #38BDF8），覆盖皮肤自带主色，驱动 --app-accent-1/2 及背景
- * - background: { type:'builtin'|'custom'|'none', id?, url?, dim, blur, cardOpacity }
+ * 主题管理：皮肤 + 效果 + 主色调 + 背景媒体。
+ * - skinId: 当前皮肤 id（BUILTIN_SKINS 之一）——决定整套配色与明暗分支
+ * - effects: 氛围参数（遮罩/暗角/玻璃/透明度）——决定观感
+ * - accent: 主色 hex——覆盖皮肤自带主色，驱动 --app-accent-1/2 及内置背景配色
+ * - background: { type:'builtin'|'custom'|'none', id?, url? }——背景媒体本身
  *
- * 应用顺序 applySkin()：皮肤 tokens → data-theme → accent（主色最后写，优先级最高）。
+ * 应用顺序 applyVisuals()：皮肤 tokens → data-theme → 效果变量 → accent
+ * （accent 最后写，用户选定主色优先级最高；effects 与皮肤互不重叠，顺序无强约束）。
+ *
  * 持久化到 localStorage；切换时写 CSS 变量到 :root，组件直接用 var()。
  */
 
 const SKIN_KEY = 'mediasense_skin'
+const EFFECTS_KEY = 'mediasense_effects'
 const ACCENT_KEY = 'mediasense_accent'
 const BG_KEY = 'mediasense_background'
 
 /** 午夜青蓝默认主色。 */
 const DEFAULT_ACCENT = '#38BDF8'
 
-const DEFAULT_BG = { type: 'builtin', id: 'abyss', dim: 22, blur: 0, cardOpacity: 72 }
+/** 背景媒体默认值（效果参数已迁出到 effects，见 utils/effects.js）。 */
+const DEFAULT_BG = { type: 'builtin', id: 'abyss' }
 
 function loadJson(key, fallback) {
   try {
@@ -38,6 +43,8 @@ export const useThemeStore = defineStore('theme', () => {
   const skinId = ref(localStorage.getItem(SKIN_KEY) || DEFAULT_SKIN_ID)
   const accent = ref(localStorage.getItem(ACCENT_KEY) || DEFAULT_ACCENT)
   const background = ref(loadJson(BG_KEY, { ...DEFAULT_BG }))
+  // 效果参数独立存储；首次运行从旧 background 对象里继承 dim/blur/cardOpacity（零迁移成本）
+  const effects = ref(loadEffects(loadJson(EFFECTS_KEY, null), background.value))
   /** 持久化失败原因（配额溢出等）——必须可见，否则"设置没保存"变成看不见的幽灵问题 */
   const storageError = ref('')
 
@@ -88,37 +95,32 @@ export const useThemeStore = defineStore('theme', () => {
     }
   }
 
-  /** 把背景应用到 body::before 伪元素（通过 CSS 变量传递）。 */
+  /** 背景媒体只负责 --app-bg-image；遮罩/模糊由效果层负责。 */
   function applyBackground(bg) {
     const root = document.documentElement
     let url = 'none'
+    // 'image' 为子任务（IndexedDB 图库）预留，当前等价于 'custom'
     if (bg.type === 'builtin') {
       url = renderBuiltin(bg.id, accent.value)
-    } else if (bg.type === 'custom' && bg.url) {
+    } else if ((bg.type === 'custom' || bg.type === 'image') && bg.url) {
       url = `url("${bg.url}")`
     }
     root.style.setProperty('--app-bg-image', url)
-    // 遮罩浓度：纯数字 0-70，消费端用 calc(var(--app-bg-dim) / 100) 得到 0-0.7
-    // 注意：不能带 %，否则 calc(28% / 100) 在 opacity 上下文非法 → 滑块失效
-    root.style.setProperty('--app-bg-dim', `${bg.dim ?? 0}`)
-    root.style.setProperty('--app-bg-blur', `${bg.blur ?? 0}px`)
-    // 卡片透明度：0-100 → 0-1，让背景图透过卡片显出
-    root.style.setProperty('--app-card-opacity', `${(bg.cardOpacity ?? 100) / 100}`)
   }
 
   /**
-   * 把当前皮肤完整应用到 :root。
-   * 顺序不可调换：皮肤 tokens 先写，主色最后写（皮肤里的 accent 值是兜底默认，
-   * 用户选定的主色优先级最高）。
+   * 把当前皮肤 + 效果完整应用到 :root。
+   * accent 最后写：皮肤里的 accent 值是兜底默认，用户选定色优先级最高。
    */
-  function applySkin() {
+  function applyVisuals() {
     writeTokens(composeTokens(skin.value))
     applyTheme(theme.value)
+    writeTokens(effectVars(effects.value, theme.value))
     applyAccent(accent.value)
   }
 
   // 初始化：应用一次（CSS 变量设在 :root 上即生效，无需等 DOM 就绪）
-  applySkin()
+  applyVisuals()
   applyBackground(background.value)
 
   // —— 皮肤 / 明暗分支 ——
@@ -139,6 +141,14 @@ export const useThemeStore = defineStore('theme', () => {
     accent.value = hex
   }
 
+  // —— 效果 ——
+  function setEffect(partial) {
+    effects.value = { ...effects.value, ...partial }
+  }
+  function resetEffects() {
+    effects.value = { ...DEFAULT_EFFECTS }
+  }
+
   // —— 背景 ——
   function setBackground(partial) {
     background.value = { ...background.value, ...partial }
@@ -149,9 +159,15 @@ export const useThemeStore = defineStore('theme', () => {
 
   // 监听并持久化
   watch(skinId, (id) => {
-    applySkin()
+    applyVisuals()
     persist(SKIN_KEY, id)
   })
+
+  // 效果参数变化只需重写效果变量（皮肤 63 项不动，避免拖滑块时全量重算样式）
+  watch(effects, (e) => {
+    writeTokens(effectVars(e, theme.value))
+    persist(EFFECTS_KEY, JSON.stringify(e))
+  }, { deep: true })
 
   watch(accent, (hex) => {
     applyAccent(hex)
@@ -166,9 +182,10 @@ export const useThemeStore = defineStore('theme', () => {
   }, { deep: true })
 
   return {
-    skinId, skin, theme, accent, background, storageError,
+    skinId, skin, theme, accent, background, effects, storageError,
     toggle, setTheme, setSkin,
     setAccent,
+    setEffect, resetEffects,
     setBackground, resetBackground,
   }
 })

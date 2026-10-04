@@ -354,19 +354,44 @@ body [contenteditable="true"] {
 
 /* ============ 全局背景层（图片 + 遮罩） ============ */
 
-/* ============ 全站通用卡片（透明 + 毛玻璃 + 悬停 glow） ============
- * 首页 .wb-card 与各视图 .app-card 共用同一套视觉基准，
- * 由 --app-dim-color（主题底色 RGB）+ --app-card-opacity（透明度滑块）驱动。
- * el-card 上加 class="app-card" 即可继承圆角/悬停/透明；表格保持实底。 */
+/* ============ 全站通用卡片（玻璃三件套 + 悬停 glow） ============
+ * 首页 .wb-card 与各视图 .app-card 共用同一套视觉基准：
+ *   半透明底 rgba(--app-dim-color, --app-surface-1-opacity)
+ * + backdrop-filter: blur() saturate()  —— saturate 是关键：纯 blur 会把背后颜色
+ *   均值化推向灰，玻璃会显得"脏"，补偿饱和度才有通透感。
+ * + --app-glass-border 高光描边          —— 暗底上低透明度玻璃若无描边，边界不可辨（"糊成一团"）。
+ * 分档：宿主卡片 surface-1 / 抽屉 surface-2 / 弹窗 surface-3（值见 utils/effects.js）。
+ * el-card 上加 class="app-card" 即可继承圆角/悬停/透明；表格保持实底（数据密集区不用玻璃）。 */
 .app-card,
 .wb-card {
   border-radius: 12px;
-  border: 1px solid var(--app-border);
-  background: rgba(var(--app-dim-color), var(--app-card-opacity, 1));
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--app-glass-border, var(--app-border));
+  /* 半透明主题底色 + 极淡白色高光层：让卡片"比背景亮"从而浮起
+   * （深色半透明卡片在深色背景上等于隐形，这是玻璃感的关键，详见 effects.js 的 sheen） */
+  background-color: rgba(var(--app-dim-color), var(--app-surface-1-opacity, 1));
+  background-image: linear-gradient(var(--app-glass-sheen, transparent), var(--app-glass-sheen, transparent));
+  backdrop-filter: blur(var(--app-glass-blur, 14px)) saturate(var(--app-glass-saturate, 170%));
+  -webkit-backdrop-filter: blur(var(--app-glass-blur, 14px)) saturate(var(--app-glass-saturate, 170%));
+  /* 常态投影：玻璃卡片靠它从背景浮起（hover 时由下方规则加强） */
+  box-shadow: var(--app-card-rest, none);
   transition: box-shadow 0.2s, border-color 0.2s, transform 0.15s;
   overflow: hidden;
+}
+/* 不支持 backdrop-filter 时给近实底：文字不能压在未模糊的杂乱背景上（保留高光层） */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .app-card,
+  .wb-card {
+    background-color: rgba(var(--app-dim-color), 0.96);
+  }
+}
+/* 系统层要求"减少透明"时玻璃降级为实底（可访问性） */
+@media (prefers-reduced-transparency: reduce) {
+  .app-card,
+  .wb-card {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background-color: rgba(var(--app-dim-color), 1);
+  }
 }
 .app-card:hover,
 .wb-card:hover {
@@ -482,16 +507,29 @@ body::before {
   filter: blur(var(--app-bg-blur, 0px));
   transform: scale(1.04); /* 避免 blur 边缘透出 */
 }
-/* 遮罩层：让背景图不喧宾夺主，保证内容可读 */
+/* 遮罩层（四层合成）：①顶部渐晕 ②底部渐晕 ③径向暗角 ④整体中性遮罩。
+ * —— 用中性黑/白（--app-scrim-rgb），不用带色相的 --app-dim-color：
+ *    带色相的遮罩会把任何背景图统一染成同一种脏色，这是重构前"图发灰蒙"的根因。
+ * —— 端点写 rgba(..., 0) 而非 transparent：避免部分引擎按未预乘 alpha 插值产生色晕。
+ * —— 四层都在同一个伪元素内合成，无 blur，GPU 成本低。 */
 body::after {
   content: '';
   position: fixed;
   inset: 0;
   z-index: -1;
-  background: rgba(var(--app-dim-color), 1);
-  opacity: calc(var(--app-bg-dim, 28) / 100);
   pointer-events: none;
-  transition: opacity 0.2s;
+  background-image:
+    linear-gradient(to bottom,
+      rgba(var(--app-scrim-rgb, 0, 0, 0), var(--app-scrim-top-a, 0)),
+      rgba(var(--app-scrim-rgb, 0, 0, 0), 0) 40%),
+    linear-gradient(to top,
+      rgba(var(--app-scrim-rgb, 0, 0, 0), var(--app-scrim-bottom-a, 0)),
+      rgba(var(--app-scrim-rgb, 0, 0, 0), 0) 55%),
+    radial-gradient(ellipse at 50% 42%,
+      rgba(var(--app-scrim-rgb, 0, 0, 0), 0) 38%,
+      rgba(var(--app-scrim-rgb, 0, 0, 0), var(--app-scrim-vignette-a, 0)) 100%),
+    linear-gradient(rgba(var(--app-scrim-rgb, 0, 0, 0), var(--app-scrim-dim-a, 0)),
+      rgba(var(--app-scrim-rgb, 0, 0, 0), var(--app-scrim-dim-a, 0)));
 }
 
 .app-shell {
@@ -668,11 +706,12 @@ body::after {
 
 /* 日间模式：移除 dark class 的影响，恢复 Element Plus 默认亮色 */
 :root[data-theme="light"] .el-card {
-  background: rgba(var(--app-dim-color), var(--app-card-opacity, 1)) !important;
-  border-color: var(--app-border) !important;
+  background-color: rgba(var(--app-dim-color), var(--app-surface-1-opacity, 1)) !important;
+  background-image: linear-gradient(var(--app-glass-sheen, transparent), var(--app-glass-sheen, transparent)) !important;
+  border-color: var(--app-glass-border, var(--app-border)) !important;
   color: var(--app-text) !important;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(var(--app-glass-blur, 14px)) saturate(var(--app-glass-saturate, 170%));
+  -webkit-backdrop-filter: blur(var(--app-glass-blur, 14px)) saturate(var(--app-glass-saturate, 170%));
 }
 :root[data-theme="light"] .el-card__header {
   border-bottom-color: var(--app-card-header-border) !important;
@@ -683,28 +722,35 @@ body::after {
 
 /* 暗黑模式卡片 */
 :root[data-theme="dark"] .el-card {
-  background: rgba(var(--app-dim-color), var(--app-card-opacity, 1)) !important;
-  border-color: var(--app-border) !important;
+  background-color: rgba(var(--app-dim-color), var(--app-surface-1-opacity, 1)) !important;
+  background-image: linear-gradient(var(--app-glass-sheen, transparent), var(--app-glass-sheen, transparent)) !important;
+  border-color: var(--app-glass-border, var(--app-border)) !important;
   color: var(--app-text) !important;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(var(--app-glass-blur, 14px)) saturate(var(--app-glass-saturate, 170%));
+  -webkit-backdrop-filter: blur(var(--app-glass-blur, 14px)) saturate(var(--app-glass-saturate, 170%));
 }
 :root[data-theme="dark"] .el-card__header {
   border-bottom-color: var(--app-card-header-border) !important;
 }
 
-/* 对话框 / 抽屉 */
+/* 对话框 / 抽屉：surface-3（弹窗）/ surface-2（抽屉）——越"浮在上层"越实。
+ * 弹窗内容密度高，玻璃过透会伤可读性，故不透明度高于宿主卡片。
+ * 日间模式保持不透明白底：明亮环境里浅色半透明本就对比度不足。 */
 :root[data-theme="dark"] .el-dialog {
-  --el-dialog-bg-color: #16223a;
+  --el-dialog-bg-color: rgba(var(--app-dim-color), var(--app-surface-3-opacity, 1));
+  backdrop-filter: blur(var(--app-glass-blur, 14px)) saturate(var(--app-glass-saturate, 170%));
+  -webkit-backdrop-filter: blur(var(--app-glass-blur, 14px)) saturate(var(--app-glass-saturate, 170%));
 }
 :root[data-theme="dark"] .el-drawer {
-  --el-drawer-bg-color: #0f1828;
+  --el-drawer-bg-color: rgba(var(--app-dim-color), var(--app-surface-2-opacity, 1));
+  backdrop-filter: blur(var(--app-glass-blur, 14px)) saturate(var(--app-glass-saturate, 170%));
+  -webkit-backdrop-filter: blur(var(--app-glass-blur, 14px)) saturate(var(--app-glass-saturate, 170%));
 }
 :root[data-theme="light"] .el-dialog {
-  --el-dialog-bg-color: #ffffff;
+  --el-dialog-bg-color: var(--app-card-bg, #ffffff);
 }
 :root[data-theme="light"] .el-drawer {
-  --el-drawer-bg-color: #ffffff;
+  --el-drawer-bg-color: var(--app-card-bg, #ffffff);
 }
 
 /* 表格 — 透明化，跟随卡片透明度透出背景图 */
