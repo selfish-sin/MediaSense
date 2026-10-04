@@ -150,10 +150,30 @@ export const useJobStore = defineStore('job', () => {
     }
   }
 
+  /**
+   * progress 事件的 step → 任务状态。
+   * ★ 后端 progress 事件只带 (step, pct, msg) 不带 status，不推的话
+   *   jobStore.jobStatus 提交后就一直停在 'pending'（只有 done/preview 才变），
+   *   侧栏角标因此恒显示「排」（排队中），与实际阶段不符。
+   */
+  const STEP_TO_STATUS = Object.freeze({
+    download: 'downloading',
+    transcribe: 'transcribing',
+    preview: 'preview',
+    ai: 'summarizing',
+    correct: 'summarizing',
+  })
+  const TERMINAL_STATUSES = Object.freeze(['completed', 'failed', 'cancelled'])
+
   function updateProgress(data) {
     progress.step = data.step || progress.step
     progress.pct = data.pct ?? progress.pct
     progress.msg = data.msg || ''
+    // 阶段推进：只前进不回退，且不覆盖终态
+    const next = STEP_TO_STATUS[data.step]
+    if (next && !TERMINAL_STATUSES.includes(jobStatus.value)) {
+      jobStatus.value = next
+    }
   }
 
   function appendAiToken(data) {
