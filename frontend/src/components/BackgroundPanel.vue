@@ -95,6 +95,60 @@ function applyPaletteColor(hex) {
   ElMessage.success(`主色已设为 ${hex}`)
 }
 
+// —— 皮肤 ——
+/** 导入/导出结果提示（成功与失败都必须可见，禁止静默）。 */
+const skinNotice = ref(null)
+
+/** 皮肤卡片上的色块预览：palette 取代表色，tokens 模式取底色/边框/文字/主色。 */
+function skinSwatches(s) {
+  if (s.palette) {
+    return [s.palette.base, s.palette.surface1, s.palette.text, s.palette.mauve || s.palette.blue]
+  }
+  const t = s.tokens || {}
+  return [t['--app-bg'], t['--app-border'], t['--app-text'], t['--app-accent-1']].filter(Boolean)
+}
+
+function onSkinFile(e) {
+  const input = e.target
+  const file = input.files?.[0]
+  if (!file) return
+  // 清空 value：否则连续选同一个文件不会再触发 change
+  input.value = ''
+  const reader = new FileReader()
+  reader.onload = () => {
+    const res = theme.importSkin(String(reader.result || ''))
+    if (res.ok) {
+      theme.setSkin(res.skin.id)
+      skinNotice.value = { kind: 'ok', text: `已导入并应用皮肤「${res.skin.name}」` }
+    } else {
+      skinNotice.value = { kind: 'err', text: `导入失败：${res.error}` }
+    }
+  }
+  reader.onerror = () => {
+    skinNotice.value = { kind: 'err', text: '文件读取失败，请重试' }
+  }
+  reader.readAsText(file)
+}
+
+function onExportSkin() {
+  const json = theme.exportSkinJson(theme.skinId)
+  const blob = new Blob([json], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${theme.skinId}.json`
+  a.click()
+  URL.revokeObjectURL(url)
+  skinNotice.value = { kind: 'ok', text: `已导出 ${theme.skinId}.json` }
+}
+
+function onRemoveSkin() {
+  const res = theme.removeUserSkin(theme.skinId)
+  skinNotice.value = res.ok
+    ? { kind: 'ok', text: '已删除该皮肤并回退默认皮肤' }
+    : { kind: 'err', text: res.error }
+}
+
 function resetAll() {
   theme.resetBackground()
   theme.resetEffects()
@@ -121,6 +175,47 @@ const bgBlur = effectModel('bgBlur', 0)
 
 <template>
   <div class="bg-panel">
+    <!-- 皮肤：换整套配色（含皮肤自带主色），取代"只能换单色"的旧模型 -->
+    <section class="bp-section">
+      <div class="bp-section-head">
+        <Palette :size="15" />
+        <span>皮肤</span>
+      </div>
+      <div class="bp-skin-grid">
+        <button
+          v-for="s in theme.availableSkins"
+          :key="s.id"
+          class="bp-skin-card"
+          :class="{ active: theme.skinId === s.id }"
+          :title="s.name"
+          @click="theme.setSkin(s.id)"
+        >
+          <span class="bp-skin-swatches">
+            <i v-for="(c, i) in skinSwatches(s)" :key="i" :style="{ background: c }" />
+          </span>
+          <span class="bp-skin-name">{{ s.name }}</span>
+          <span v-if="theme.skinId === s.id" class="bp-skin-check"><Check :size="13" /></span>
+        </button>
+      </div>
+      <div class="bp-skin-actions">
+        <label class="bp-skin-btn">
+          <input type="file" accept="application/json,.json" class="bp-file-input" @change="onSkinFile" />
+          <Upload :size="13" /> 导入皮肤
+        </label>
+        <button class="bp-skin-btn" @click="onExportSkin">
+          <Sparkles :size="13" /> 导出当前
+        </button>
+        <button
+          v-if="theme.userSkins.some((s) => s.id === theme.skinId)"
+          class="bp-skin-btn bp-skin-danger"
+          @click="onRemoveSkin"
+        >
+          <X :size="13" /> 删除该皮肤
+        </button>
+      </div>
+      <div v-if="skinNotice" class="bp-skin-notice" :class="skinNotice.kind">{{ skinNotice.text }}</div>
+    </section>
+
     <!-- 内置预设 -->
     <section class="bp-section">
       <div class="bp-section-head">
@@ -272,6 +367,67 @@ const bgBlur = effectModel('bgBlur', 0)
 
 <style scoped>
 .bp-panel { display: flex; flex-direction: column; gap: 18px; }
+
+/* 皮肤选择卡片 */
+.bp-skin-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+.bp-skin-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 2px solid var(--app-border);
+  background: var(--app-input-bg);
+  color: var(--app-text);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.15s;
+}
+.bp-skin-card:hover { transform: translateY(-1px); border-color: var(--app-accent-1); }
+.bp-skin-card.active {
+  border-color: var(--app-accent-1);
+  box-shadow: 0 0 0 2px rgba(var(--app-accent-1-rgb), 0.3);
+}
+.bp-skin-swatches { display: flex; gap: 3px; }
+.bp-skin-swatches i { flex: 1; height: 14px; border-radius: 3px; display: block; }
+.bp-skin-name { font-size: 11px; line-height: 1.25; }
+.bp-skin-check {
+  position: absolute;
+  top: 6px; right: 6px;
+  color: var(--app-accent-1);
+}
+.bp-skin-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.bp-skin-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--app-border);
+  background: transparent;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.bp-skin-btn:hover { color: var(--app-text); border-color: var(--app-accent-1); }
+.bp-skin-danger:hover { color: #f87171; border-color: #f87171; }
+.bp-skin-notice { font-size: 12px; padding: 6px 10px; border-radius: 8px; line-height: 1.4; }
+.bp-skin-notice.ok {
+  color: #4ade80;
+  background: rgba(74, 222, 128, 0.12);
+  border: 1px solid rgba(74, 222, 128, 0.35);
+}
+.bp-skin-notice.err {
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
 .bp-section { display: flex; flex-direction: column; gap: 10px; }
 .bp-section-head {
   display: flex; align-items: center; gap: 7px;

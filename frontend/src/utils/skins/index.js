@@ -17,6 +17,8 @@
  * - family 用于「日间/夜间」切换时找同族另一 mode 的皮肤。
  */
 
+import { CATPPUCCIN_SKINS } from './catppuccin'
+
 /** 午夜青蓝（深） */
 export const legacyDark = {
   id: 'legacy-dark',
@@ -187,8 +189,8 @@ export const legacyLight = {
   },
 }
 
-/** 全部内置皮肤（面板按此顺序渲染）。 */
-export const BUILTIN_SKINS = [legacyDark, legacyLight]
+/** 全部内置皮肤（面板按此顺序渲染；Catppuccin 四 flavor 走 palette 派生模式）。 */
+export const BUILTIN_SKINS = [legacyDark, legacyLight, ...CATPPUCCIN_SKINS]
 
 /** 默认皮肤 id（缺失/非法时的回退目标）。 */
 export const DEFAULT_SKIN_ID = 'legacy-dark'
