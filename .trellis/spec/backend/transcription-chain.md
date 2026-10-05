@@ -103,6 +103,12 @@ extract_bilibili_subtitles
     非空判断，属已知边界。
   **教训**：同一不变量必须在所有出口生效。加校验时先列全"字幕从哪些出口产出"，再逐个对齐。
 - **YouTube**：`extract_youtube_subtitles` 拿平台字幕，逻辑同上（无抽查）。
+- **抖音（2026-10-05 接入，游客链路）**：`services/douyin.py` 单点——AI 字幕（cla_info.caption_infos→VTT→SRT，
+  zh 优先选轨）游客态**实测常为空**，拿到时与B站同标准过 `verify_subtitle_against_audio` 内容抽查
+  （90s 片段走 douyin 直链 ffmpeg 截取，不经 yt-dlp）；拿不到回退转录，宁缺勿错。音频获取走
+  `_acquire_audio` 的 douyin 分支（play_addr 直链 httpx 流式下载 mp4，**yt-dlp 的 Douyin extractor
+  需浏览器 cookie 且频繁 403，勿再尝试**）。签名 vendor 自 f2（`douyin_abogus.py`，SM3 用
+  cryptography），坑点见 CONTEXT.md 当前状态区块。
 - 其他平台：直接下载 → 引擎路由。
 - **音频获取单点**：`main._acquire_audio`（断点续传复用 → 按 options 下载），成功返回的
   媒体一律登记 `files['audio'/'video']`（素材登记不变量，勿在别处散落登记）。
