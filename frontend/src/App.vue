@@ -507,6 +507,28 @@ body::before {
   filter: blur(var(--app-bg-blur, 0px));
   transform: scale(1.04); /* 避免 blur 边缘透出 */
 }
+/* 动态背景（html[data-bg-anim] 由 themeStore 写入）：
+ * 只动 background-position，不跑 JS 循环——省电，且能被
+ * ①失焦暂停（data-bg-paused）②系统级 reduced-motion 直接关掉。
+ * 需要 background-size > 100% 才有可漂移的余量。 */
+html[data-bg-anim] body::before {
+  background-size: 170% 170%;
+  animation: var(--app-bg-anim-name, app-bg-drift) var(--app-bg-anim-duration, 30s) ease-in-out infinite alternate;
+}
+html[data-bg-paused="1"] body::before {
+  animation-play-state: paused;
+}
+@keyframes app-bg-drift {
+  from { background-position: 0% 42%; }
+  to { background-position: 100% 58%; }
+}
+@keyframes app-bg-drift-slow {
+  from { background-position: 12% 22%; }
+  to { background-position: 88% 78%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-bg-anim] body::before { animation: none; }
+}
 /* 遮罩层（四层合成）：①顶部渐晕 ②底部渐晕 ③径向暗角 ④整体中性遮罩。
  * —— 用中性黑/白（--app-scrim-rgb），不用带色相的 --app-dim-color：
  *    带色相的遮罩会把任何背景图统一染成同一种脏色，这是重构前"图发灰蒙"的根因。

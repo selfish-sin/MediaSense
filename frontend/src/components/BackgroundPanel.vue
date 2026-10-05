@@ -10,9 +10,9 @@ import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Check, X, Upload, Sparkles, RotateCcw, ImageIcon, Palette } from 'lucide-vue-next'
 import { useThemeStore } from '../stores/themeStore'
-import { BUILTIN_BACKGROUNDS } from '../utils/backgrounds'
-import { extractPalette } from '../utils/color'
-import { prepareBackgroundImage } from '../utils/image'
+import { BUILTIN_BACKGROUNDS, ANIMATED_BACKGROUNDS, renderAnimated } from '../utils/backgrounds'
+import { analyzeImage, recommendEffects } from '../utils/imageFit'
+import { LIBRARY_LIMITS } from '../utils/bgStore'
 
 const theme = useThemeStore()
 
@@ -21,6 +21,13 @@ const builtins = BUILTIN_BACKGROUNDS.map((b) => ({
   id: b.id,
   name: b.name,
   thumb: b.render(b.accent),
+}))
+
+// 动态背景缩略图（底图复用程序化预设，动效由 CSS 驱动、失焦自动暂停）
+const animated = ANIMATED_BACKGROUNDS.map((a) => ({
+  id: a.id,
+  name: a.name,
+  thumb: renderAnimated(a.id, '#38BDF8'),
 }))
 
 // 主色预设色板（青蓝系为主，兼顾几种好看的选择）
@@ -37,9 +44,17 @@ const accentSwatches = [
 
 // 上传相关
 const uploading = ref(false)
-const customPreview = ref(theme.background.type === 'custom' ? theme.background.url : '')
+const customPreview = ref(theme.background.thumbUrl || (theme.background.type === 'custom' ? theme.background.url : ''))
 const palette = ref([]) // 从上传图提取的色板
-const extracting = ref(false)
+const analyzing = ref(false)
+/** 依据图片亮度给出的推荐参数（null = 尚未分析 / 分析失败） */
+const recommendation = ref(null)
+
+/** 图库容量上限（单一事实源在 utils/bgStore.js）。 */
+const maxCount = LIBRARY_LIMITS.maxCount
+
+/** 图库用量展示（MB，保留一位小数）。 */
+const usageMb = computed(() => (theme.usage.bytes / 1024 / 1024).toFixed(1))
 
 function selectBuiltin(id) {
   theme.setBackground({ type: 'builtin', id })
@@ -68,26 +83,63 @@ async function onFileChange(e) {
     return
   }
   uploading.value = true
+  recommendation.value = null
   try {
-    // 先压到可持久化的体积：整张原图 base64 会撑爆 localStorage 配额（详见 utils/image.js）
-    const { dataUrl, compressed } = await prepareBackgroundImage(file)
-    customPreview.value = dataUrl
-    theme.setBackground({ type: 'custom', url: dataUrl })
-    uploading.value = false
-    ElMessage.success(compressed ? '背景已应用（大图已压缩以减轻存储占用）' : '背景已应用')
-
-    extracting.value = true
-    const colors = await extractPalette(dataUrl, { count: 6, sampleSize: 64 })
-    palette.value = colors
-    extracting.value = false
-    if (!colors.length) {
-      ElMessage.info('未能提取配色（图片像素无法读取），可在下方手动选色')
+    // 压缩 + 入库（IndexedDB 存 Blob；不可用时 store 自动降级到 localStorage 旧路径）
+    const result = await theme.uploadBackground(file)
+    if (!result.ok) {
+      ElMessage.error(result.error || '背景图保存失败')
+      return
     }
+    customPreview.value = result.thumbUrl || ''
+    ElMessage.success(result.compressed ? '背景已应用（大图已压缩以减轻占用）' : '背景已应用')
+    // 依据缩略图分析亮度 → 给一次推荐（可一键采用，也可继续手调）
+    await analyzeCurrent(result.thumbUrl)
   } catch (err) {
-    uploading.value = false
-    extracting.value = false
     ElMessage.error(err?.message || '图片处理失败')
+  } finally {
+    uploading.value = false
   }
+}
+
+/** 分析图片：同一次采样同时得到提色板与推荐参数。 */
+async function analyzeCurrent(src) {
+  if (!src) return
+  analyzing.value = true
+  try {
+    const result = await analyzeImage(src, { sampleSize: 64, paletteCount: 6 })
+    if (!result) {
+      recommendation.value = null
+      ElMessage.info('未能分析这张图（像素无法读取），可在下方手动调参')
+      return
+    }
+    palette.value = result.palette
+    recommendation.value = recommendEffects(result)
+  } catch (err) {
+    recommendation.value = null
+    ElMessage.warning(`图片分析失败：${err?.message || '未知错误'}`)
+  } finally {
+    analyzing.value = false
+  }
+}
+
+/** 采用推荐参数（只覆盖效果层，不动背景媒体）。 */
+function applyRecommendation() {
+  if (!recommendation.value) return
+  theme.setEffect(recommendation.value)
+  ElMessage.success('已采用推荐参数')
+}
+
+/** 动态背景：换预设即切换背景类型（动效由 CSS 驱动）。 */
+function selectAnimated(id) {
+  theme.setBackground({ type: 'animated', preset: id })
+}
+
+/** 从图库删除一张图（正在用时 store 会回退无背景）。 */
+async function onRemoveImage(item) {
+  const res = await theme.removeBackground(item.id)
+  if (!res.ok) ElMessage.error(res.error)
+  else ElMessage.success('已从图库删除')
 }
 
 function applyPaletteColor(hex) {
@@ -224,6 +276,23 @@ const bgBlur = effectModel('bgBlur', 0)
           </span>
         </button>
         <button
+          v-for="a in animated"
+          :key="a.id"
+          class="bp-thumb bp-thumb-anim"
+          :class="{ active: theme.background.type === 'animated' && theme.background.preset === a.id }"
+          :style="{ backgroundImage: a.thumb }"
+          :title="`${a.name}（动态，失焦自动暂停）`"
+          @click="selectAnimated(a.id)"
+        >
+          <span class="bp-thumb-name">{{ a.name }}</span>
+          <span
+            v-if="theme.background.type === 'animated' && theme.background.preset === a.id"
+            class="bp-thumb-check"
+          >
+            <Check :size="14" />
+          </span>
+        </button>
+        <button
           class="bp-thumb bp-thumb-none"
           :class="{ active: theme.background.type === 'none' }"
           @click="selectNone"
@@ -234,20 +303,60 @@ const bgBlur = effectModel('bgBlur', 0)
       </div>
     </section>
 
-    <!-- 自定义上传 -->
+    <!-- 背景图库：上传 + 多图切换 + 删除（存 IndexedDB，不受 localStorage 配额限制） -->
     <section class="bp-section">
       <div class="bp-section-head">
         <ImageIcon :size="15" />
-        <span>自定义背景图</span>
+        <span>背景图库</span>
+        <span v-if="theme.libraryReady" class="bp-usage">{{ theme.usage.count }}/{{ maxCount }} · {{ usageMb }}MB</span>
       </div>
       <label class="bp-upload">
         <input type="file" accept="image/*" class="bp-file-input" @change="onFileChange" />
         <div class="bp-upload-inner">
           <Upload :size="22" />
           <span>{{ uploading ? '读取中…' : '点击上传图片' }}</span>
-          <span class="bp-upload-hint">支持 JPG / PNG / WebP，&lt;30MB（大图会自动压缩后保存）</span>
+          <span class="bp-upload-hint">支持 JPG / PNG / WebP，&lt;30MB（大图会自动压缩后入库）</span>
         </div>
       </label>
+
+      <!-- 图库网格 -->
+      <div v-if="theme.library.length" class="bp-lib-grid">
+        <div
+          v-for="item in theme.library"
+          :key="item.id"
+          class="bp-lib-item"
+          :class="{ active: theme.background.type === 'image' && theme.background.assetId === item.id }"
+          :title="item.name"
+        >
+          <button
+            class="bp-lib-thumb"
+            :style="{ backgroundImage: `url(${item.thumbUrl})` }"
+            @click="theme.selectBackground(item.id)"
+          />
+          <button class="bp-lib-del" title="从图库删除" @click.stop="onRemoveImage(item)">
+            <X :size="12" />
+          </button>
+        </div>
+      </div>
+      <div v-else-if="theme.libraryReady" class="bp-palette-hint">图库还是空的，上传一张试试</div>
+
+      <!-- 亮度推荐（上传后自动分析，可一键采用） -->
+      <div v-if="analyzing" class="bp-palette-hint">正在分析图片亮度…</div>
+      <div v-else-if="recommendation" class="bp-reco">
+        <div class="bp-reco-head">
+          <Sparkles :size="14" />
+          <span>按这张图的亮度推荐</span>
+        </div>
+        <div class="bp-reco-values">
+          <span>遮罩 {{ recommendation.dim }}%</span>
+          <span>暗角 {{ recommendation.vignette }}%</span>
+          <span>卡片 {{ recommendation.cardOpacity }}%</span>
+        </div>
+        <button class="bp-skin-btn" @click="applyRecommendation">
+          <Check :size="13" /> 一键采用
+        </button>
+      </div>
+
       <!-- 提取的色板 -->
       <div v-if="palette.length" class="bp-palette">
         <div class="bp-palette-head">
@@ -267,8 +376,10 @@ const bgBlur = effectModel('bgBlur', 0)
           </button>
         </div>
       </div>
-      <div v-else-if="extracting" class="bp-palette-hint">正在提取配色…</div>
-      <!-- 持久化失败必须可见（localStorage 配额溢出等），否则"设置没保存"无从察觉 -->
+
+      <!-- 背景层提示（图库不可用 / 迁移结果 / 读取失败）——必须可见 -->
+      <div v-if="theme.bgNotice" class="bp-storage-error">{{ theme.bgNotice }}</div>
+      <!-- 持久化失败必须可见（配额溢出等），否则"设置没保存"无从察觉 -->
       <div v-if="theme.storageError" class="bp-storage-error">{{ theme.storageError }}</div>
     </section>
 
@@ -528,6 +639,99 @@ const bgBlur = effectModel('bgBlur', 0)
   white-space: nowrap;
 }
 .bp-palette-hint { font-size: 12px; color: var(--app-text-secondary); }
+
+/* 图库容量标签（贴在 section 标题右侧） */
+.bp-usage {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--app-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 背景图库网格 */
+.bp-lib-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.bp-lib-item {
+  position: relative;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 2px solid var(--app-border);
+  transition: border-color 0.15s;
+}
+.bp-lib-item:hover { border-color: var(--app-accent-1); }
+.bp-lib-item.active {
+  border-color: var(--app-accent-1);
+  box-shadow: 0 0 0 2px rgba(var(--app-accent-1-rgb), 0.3);
+}
+.bp-lib-thumb {
+  display: block;
+  width: 100%;
+  height: 56px;
+  padding: 0;
+  border: none;
+  cursor: pointer;
+  background-color: var(--app-input-bg);
+  background-size: cover;
+  background-position: center;
+}
+.bp-lib-del {
+  position: absolute;
+  top: 4px; right: 4px;
+  width: 20px; height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s;
+}
+.bp-lib-item:hover .bp-lib-del { opacity: 1; }
+.bp-lib-del:hover { background: rgba(239, 68, 68, 0.9); }
+
+/* 亮度推荐块 */
+.bp-reco {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px dashed var(--app-accent-1);
+  background: rgba(var(--app-accent-1-rgb), 0.06);
+}
+.bp-reco-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--app-text-heading);
+}
+.bp-reco-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--app-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 动态背景缩略图：左上角一个发光小点作标记 */
+.bp-thumb-anim::after {
+  content: '';
+  position: absolute;
+  top: 4px; left: 4px;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--app-accent-1);
+  box-shadow: 0 0 6px rgba(var(--app-accent-1-rgb), 0.9);
+}
 .bp-storage-error {
   margin-top: 6px;
   padding: 6px 10px;

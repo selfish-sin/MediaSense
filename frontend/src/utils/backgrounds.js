@@ -192,3 +192,25 @@ export function renderBuiltin(id, accent) {
   const preset = BUILTIN_BACKGROUNDS.find((b) => b.id === id)
   return preset ? preset.render(accent) : bgAbyss(accent)
 }
+
+/**
+ * 动态背景预设：**复用已有程序化 SVG 作底图**，靠 CSS 动画（background-position 漂移）
+ * 产生动感——不跑 JS 循环（省电、失焦可暂停、reduced-motion 可整体关闭）。
+ *
+ * `animation` 对应 App.vue 里的 @keyframes 名；`base` 指向 BUILTIN_BACKGROUNDS 的 id。
+ */
+export const ANIMATED_BACKGROUNDS = [
+  { id: 'aurora-flow', name: '极光流动', base: 'aurora', animation: 'app-bg-drift', duration: 30 },
+  { id: 'starlight-drift', name: '星河缓移', base: 'starry', animation: 'app-bg-drift-slow', duration: 52 },
+]
+
+/** 由动态预设 id + 主色 生成底图 dataURI（找不到时回退默认动态预设）。 */
+export function renderAnimated(id, accent) {
+  const preset = ANIMATED_BACKGROUNDS.find((b) => b.id === id)
+  return preset ? renderBuiltin(preset.base, accent) : renderBuiltin('aurora', accent)
+}
+
+/** 取动态预设（找不到返回 null，供 store 判断是否需要动画属性）。 */
+export function getAnimatedPreset(id) {
+  return ANIMATED_BACKGROUNDS.find((b) => b.id === id) || null
+}
