@@ -182,9 +182,11 @@ onMounted(async () => {
         jobStore.addLog('AI处理完成')
         tokenPanelRef.value?.refresh()  // 刷新Token统计
       } else {
-        jobStore.addLog(`处理失败: ${data.error}`)
-        jobStore.jobStatus = 'failed'
-        jobStore.isProcessing = false
+        // ★ 失败必须"可见"：写日志 + 弹窗 + 落到失败态（此前只有日志行，
+        //   结果区又命中"暂无结果"空态，用户表现为"只转圈、没提示"）
+        jobStore.addLog(`处理失败: ${data.error || '未知原因'}`)
+        jobStore.setFailed(data.error)
+        ElMessage.error(`任务失败: ${data.error || '未知原因'}`, { duration: 8000 })
       }
     }
     // 批量子任务完成时刷新批量进度
@@ -217,6 +219,8 @@ onActivated(async () => {
   await handleRouteQuery()
 
   // 检查任务是否已完成（切页期间可能跑完了）
+  // ★ 必须同时对账 failed：此前只认 completed，任务在切走期间失败时
+  //   isProcessing 永远停在 true → 永久转圈且无任何提示（静默失败的一种形态）
   if (jobStore.currentJobId && jobStore.isProcessing) {
     jobsApi.get(jobStore.currentJobId).then(job => {
       statusCheckNotifier.ok()
@@ -226,6 +230,10 @@ onActivated(async () => {
         jobStore.resultText = job.result_text || jobStore.resultText
         jobStore.addLog('任务已完成')
         tokenPanelRef.value?.refresh()
+      } else if (job.status === 'failed' && jobStore.jobStatus !== 'failed') {
+        jobStore.addLog(`任务失败: ${job.error || '未知原因'}`)
+        jobStore.setFailed(job.error)
+        ElMessage.error(`任务失败: ${job.error || '未知原因'}`, { duration: 8000 })
       }
     }).catch(() => statusCheckNotifier.fail())
   }

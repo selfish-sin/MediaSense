@@ -109,6 +109,10 @@ export const modelsApi = {
   delete: (key) => api.delete(`/models/${key}`),
   test: (data) => api.post('/models/test', data),
   setDefault: (key) => api.post('/models/default', { key }),
+  // AI 调用兜底链：GET 读配置，POST 保存（顺序即优先级）
+  // 用 POST 而非 PUT：后端存在 `PUT /models/{key}`，子路径会被吞
+  getFallbackChain: () => api.get('/models/fallback-chain'),
+  setFallbackChain: (chain, enabled) => api.post('/models/fallback-chain', { chain, enabled }),
   fetch: (keyOrParams) => {
     // 支持两种调用方式：传 key（字符串）或传 {endpoint, api_key}（对象）
     if (typeof keyOrParams === 'string') {

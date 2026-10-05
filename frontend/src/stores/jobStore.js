@@ -77,6 +77,12 @@ export const useJobStore = defineStore('job', () => {
   const isProcessing = ref(false)
   // 任务标题（恢复时显示）
   const jobTitle = ref('')
+  // ★ 失败原因（2026-10-05）：失败态的唯一数据源，供结果区错误卡片渲染。
+  //   此前失败只写进 logs 且 jobStatus 落到 'failed'，结果区因此命中"暂无结果"空态，
+  //   失败与"未提交"视觉上无法区分（静默失败）。所有置 failed 的路径必须经 setFailed()。
+  const jobError = ref('')
+  // AI 调用链（兜底环）：[{model, ok, reason}]，仅在发生换模型重试时有值
+  const aiCallChain = ref([])
 
   // 日志持久化节流：进度日志高频到达，合并为一次写（trailing debounce）
   let logsSaveTimer = null
@@ -126,7 +132,20 @@ export const useJobStore = defineStore('job', () => {
     streamingThinking.value = ''
     isProcessing.value = false
     jobTitle.value = ''
+    jobError.value = ''
+    aiCallChain.value = []
     clearStorage()
+  }
+
+  /**
+   * 置任务为失败态（唯一入口，2026-10-05）。
+   * reason 允许空串：后端 error 字段可能为空，此时 UI 仍须展示"失败但原因未知"，
+   * 而不是退回空态——错误可见性优先于错误文案的完整性。
+   */
+  function setFailed(reason) {
+    jobStatus.value = 'failed'
+    isProcessing.value = false
+    jobError.value = reason || '任务失败，但未返回失败原因'
   }
 
   function addLog(msg) {
@@ -250,9 +269,8 @@ export const useJobStore = defineStore('job', () => {
     } catch (err) {
       // 入队失败不能把当前正在跑的任务标记为 failed
       if (!queueMode) {
-        jobStatus.value = 'failed'
         addLog(`提交失败: ${err.message}`)
-        isProcessing.value = false
+        setFailed(err.message)
       }
       throw err
     }
@@ -264,6 +282,14 @@ export const useJobStore = defineStore('job', () => {
       currentJobId.value = job.id
       jobStatus.value = job.status
       jobTitle.value = job.title || ''
+      // ★ 失败态要把后端 error 带进失败卡片（get_job 走 SELECT *，error 字段已在响应里）
+      jobError.value = job.status === 'failed' ? (job.error || '') : ''
+      // 调用链可能是 JSON 字符串或已解析的数组，两种都归一化成数组
+      let chain = job.ai_call_chain
+      if (typeof chain === 'string') {
+        try { chain = JSON.parse(chain) } catch { chain = [] }
+      }
+      aiCallChain.value = Array.isArray(chain) ? chain : []
       resultText.value = job.result_text || ''
       // 恢复预览文本（preview 状态）
       if (job.status === 'preview' && job.preview_text) {
@@ -324,6 +350,8 @@ export const useJobStore = defineStore('job', () => {
     streamingThinking,
     isProcessing,
     jobTitle,
+    jobError,
+    aiCallChain,
     // 动作
     reset,
     addLog,
@@ -334,6 +362,7 @@ export const useJobStore = defineStore('job', () => {
     appendAiThinking,
     setPreview,
     setResult,
+    setFailed,
     submitJob,
     loadJob,
     tryRestore,

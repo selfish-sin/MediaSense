@@ -9,6 +9,7 @@ import { isDialogCancel } from '../utils/errorNotice'
 import { useContainerWidth } from '../composables/useContainerWidth'
 import { MODELS_COLUMN_BREAKPOINTS, resolveTableLayout } from '../utils/tableLayout'
 import AsrPanel from '../components/models/AsrPanel.vue'
+import FallbackChainPanel from '../components/models/FallbackChainPanel.vue'
 
 const modelStore = useModelStore()
 
@@ -51,9 +52,12 @@ const ENGINE_OPTIONS = [
 ]
 
 // ★ 常见服务商快捷模板：点击预填引擎/端点/认证/模型ID，减少手填
+// ⚠ 端点里的版本段（/v1、/v3、/v4）由后端 _normalize_endpoint 识别并原样保留，
+//   不会瞎插 /v1 —— 火山方舟的 /api/v3 与智谱的 /api/paas/v4 都依赖这条规则。
 const PROVIDER_PRESETS = [
   { label: 'DeepSeek', engine: 'DeepSeek', endpoint: 'https://api.deepseek.com/v1/chat/completions', modelHint: 'deepseek-chat', auth: 'bearer' },
-  { label: '阿里云百炼', engine: '阿里云', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', modelHint: 'qwen-plus', auth: 'bearer' },
+  { label: '阿里云百炼', engine: '阿里云', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', modelHint: 'qwen3.8-flash', auth: 'bearer' },
+  { label: '火山方舟', engine: '字节豆包', endpoint: 'https://ark.cn-beijing.volces.com/api/v3/chat/completions', modelHint: 'doubao-seed-2-1-turbo-260628', auth: 'bearer' },
   { label: 'OpenAI', engine: 'OpenAI', endpoint: 'https://api.openai.com/v1/chat/completions', modelHint: 'gpt-4o', auth: 'bearer' },
   { label: '智谱 GLM', engine: '智谱', endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', modelHint: 'glm-4.5-air', auth: 'bearer' },
   { label: '硅基流动', engine: '硅基流动', endpoint: 'https://api.siliconflow.cn/v1/chat/completions', modelHint: 'deepseek-ai/DeepSeek-V3', auth: 'bearer' },
@@ -378,6 +382,9 @@ onMounted(() => {
           </el-table>
           </div>
         </el-card>
+
+        <!-- 兜底链配置：同页跟在模型表下方（用户配完模型立刻能排链，不必跳页） -->
+        <FallbackChainPanel />
       </el-tab-pane>
 
       <!-- ASR 域内部再小分「云端 / 本地」（AsrPanel 内二级分段）；

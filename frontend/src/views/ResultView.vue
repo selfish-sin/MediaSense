@@ -11,6 +11,7 @@ import { createFailureNotifier, isDialogCancel } from '../utils/errorNotice'
 import { buildRerunRoute, buildRestoreRoute, getJobActionModel, buildSamePromptPayload } from '../utils/jobActions'
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
 import ResummarizeControl from '../components/ResummarizeControl.vue'
+import AiCallChain from '../components/AiCallChain.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 import {
   onAiToken, onAiDone, onAiThinking,
@@ -72,6 +73,10 @@ const hasCorrection = computed(() => !!(job.value?.files?.txt_raw))
 const hasClean = computed(() => !!(job.value?.files?.txt_clean))
 // 校正统计（后端持久化，仅校正过的任务有）
 const correctionStats = computed(() => job.value?.correction_stats || null)
+// AI 调用链（兜底环）：只在真的换过模型时才有内容，否则会套出一个空卡片
+const showCallChain = computed(
+  () => Array.isArray(job.value?.ai_call_chain) && job.value.ai_call_chain.length > 1
+)
 const correctionNeedReview = computed(() => {
   const s = correctionStats.value
   if (!s) return false
@@ -620,6 +625,13 @@ async function copyTranscript() {
     </el-descriptions>
     </el-card>
 
+    <!-- ★ AI 调用链（兜底环）：与首页结果面板共用 AiCallChain，形态/措辞完全一致。
+         独立成卡而不是塞进结果区：失败任务没有结果文本，下面的结果卡片整块不渲染，
+         而"这次调了谁、为什么全挂了"恰恰是失败时最该被看见的东西。 -->
+    <el-card v-if="showCallChain" class="app-card" shadow="never">
+      <AiCallChain :chain="job.ai_call_chain" />
+    </el-card>
+
     <!-- ★ 历史版本面板（从后端加载） -->
     <el-card v-if="summaryHistory.length > 0" class="app-card" shadow="never">
       <div style="font-size: 13px; color: var(--app-text-secondary); margin-bottom: 8px;">
@@ -755,9 +767,9 @@ async function copyTranscript() {
           <!-- 转录工具栏 -->
           <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;">
             <el-radio-group v-if="hasCorrection || hasClean" v-model="transcriptView" size="small">
-              <el-radio-button v-if="hasCorrection" label="corrected">校正后</el-radio-button>
-              <el-radio-button v-if="hasCorrection" label="raw">校正前原文</el-radio-button>
-              <el-radio-button v-if="hasClean" label="clean">纯净</el-radio-button>
+              <el-radio-button v-if="hasCorrection" value="corrected">校正后</el-radio-button>
+              <el-radio-button v-if="hasCorrection" value="raw">校正前原文</el-radio-button>
+              <el-radio-button v-if="hasClean" value="clean">纯净</el-radio-button>
             </el-radio-group>
             <span v-else style="font-size: 12px; color: var(--app-text-secondary);">无转录文本</span>
             <div style="flex: 1;" />

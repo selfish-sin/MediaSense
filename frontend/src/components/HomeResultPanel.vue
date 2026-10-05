@@ -6,7 +6,7 @@
  * - expose reset()：父组件提交新任务时复位（editMode=false + resultTab='markdown'，与原 handleSubmit 语义一致）
  */
 import { ref, computed, watch, nextTick } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Pencil, Check, X, Copy, Loader2, ArrowDown } from 'lucide-vue-next'
 import { useJobStore } from '../stores/jobStore'
 import { useSettingsStore } from '../stores/settingsStore'
@@ -16,6 +16,7 @@ import { copyText } from '../utils/clipboard'
 import { useRafMarkdown } from '../composables/useMarkdownRender'
 import { createFailureNotifier } from '../utils/errorNotice'
 import ResummarizeControl from './ResummarizeControl.vue'
+import AiCallChain from './AiCallChain.vue'
 
 const jobStore = useJobStore()
 const settings = useSettingsStore()
@@ -197,8 +198,7 @@ async function handleResummarize(model) {
   const targetJobId = jobStore.currentJobId
   if (!targetJobId) {
     ElMessage.error('没有任务ID，无法重新总结')
-    jobStore.jobStatus = 'failed'
-    jobStore.isProcessing = false
+    jobStore.setFailed('没有任务ID，无法重新总结')
     return
   }
 
@@ -215,9 +215,56 @@ async function handleResummarize(model) {
     console.log('[重新总结] API 调用成功，等待 socket 流式输出')
   }).catch(err => {
     ElMessage.error(`重新总结失败: ${err?.message || err}`)
-    jobStore.jobStatus = 'failed'
-    jobStore.isProcessing = false
+    jobStore.setFailed(`重新总结失败: ${err?.message || err}`)
   })
+}
+
+// ============ 失败态：重试（2026-10-05）============
+// ★ 失败横幅的动作复用既有 jobActions 约定（failed → 断点续传 / 从头重试），
+//   与 ResultView/HistoryView 同一套语义，不另造按钮。
+const hasFailed = computed(() => jobStore.jobStatus === 'failed')
+const retrying = ref(false)
+
+// 调用链的可视化已抽到 AiCallChain 组件（首页 + 结果详情页共用），
+// 判定"是否要显示"的规则跟着组件走，这里不再重复一份。
+
+async function handleRetry(force) {
+  const jobId = jobStore.currentJobId
+  if (!jobId) {
+    ElMessage.error('没有任务ID，无法重试')
+    return
+  }
+  if (retrying.value) return
+
+  if (force) {
+    // 从头重试会删掉该任务已有文件，必须显式确认（与 ResultView 同文案）
+    try {
+      await ElMessageBox.confirm(
+        '从头重试会删除该任务已有文件并完全重新处理。确认？',
+        '从头重试',
+        { type: 'warning' }
+      )
+    } catch {
+      return  // 用户取消：保持失败态，不做任何状态变更
+    }
+  }
+
+  retrying.value = true
+  try {
+    await jobsApi.retry(jobId, force)
+    ElMessage.success(force ? '已从头重新处理' : '已断点续传')
+    // 立即回到处理中：失败横幅不应在重试后继续挂着，等 progress/done 事件接管
+    jobStore.jobStatus = 'pending'
+    jobStore.jobError = ''
+    jobStore.isProcessing = true
+    jobStore.addLog(force ? '已从头重新处理' : '已断点续传')
+  } catch (err) {
+    // 重试请求本身失败：仍是失败态，但必须把原因给出来
+    jobStore.setFailed(`重试请求失败: ${err?.message || err}`)
+    ElMessage.error(`重试失败: ${err?.message || err}`)
+  } finally {
+    retrying.value = false
+  }
 }
 
 // ============ 导出 ============
@@ -273,8 +320,32 @@ defineExpose({ reset })
       </div>
     </template>
 
-    <!-- 无结果时的空状态 -->
-    <el-empty v-if="!jobStore.resultText && !isProcessing" description="暂无结果，提交任务后在此展示" :image-size="60" />
+    <!-- ★ 失败横幅（2026-10-05）：失败必须「可见可行动」。
+         独立于下方 v-if 链（自己的 v-if，不参与 else-if 串联）——失败时无论有没有
+         部分文本都要出现；且失败 + 无文本时不再退化成「暂无结果，提交任务后在此展示」，
+         那正是此前"失败看不出来"的根因。样式沿用 ResultView 的 el-alert 约定。 -->
+    <el-alert v-if="hasFailed" type="error" :closable="false" show-icon style="margin-bottom: 12px;">
+      <template #title>处理失败：{{ jobStore.jobError }}</template>
+      <div style="margin-top: 8px;">
+        断点续传会沿用已下载 / 已转录的部分；从头重试会删除本任务已有文件并完整重跑。
+        <div style="display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap;">
+          <el-button size="small" type="primary" :loading="retrying" @click="handleRetry(false)">断点续传</el-button>
+          <el-button size="small" :loading="retrying" @click="handleRetry(true)">从头重试</el-button>
+        </div>
+      </div>
+    </el-alert>
+
+    <!-- ★ AI 调用链（兜底环）：只在发生换模型重试时出现。
+         兜底环最怕"配了却看不见有没有用"——这里告诉用户这次实际调了谁、哪个挂了、为什么。
+         形态与结果详情页共用 AiCallChain 组件，两处不会跑偏。 -->
+    <AiCallChain :chain="jobStore.aiCallChain" />
+
+    <!-- 无结果时的空状态（失败态不说"提交任务后在此展示"，避免误导） -->
+    <el-empty
+      v-if="!jobStore.resultText && !isProcessing"
+      :description="hasFailed ? '本次处理未产出结果' : '暂无结果，提交任务后在此展示'"
+      :image-size="60"
+    />
 
     <!-- 处理中但还没开始AI输出 -->
     <div v-else-if="isProcessing && !jobStore.resultText && jobStore.aiTokens.length === 0" style="text-align: center; padding: 40px; color: #909399;">
@@ -431,4 +502,5 @@ defineExpose({ reset })
   max-height: 300px;
   overflow-y: auto;
 }
+
 </style>

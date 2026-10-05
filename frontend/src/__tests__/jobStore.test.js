@@ -255,6 +255,113 @@ describe('jobStore', () => {
     })
   })
 
+  // ===== 失败态（2026-10-05 静默失败修复）=====
+  // 回归点：失败必须有 jobError + jobStatus='failed' + isProcessing=false 三者齐备，
+  // 否则结果区会命中「暂无结果」空态，失败与未提交视觉上无法区分。
+  describe('失败态可见性', () => {
+    it('setFailed：落失败态、停转圈、记录原因', () => {
+      const store = useJobStore()
+      store.jobStatus = 'summarizing'
+      store.isProcessing = true
+      store.setFailed('HTTP 503: All available accounts exhausted')
+      expect(store.jobStatus).toBe('failed')
+      expect(store.isProcessing).toBe(false)
+      expect(store.jobError).toBe('HTTP 503: All available accounts exhausted')
+    })
+
+    it('setFailed 原因缺失时给兜底文案（不得退回空态）', () => {
+      const store = useJobStore()
+      store.setFailed('')
+      expect(store.jobStatus).toBe('failed')
+      expect(store.jobError).toBeTruthy()   // 空串会让失败再次变得不可见
+      store.setFailed(undefined)
+      expect(store.jobError).toBeTruthy()
+    })
+
+    it('reset 清空 jobError，避免上个任务的失败原因串台', () => {
+      const store = useJobStore()
+      store.setFailed('boom')
+      store.reset()
+      expect(store.jobError).toBe('')
+      expect(store.jobStatus).toBe('idle')
+    })
+
+    it('loadJob 拉到 failed 任务时带回后端 error', async () => {
+      apiMocks.get.mockResolvedValueOnce({
+        id: 'j3', status: 'failed', title: 'T',
+        result_text: '', error: 'HTTP 503: All available accounts exhausted',
+      })
+      const store = useJobStore()
+      await store.loadJob('j3')
+      expect(store.jobError).toBe('HTTP 503: All available accounts exhausted')
+      expect(store.isProcessing).toBe(false)
+    })
+
+    it('loadJob 拉到非 failed 任务时清空 jobError', async () => {
+      apiMocks.get.mockResolvedValueOnce({
+        id: 'j4', status: 'completed', title: 'T', result_text: 'R', error: '',
+      })
+      const store = useJobStore()
+      store.setFailed('stale')
+      await store.loadJob('j4')
+      expect(store.jobError).toBe('')
+    })
+
+    it('submitJob 提交失败时经 setFailed 落可见失败态', async () => {
+      apiMocks.submit.mockRejectedValueOnce(new Error('后端 500'))
+      const store = useJobStore()
+      await expect(store.submitJob({})).rejects.toThrow('后端 500')
+      expect(store.jobStatus).toBe('failed')
+      expect(store.isProcessing).toBe(false)
+      expect(store.jobError).toBe('后端 500')
+    })
+  })
+
+  // ===== AI 调用链（兜底环，2026-10-05）=====
+  // 后端存的是 JSON 字符串，接口层可能已解析成数组，两种都要归一化。
+  describe('AI 调用链', () => {
+    it('loadJob 解析 JSON 字符串形式的调用链', async () => {
+      apiMocks.get.mockResolvedValueOnce({
+        id: 'j1', status: 'completed', result_text: 'R',
+        ai_call_chain: '[{"model":"m1","ok":false,"reason":"HTTP 503"},{"model":"m2","ok":true,"reason":""}]',
+      })
+      const store = useJobStore()
+      await store.loadJob('j1')
+      expect(store.aiCallChain).toHaveLength(2)
+      expect(store.aiCallChain[0].ok).toBe(false)
+      expect(store.aiCallChain[1].model).toBe('m2')
+    })
+
+    it('loadJob 接受已解析的数组', async () => {
+      apiMocks.get.mockResolvedValueOnce({
+        id: 'j2', status: 'completed', result_text: 'R',
+        ai_call_chain: [{ model: 'm1', ok: true, reason: '' }],
+      })
+      const store = useJobStore()
+      await store.loadJob('j2')
+      expect(store.aiCallChain).toHaveLength(1)
+    })
+
+    it('非法 JSON 归一化为空数组，不让脏数据打挂任务页', async () => {
+      apiMocks.get.mockResolvedValueOnce({
+        id: 'j3', status: 'completed', result_text: 'R', ai_call_chain: '{broken',
+      })
+      const store = useJobStore()
+      await store.loadJob('j3')
+      expect(store.aiCallChain).toEqual([])
+    })
+
+    it('无调用链字段时为空数组；reset 清空', async () => {
+      apiMocks.get.mockResolvedValueOnce({ id: 'j4', status: 'completed', result_text: 'R' })
+      const store = useJobStore()
+      await store.loadJob('j4')
+      expect(store.aiCallChain).toEqual([])
+      store.aiCallChain = [{ model: 'm1', ok: true }]
+      store.reset()
+      expect(store.aiCallChain).toEqual([])
+    })
+  })
+
   it('ACTIVE_JOB_STATUSES 常量存在（watch 依赖）', () => {
     expect(ACTIVE_JOB_STATUSES).toContain('summarizing')
   })
