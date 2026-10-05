@@ -153,11 +153,10 @@ onMounted(() => {
     // 批量面板进度由 batch_progress 推送驱动（终态触发），不再随 progress 高频刷新
   }))
   socketUnsubs.push(onLog((data) => {
-    if (data.job_id === jobStore.currentJobId) {
-      jobStore.addLog(data.msg)
-      // 新进度日志到来时保持面板展开（滚动由 JobProgressDetail 负责）
-      if (!showJobProgress.value) showJobProgress.value = true
-    }
+    // 所有任务的日志都进 store（未跟踪任务进会话缓冲不丢弃），切换任务时 loadJob 合并恢复
+    jobStore.addLogFor(data.job_id, data.msg)
+    // 新进度日志到来时保持面板展开（滚动由 JobProgressDetail 负责）
+    if (data.job_id === jobStore.currentJobId && !showJobProgress.value) showJobProgress.value = true
   }))
 })
 

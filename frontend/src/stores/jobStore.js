@@ -115,7 +115,10 @@ export const useJobStore = defineStore('job', () => {
     flushLogsNow()
     // flushLogsNow 已取消待写定时器；清空内存与存储（先清存储避免定时器复活）
     logs.value = []
-    if (currentJobId.value) clearLogsForJob(currentJobId.value)
+    if (currentJobId.value) {
+      clearLogsForJob(currentJobId.value)
+      liveLogBuffers.delete(currentJobId.value)
+    }
   }
 
   function reset() {
@@ -148,9 +151,37 @@ export const useJobStore = defineStore('job', () => {
     jobError.value = reason || '任务失败，但未返回失败原因'
   }
 
+  // ============ 会话级日志缓冲（按 job 分组，2026-10-05） ============
+  // 后端把 log 事件广播给所有客户端，此前前端只保留 currentJobId 的日志，其余
+  // 任务的事件直接丢弃——从队列/历史切到另一个任务时日志面板永远是空占位。
+  // 这里把所有任务的日志进内存缓冲（上限 500 条/任务），loadJob 时与
+  // localStorage 恢复的历史合并。页面刷新后缓冲清空（跨刷新回填需后端日志端点）。
+  const liveLogBuffers = new Map()  // job_id -> [{time, msg}]
+
+  function appendBuffer(jobId, line) {
+    let buf = liveLogBuffers.get(jobId)
+    if (!buf) {
+      buf = []
+      liveLogBuffers.set(jobId, buf)
+    }
+    buf.push(line)
+    if (buf.length > 500) buf.splice(0, buf.length - 500)
+  }
+
+  /** localStorage 持久化的日志与本次会话缓冲合并（按 time|msg 去重，保持顺序） */
+  function mergeBufferedLogs(jobId) {
+    const saved = loadLogsForJob(jobId)
+    const buf = liveLogBuffers.get(jobId) || []
+    if (!buf.length) return saved
+    const seen = new Set(saved.map((l) => `${l.time}|${l.msg}`))
+    return saved.concat(buf.filter((l) => !seen.has(`${l.time}|${l.msg}`)))
+  }
+
   function addLog(msg) {
     const time = new Date().toLocaleTimeString()
-    logs.value.push({ time, msg })
+    const line = { time, msg }
+    if (currentJobId.value) appendBuffer(currentJobId.value, line)
+    logs.value.push(line)
     // 保留最近500条日志
     if (logs.value.length > 500) {
       logs.value = logs.value.slice(-500)
@@ -167,6 +198,15 @@ export const useJobStore = defineStore('job', () => {
         }, 1500)
       }
     }
+  }
+
+  /** 任意任务的日志：跟踪中的任务走 addLog 上屏+持久化，未跟踪的只进会话缓冲 */
+  function addLogFor(jobId, msg) {
+    if (!jobId || jobId === currentJobId.value) {
+      addLog(msg)
+      return
+    }
+    appendBuffer(jobId, { time: new Date().toLocaleTimeString(), msg })
   }
 
   /**
@@ -299,13 +339,8 @@ export const useJobStore = defineStore('job', () => {
       if (job.progress_msg) {
         progress.msg = job.progress_msg
       }
-      // 恢复日志
-      const savedLogs = loadLogsForJob(jobId)
-      if (savedLogs && savedLogs.length > 0) {
-        logs.value = savedLogs
-      } else {
-        logs.value = []
-      }
+      // 恢复日志：localStorage 历史 + 本次会话缓冲（该任务未被跟踪期间收到的行）合并
+      logs.value = mergeBufferedLogs(jobId)
       // active 状态 → 标记为处理中
       if (ACTIVE_JOB_STATUSES.includes(job.status)) {
         isProcessing.value = true
@@ -355,6 +390,7 @@ export const useJobStore = defineStore('job', () => {
     // 动作
     reset,
     addLog,
+    addLogFor,
     clearLogs,
     flushLogsNow,
     updateProgress,
