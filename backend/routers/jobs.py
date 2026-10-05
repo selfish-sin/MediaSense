@@ -81,6 +81,15 @@ def normalize_url(url: str) -> str:
     m = re.search(r'/shorts/([a-zA-Z0-9_-]{11})', u)
     if m:
         return f"youtube:{m.group(1)}"
+    # 抖音: video/<id>、modal_id=<id>、share/video/<id>（★ 不能走"其他"的剥 query 兜底——
+    # user 页 modal_id 会被剥掉，同用户页不同视频被误合并；裸 v.douyin.com 短链用短码本身作键）
+    from services.douyin import extract_aweme_id_from_text
+    aweme_id = extract_aweme_id_from_text(u)
+    if aweme_id:
+        return f"douyin:{aweme_id}"
+    m = re.search(r'v\.douyin\.com/([A-Za-z0-9]+)', u)
+    if m:
+        return f"douyin:short:{m.group(1)}"
     # 其他: 剥 query 参数（兜底，对未知平台保守）
     return u.split('?')[0]
 

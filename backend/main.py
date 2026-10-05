@@ -483,6 +483,9 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
         download_video, extract_bilibili_subtitles, verify_subtitle_against_audio,
         detect_platform, extract_youtube_subtitles,
     )
+    from services.douyin import (
+        is_douyin_url, extract_douyin_subtitles, download_douyin_video,
+    )
 
     platform, _ = detect_platform(input_url)
     # 日志/提示用实际引擎显示名（不再写死 "Whisper" 误导用户；标签单一事实源在 transcriber）
@@ -498,6 +501,7 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
     #   适用于B站AI字幕质量差、需要更高准确度、或不想依赖B站登录态的场景
     force_transcribe = options.get('force_transcribe', False)
     is_bilibili = 'bilibili' in input_url.lower() or 'b23.tv' in input_url.lower()
+    is_douyin = is_douyin_url(input_url)
 
     if is_bilibili and force_transcribe:
         await emit_log(sio, job_id, f'🔧 已开启「强制转录」，跳过B站字幕提取，直接下载音频转录（{_engine_desc}）')
@@ -565,9 +569,54 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
             else:
                 await emit_log(sio, job_id, f'⚠️ 字幕提取失败：{sub_result.get("message", "")}')
 
+    # 抖音：优先尝试 AI 字幕（cla_info，游客接口；实测多数视频无字幕，回退转录，宁缺勿错）
+    # force_transcribe=True 时跳过，直接下载音频转录
+    if is_douyin and force_transcribe:
+        await emit_log(sio, job_id, f'🔧 已开启「强制转录」，跳过抖音AI字幕提取，直接下载音频转录（{_engine_desc}）')
+    elif is_douyin:
+        await emit_log(sio, job_id, '📄 检测到抖音视频，尝试提取AI字幕（游客接口）...')
+        sub_result = await extract_douyin_subtitles(input_url, job_dir, sio, job_id)
+        if sub_result.get('success'):
+            srt_path = sub_result['srt_path']
+            txt_path = sub_result['txt_path']
+            title = sub_result.get('title') or title
+            await emit_log(sio, job_id, f'📄 抖音AI字幕已下载，待内容抽查确认（{sub_result.get("message", "")}）')
+            update_job(job_id, title=title, platform=platform, status='transcribing',
+                       progress_msg='抖音AI字幕已获取（跳过下载和转录）')
+            # 与B站同标准：字幕拿到不直接信，下载开头 90s 比对防错位
+            # （抖音直链走 ffmpeg 截取，不经 yt-dlp）
+            if options.get('subtitle_check', True):
+                try:
+                    await emit_log(sio, job_id, '🧪 抖音字幕内容抽查：下载音频开头片段并与字幕比对...')
+                    audio_path, _, _ = await download_douyin_video(
+                        input_url, job_dir / '_subtitle_check', sio=sio, job_id=job_id,
+                        max_seconds=90,
+                    )
+                    ok, _detail = await verify_subtitle_against_audio(
+                        txt_path, str(audio_path), sio=sio, job_id=job_id,
+                        language=language,
+                    )
+                    if ok:
+                        await emit_log(sio, job_id, f'✅ 抖音字幕内容抽查通过（{_detail}），使用该字幕')
+                    else:
+                        await emit_log(sio, job_id, f'⚠ 抖音字幕内容抽查未通过（{_detail}）：疑似旧/错误字幕，丢弃，转转录（{_engine_desc}）')
+                        for _p in (srt_path, txt_path):
+                            try:
+                                Path(_p).unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                        srt_path = None
+                        txt_path = None
+                except Exception as e:
+                    logger.warning(f'抖音字幕抽查异常（保留原字幕结果）: {e}')
+                    await emit_log(sio, job_id, f'⚠ 抖音字幕抽查不可用（{e}），按原结果使用字幕')
+        else:
+            await emit_log(sio, job_id, f'⚠️ 抖音AI字幕提取失败：{sub_result.get("message", "")}，进入转录流程（{_engine_desc}）')
+
     # YouTube / 通用平台：优先抓官方字幕（CC + 自动生成），比 Whisper 更快更准更省
     # 抓取失败（无字幕/超时）则自动回退到下面的下载+Whisper 转录
-    if not srt_path and not is_bilibili and not force_transcribe:
+    # （抖音不走这里：通用字幕抓取对抖音必失败，且下载走 douyin 直链分支）
+    if not srt_path and not is_bilibili and not is_douyin and not force_transcribe:
         await emit_log(sio, job_id, '📄 尝试抓取YouTube/平台原文字幕（CC+自动）...')
         yt_sub = await extract_youtube_subtitles(
             input_url, job_dir, sio, job_id, target_lang=language or 'zh'
@@ -654,7 +703,16 @@ async def _acquire_audio(input_url, job_dir, sio, job_id, options, files, *,
 
     if file_path is None:
         update_job(job_id, status='downloading', progress_msg='开始下载')
-        if options.get('download_video_only', False):
+        # 抖音：yt-dlp 的 Douyin extractor 需浏览器 cookie 且频繁 403，走 douyin 直链下载单点
+        # （域名包含 douyin 覆盖 douyin.com / v.douyin.com / iesdouyin.com 三种输入形态）
+        if 'douyin' in (input_url or '').lower():
+            from services.douyin import download_douyin_video
+            file_path, title, platform = await download_douyin_video(
+                input_url, job_dir, sio=sio, job_id=job_id,
+            )
+            # 直链是 mp4：要视频原件时登记 video，否则当音频转录输入（ffmpeg 抽样对 mp4 透明）
+            files['video' if (options.get('download_video') or options.get('download_video_only')) else 'audio'] = str(file_path)
+        elif options.get('download_video_only', False):
             file_path, title, platform = await download_video(
                 input_url, job_dir, only_audio=False, video_only=True, sio=sio, job_id=job_id
             )

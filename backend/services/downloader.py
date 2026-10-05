@@ -268,6 +268,7 @@ PLATFORM_CONFIG = {
     "bilibili.com": {"name": "哔哩哔哩", "need_proxy": False},
     "b23.tv": {"name": "哔哩哔哩", "need_proxy": False},
     "douyin.com": {"name": "抖音", "need_proxy": False},
+    "iesdouyin.com": {"name": "抖音", "need_proxy": False},
     "xiaohongshu.com": {"name": "小红书", "need_proxy": False},
     "vimeo.com": {"name": "Vimeo", "need_proxy": True},
     "twitter.com": {"name": "Twitter/X", "need_proxy": True},
@@ -325,6 +326,10 @@ def sanitize_input_url(raw: str) -> str:
         b23 = re.search(r'(b23\.tv/[A-Za-z0-9]+)', text)
         if b23:
             return f'https://{b23.group(1)}'
+        # 裸抖音短链: "v.douyin.com/xxx" → 补 https://
+        vdy = re.search(r'(v\.douyin\.com/[A-Za-z0-9]+)', text)
+        if vdy:
+            return f'https://{vdy.group(1)}'
         # 实在提取不到，原样返回让下游报错
         return text.strip()
 
