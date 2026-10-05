@@ -376,3 +376,18 @@ class TestSpeechFix:
         """纠错纪律明确豁免直接引语/经典条文：与 tcm 引文分级纪律可共存"""
         sf = _get_module_template("speech_fix", "balanced")
         assert "逐字保留" in sf
+
+    def test_discipline_and_context_required(self):
+        """用户要求：纠错判定 = 学科术语体系 + 上下文语境 结合，缺一不改"""
+        sf = _get_module_template("speech_fix", "balanced")
+        assert "学科术语体系" in sf
+        assert "上下文语境" in sf
+        assert "缺一" in sf
+        assert "通行写法" in sf
+        assert "通顺化" in sf
+
+    def test_module_name_discipline_and_context(self):
+        """模块名与描述体现「按学科与上下文纠错」"""
+        m = PROMPT_DIMENSIONS["speech_fix"]["modules"][0]
+        assert m["key"] == "balanced"
+        assert m["name"] == "按学科与上下文纠错"
