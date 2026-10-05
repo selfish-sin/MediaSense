@@ -76,6 +76,7 @@
 
 - Vue Router history 模式，SPA fallback 由后端 `serve_vue_spa` 处理
 - 深层页面刷新依赖后端路由兜底返回 index.html（勿改后端 SPA 路由的 no-cache 语义）
+- **合并分支 / 切换 worktree 后必须 `npm install`**：若该分支引入了新依赖（`package.json` + lock 已更新），`node_modules` 不会自动跟上，表现为**单个测试套件 Failed Suite**（import 失败）而不是断言失败，容易被误判成代码问题。实例：合并带 `fake-indexeddb` 的分支后主仓库未装 → `bgStore.test.js` 整文件崩、vitest 从 259 掉到 237（正好差该文件的 22 个用例）。判据：**用例总数比预期少一个整文件的量**。
 
 ## Quality Check
 
