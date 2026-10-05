@@ -26,6 +26,10 @@ let transformer = null
 
 const resultCardRef = ref(null)
 const isProcessing = computed(() => jobStore.isProcessing)
+// ★ 思考型模型占位（2026-10-05）：思考已滚动而正文未出时，正文区给明确反馈而非空白
+const isThinkingPending = computed(() =>
+  jobStore.isProcessing && !jobStore.resultText && !!jobStore.streamingThinking
+)
 
 // ★ rAF 节流渲染 Markdown：每帧最多渲染一次，避免高频 token 推送导致 O(n) 重渲染堆积
 // （逻辑抽离到 composables/useMarkdownRender，组件卸载时自清 rAF 回调）
@@ -404,12 +408,20 @@ defineExpose({ reset })
       </div>
 
       <!-- Markdown / 流式输出视图 -->
-      <div
-        v-else-if="resultTab === 'markdown'"
-        class="markdown-body"
-        v-html="renderedResult"
-        style="line-height: 1.8; font-size: 14px;"
-      />
+      <template v-else-if="resultTab === 'markdown'">
+        <div v-if="isThinkingPending" class="thinking-pending">
+          <el-icon class="is-loading"><Loader2 /></el-icon>
+          <div style="margin-top: 8px;">
+            模型思考中…（已思考 {{ jobStore.streamingThinking.length }} 字），正文将在思考完成后显示
+          </div>
+        </div>
+        <div
+          v-else
+          class="markdown-body"
+          v-html="renderedResult"
+          style="line-height: 1.8; font-size: 14px;"
+        />
+      </template>
 
       <!-- 思维导图视图 -->
       <div v-else-if="resultTab === 'mindmap'" style="width: 100%; height: 520px; position: relative; background: #1a1a1a; border-radius: 8px;">
@@ -478,6 +490,17 @@ defineExpose({ reset })
   border: 1px dashed rgba(var(--app-accent-1-rgb), 0.55);
   border-radius: 10px;
   background: var(--app-thinking-bg);
+}
+/* 思考期占位：正文未出时给等待一个可见反馈 */
+.thinking-pending {
+  padding: 40px 0;
+  text-align: center;
+  color: var(--app-text-secondary);
+  font-size: 14px;
+}
+.thinking-pending .is-loading {
+  width: 24px;
+  height: 24px;
 }
 .thinking-head {
   display: flex;
