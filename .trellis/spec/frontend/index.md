@@ -48,6 +48,17 @@
 - **dark / light 是两套独立材质**（不能简单反转）：light 需要更高的不透明度（surface 基准 +12%）、更深的投影，且描边用主题深色而非白色高光。
 - **皮肤导入一律走 `utils/skinSchema.normalizeSkin()`**：失败必须给可行动原因（禁止静默失败、禁止半途应用半套皮肤）；归一化只保留白名单字段，防止外部文件夹带数据。
 
+### 背景媒体（图库 / 动态 / 降级，2026-10-05 固化）
+
+- **图片一律存 IndexedDB 的 Blob**（`utils/bgStore.js`），localStorage 只放 `{type:'image', assetId}` + 几 KB 缩略图。再出现"把 dataURL 写进 localStorage"就是回退到已踩过的坑（配额 ~5MB、base64 膨胀 1.37 倍、deep watch 卡主线程）。
+- **写操作必须等事务提交**：IndexedDB 的写要在 `transaction.oncomplete` 才 resolve —— 在 request 回调里 `db.close()` 可能在 commit 前就关掉连接。读操作在 request 成功时 resolve 即可。
+- **迁移必须 write-then-clean 且幂等**：先确认写入成功、再清理旧字段；失败保留旧数据继续渲染并给可见提示。
+- **objectURL 只有一个创建点与一个 revoke 点**（都在 `themeStore`）；图库缩略图用 dataURL，不要给每张图都建 objectURL。
+- **降级路径不删**：IndexedDB 不可用（隐私模式）时整体退回 localStorage 单图路径，并提示一次。
+- **动态背景只动 CSS**（`background-position` 漂移）：不跑 `requestAnimationFrame`、不动 `transform`（`transform` 已被 `body::before` 的 scale 占用，用于遮 blur 边）；失焦切 `data-bg-paused`，`prefers-reduced-motion: reduce` 直接关掉。
+- **`imageFit` 与 `color.js` 共用一次采样**：不要再写第二份降采样/中位切分；分析失败返回 `null`，不要用 0 值假装成功。
+- 测试注意：涉及 Blob 存取的用例要加 `// @vitest-environment node`（jsdom 的 Blob 与 `structuredClone` 不兼容，克隆后不再是 Blob 实例）。
+
 ### 状态与 API
 
 - 跨视图共享状态进 Pinia store（jobStore/modelStore/settingsStore/themeStore/asrStore），视图私有状态留在视图

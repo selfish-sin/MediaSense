@@ -19,7 +19,8 @@
   "pr_url": null,
   "subtasks": [],
   "children": [
-    "10-05-bg-gallery-indexeddb"
+    "10-05-bg-gallery-indexeddb",
+    "10-05-background-media"
   ],
   "parent": null,
   "relatedFiles": [],
