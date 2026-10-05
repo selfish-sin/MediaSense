@@ -413,79 +413,71 @@ def detect_silences(audio_path: str, total_duration: Optional[float]) -> List[Tu
         return []
 
 
-def _parse_segment_list(list_file: Path) -> Optional[List[float]]:
-    """解析 ffmpeg -segment_list csv 输出（每行 "<路径>,<起始秒>,<结束秒>"），返回每片时长。
+def export_chunks(
+    audio_path: str,
+    cuts: List[float],
+    progress_callback: Optional[Callable] = None,
+) -> Tuple[List[str], Optional[List[float]]]:
+    """按切点逐片导出 16k 单声道 mp3 分片，返回 (分片路径有序列表, 每片实测时长秒列表)。
 
-    时长 = 结束 - 起始（部分构建会带第 4 列 duration，取末两列之差等价）。
-    解析失败返回 None，调用方退化为计划切点区间。
-    """
-    try:
-        rows: List[float] = []
-        for line in list_file.read_text(encoding='utf-8', errors='ignore').splitlines():
-            fields = line.strip().split(',')
-            if len(fields) >= 3:
-                rows.append(float(fields[-1]) - float(fields[-2]))
-        return rows or None
-    except Exception as e:
-        logger.warning(f'解析分片时长列表失败（{list_file.name}），按等分处理: {e}')
-        return None
+    逐片 `-ss` 导出而非 `-f segment` 一次切完：ffmpeg 8.1 的 segment muxer 带
+    上百个切点时病态慢（30s 音频要 8~20s，而同参数普通导出 170 倍速），55min
+    音频 111 片必撞导出超时（2026-10-05 两个长任务同时超时回退本地实测）；
+    逐片路径每片 <1s。cuts 含收尾切点（=计划总时长）；尾片不传 -t，自动延伸
+    到实际 EOF（ffprobe 时长与实际音频存在毫秒级偏差）。单片场景（cuts 只有
+    收尾切点）整段转码。每片 ≤30s → ≤200KB，远小于 API 单次 ≤50MB 限制。
 
+    每片时长用 ffprobe 实测（mp3 帧对齐使实测略长于计划值），时间轴以实测为准；
+    任一片探测失败返回 None，调用方退化为计划切点区间。单片场景直接返回 None
+    （单片区间即 [0, 总时长]，无必要探测）。
 
-def export_chunks(audio_path: str, cuts: List[float]) -> Tuple[List[str], Optional[List[float]]]:
-    """按切点导出 16k 单声道 mp3 分片，返回 (分片路径有序列表, 每片实际时长秒列表)。
-
-    cuts 含收尾切点（=总时长），但 segment_times 只传内部切点：
-    ffprobe 时长与实际音频存在毫秒级偏差，把收尾切点传给 ffmpeg 会在
-    EOF 前多切出一个微型尾片（冒烟实测 4 片 vs 计划 3 片）。最后一片
-    由 ffmpeg 自动延伸到实际 EOF。单片场景（无内部切点）直接整段转码。
-    每片 ≤30s → ≤200KB，远小于 API 单次 ≤50MB 限制。
-
-    第二返回值取 ffmpeg -segment_list 实测的每片时长（帧对齐真实值），
-    时间轴以它为准，根治「分片数与计划不一致」；单片/解析失败时为 None。
+    progress_callback 沿用调用方的阶段刻度：导出位于 4%（静音探测完成）与
+    8%（开始云端转录）之间，按片推进 4→8，消除导出期间的进度盲区。
     """
     src = Path(audio_path)
     out_dir = src.parent
     prefix = src.stem
-    pattern = str(out_dir / f'{prefix}_cloud_%03d.mp3')
-    list_file = out_dir / f'{prefix}_cloud_list.txt'
     # 清残留：同名音频重复转录时，上次残留分片会被 glob 混入
     for old in out_dir.glob(f'{prefix}_cloud_*.mp3'):
         old.unlink(missing_ok=True)
-    list_file.unlink(missing_ok=True)
 
-    internal_cuts = cuts[:-1] if len(cuts) > 1 else []
-    if internal_cuts:
-        times = ','.join(f'{t:.3f}' for t in internal_cuts)
-        cmd = [
-            _ffmpeg_bin(), '-y', '-v', 'error',
-            '-i', audio_path,
-            '-f', 'segment', '-segment_times', times,
-            '-segment_list', str(list_file), '-segment_list_type', 'csv',
-            '-ac', '1', '-ar', '16000',
-            '-c:a', 'libmp3lame', '-b:a', '48k',
-            pattern,
-        ]
-    else:
-        cmd = [
-            _ffmpeg_bin(), '-y', '-v', 'error',
-            '-i', audio_path,
-            '-ac', '1', '-ar', '16000',
-            '-c:a', 'libmp3lame', '-b:a', '48k',
-            pattern.replace('%03d', '000'),
-        ]
-    subprocess.run(cmd, capture_output=True, check=False, timeout=600)
+    # 第 i 片区间 [starts[i], starts[i+1])；尾片开区间到实际 EOF
+    starts = [0.0] + list(cuts)
+    total = len(starts) - 1
+    export_start = time.time()
+    for i in range(total):
+        out_path = out_dir / f'{prefix}_cloud_{i:03d}.mp3'
+        cmd = [_ffmpeg_bin(), '-y', '-v', 'error', '-ss', f'{starts[i]:.3f}']
+        if i < total - 1:
+            cmd += ['-t', f'{starts[i + 1] - starts[i]:.3f}']
+        cmd += ['-i', audio_path, '-ac', '1', '-ar', '16000',
+                '-c:a', 'libmp3lame', '-b:a', '48k', str(out_path)]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
+            raise CloudASRUnavailableError(
+                f'ffmpeg 分片导出失败（第 {i + 1}/{total} 片，音频: {src.name}，'
+                f'ffmpeg: {(result.stderr or "").strip()[-200:]}），无法继续云端转录'
+            )
+        if progress_callback:
+            progress_callback(4 + int((i + 1) / total * 4), f'导出分片 {i + 1}/{total}...')
+
     chunks = sorted(out_dir.glob(f'{prefix}_cloud_*.mp3'))
     if not chunks:
         raise CloudASRUnavailableError(
             f'ffmpeg 分片导出失败（音频: {src.name}），无法继续云端转录'
         )
-    durations = _parse_segment_list(list_file) if internal_cuts else None
-    if durations is not None and len(durations) != len(chunks):
-        logger.warning(
-            f'分片时长列表与分片数不一致（{len(durations)} vs {len(chunks)}），忽略列表按等分'
-        )
-        durations = None
-    return [str(c) for c in chunks], durations
+    if total == 1:
+        return [str(chunks[0])], None
+    durations: List[float] = []
+    for c in chunks:
+        d = _get_audio_duration_seconds(str(c))
+        if not d:
+            logger.warning(f'分片时长探测失败（{c.name}），按计划切点区间处理')
+            durations = []
+            break
+        durations.append(d)
+    logger.info(f'分片导出完成：{len(chunks)} 片，耗时 {time.time() - export_start:.1f}s')
+    return [str(c) for c in chunks], (durations or None)
 
 
 def _do_request(cfg: dict, path: str, timeout: float) -> httpx.Response:
@@ -746,7 +738,7 @@ def transcribe_audio_cloud(
         seg_count_est = len(cuts)
         progress_callback(4, f'静音探测完成：{len(silences)} 处静音 → {seg_count_est} 个分片，导出中...')
 
-    chunk_paths, chunk_durations = export_chunks(audio_path, cuts)
+    chunk_paths, chunk_durations = export_chunks(audio_path, cuts, progress_callback)
     if chunk_durations:
         # 时间轴以 ffmpeg 实测分片时长为准（帧对齐真实时长，分片数==分段数恒成立）
         segments: List[Tuple[float, float]] = []

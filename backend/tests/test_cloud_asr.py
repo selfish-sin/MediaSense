@@ -457,7 +457,7 @@ def _setup_orchestration(monkeypatch, tmp_path, duration=100.0, texts=None, sile
         cp = tmp_path / f'fake_audio_cloud_{i:03d}.mp3'
         cp.write_bytes(b'\x00' * 8)
         chunk_paths.append(str(cp))
-    monkeypatch.setattr(cloud_asr, 'export_chunks', lambda ap, c: (list(chunk_paths), None))
+    monkeypatch.setattr(cloud_asr, 'export_chunks', lambda ap, c, pc=None: (list(chunk_paths), None))
 
     calls = []
     def fake_transcribe(path, **kwargs):
@@ -571,7 +571,7 @@ class TestTranscribeAudioCloud:
             cp.write_bytes(b'\x00' * 8)
             chunks.append(str(cp))
         # 探测 100s，但实际只有 2 片（10s + 90s）——SRT 时间轴必须按实测累计
-        monkeypatch.setattr(cloud_asr, 'export_chunks', lambda ap, c: (chunks, [10.0, 90.0]))
+        monkeypatch.setattr(cloud_asr, 'export_chunks', lambda ap, c, pc=None: (chunks, [10.0, 90.0]))
         texts = iter(['第一段', '第二段'])
         monkeypatch.setattr(cloud_asr, 'transcribe_file', lambda p, **kw: next(texts))
         srt, txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
