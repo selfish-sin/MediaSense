@@ -10,6 +10,11 @@
 - detail 接口游客可拿完整元数据与无水印直链（x-tt-argus 网关头发占位值即可，f2 issue #443）；
 - AI 字幕（video.cla_info.caption_infos）游客态实测常为空 → 拿不到走转录链，宁缺勿错；
 - 签名只借 vendor 的单个纯 Python 文件，零新增第三方依赖（SM3 走已有 cryptography）。
+
+稳性设计（对齐 B站 412 递增惩罚的教训）：
+- 所有 detail/短链展开请求共享全局限流（默认 ≥1s，DOUYIN_API_MIN_INTERVAL 可调），批量不齐射；
+- 元数据按 aweme_id 做 90s 进程级缓存——同一任务内"字幕探测 + 下载"共用一次 detail 调用；
+- play_addr 直链有时效，下载失败自动重新拉取 detail（绕过缓存）换新直链重试一次。
 """
 import asyncio
 import logging
@@ -18,6 +23,7 @@ import random
 import re
 import string
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -53,10 +59,26 @@ _FFMPEG_BIN = _PROJECT_ROOT / 'bin' / ('ffmpeg.exe' if os.name == 'nt' else 'ffm
 _DETAIL_TIMEOUT = 20          # detail 接口单次超时
 _DOWNLOAD_TIMEOUT = 600       # 直链下载总超时（与 yt-dlp 链路一致）
 _DOWNLOAD_CHUNK = 256 * 1024
+_API_MIN_INTERVAL = float(os.environ.get('DOUYIN_API_MIN_INTERVAL', '1.0'))
+_META_CACHE_TTL = 90.0        # 元数据缓存秒数（play_url 直链时效远大于此，下载失败会绕缓存重拉）
 
 
 class DouyinError(Exception):
     """抖音解析/下载失败（message 面向用户可行动）"""
+
+
+# ============ 全局限流（detail / 短链展开共享；对齐 B站"风控递增惩罚"教训，批量不齐射） ============
+_api_lock = threading.Lock()
+_last_api_ts = [0.0]
+
+
+def _throttle_douyin_api() -> None:
+    """进程级最小间隔限流（阻塞调用，跑在线程池，不占事件循环）"""
+    with _api_lock:
+        wait = _API_MIN_INTERVAL - (time.monotonic() - _last_api_ts[0])
+        if wait > 0:
+            time.sleep(wait)
+        _last_api_ts[0] = time.monotonic()
 
 
 # ============ 游客身份（ttwid 进程级缓存） ============
@@ -114,10 +136,11 @@ def _sign_endpoint(params: Dict) -> str:
 
 
 def fetch_detail_sync(aweme_id: str) -> dict:
-    """拉取单个作品 detail（aweme_detail），空响应时换新 ttwid 重试一次"""
+    """拉取单个作品 detail（aweme_detail）；空响应时换新 ttwid 重试一次"""
     last_err = ''
     for attempt in (1, 2):
         try:
+            _throttle_douyin_api()
             ttwid = _get_ttwid()
             params = {**_STATIC_DETAIL_PARAMS, "msToken": _false_mstoken(), "aweme_id": aweme_id}
             r = httpx.get(_sign_endpoint(params), headers=_detail_headers(ttwid),
@@ -145,7 +168,7 @@ _DY_HOSTS = ("douyin.com", "iesdouyin.com")
 #   /video/<id>、/note/<id>、iesdouyin share /video/<id>、user 页 modal_id=<id>
 _AWEME_ID_RE = re.compile(r'/(?:video|note)/(\d{15,21})')
 _MODAL_ID_RE = re.compile(r'[?&]modal_id=(\d{15,21})')
-_SHORT_HOST_RE = re.compile(r'^https?://v\.douyin\.com/([A-Za-z0-9]+)/?$')
+_SHORT_HOST_RE = re.compile(r'^(?:https?://)?v\.douyin\.com/([A-Za-z0-9]+)/?$')
 
 
 def is_douyin_url(url: str) -> bool:
@@ -166,6 +189,7 @@ def extract_aweme_id_from_text(url: str) -> str:
 def _expand_short_link_sync(url: str) -> str:
     """v.douyin.com 短链 302 展开，返回最终落地 URL"""
     try:
+        _throttle_douyin_api()
         r = httpx.get(url, headers={"User-Agent": _UA}, timeout=15, follow_redirects=True)
         return str(r.url)
     except Exception as e:
@@ -174,33 +198,47 @@ def _expand_short_link_sync(url: str) -> str:
 
 
 def extract_aweme_id_sync(url: str) -> str:
-    """从任意抖音 URL 形态提取 aweme_id（短链自动 302 展开），失败返回空串"""
-    text = url or ''
+    """从任意抖音 URL 形态提取 aweme_id（短链自动 302 展开；裸短链无 scheme 也容错）"""
+    text = (url or '').strip()
+    if text.startswith('v.douyin.com/'):
+        text = f'https://{text}'
     m = _AWEME_ID_RE.search(text) or _MODAL_ID_RE.search(text)
     if m:
         return m.group(1)
-    if _SHORT_HOST_RE.match(text.strip()):
-        expanded = _expand_short_link_sync(text.strip())
+    if _SHORT_HOST_RE.match(text):
+        expanded = _expand_short_link_sync(text)
         m = _AWEME_ID_RE.search(expanded) or _MODAL_ID_RE.search(expanded)
         if m:
             return m.group(1)
     return ''
 
 
-# ============ 元数据 ============
-def fetch_video_meta_sync(url: str) -> dict:
-    """解析 URL → detail 元数据：{aweme_id, title, author, duration_ms, play_url, captions}"""
+# ============ 元数据（aweme_id 级 90s 缓存：同一任务内字幕探测+下载共用一次 detail） ============
+_META_CACHE: Dict[str, Tuple[float, dict]] = {}
+_meta_cache_lock = threading.Lock()
+
+
+def fetch_video_meta_sync(url: str, refresh: bool = False) -> dict:
+    """解析 URL → detail 元数据：{aweme_id, title, author, duration_ms, play_url, captions}。
+
+    refresh=True 绕过缓存强制重拉（下载失败换新直链时用）。
+    """
     aweme_id = extract_aweme_id_sync(url)
     if not aweme_id:
         raise DouyinError(
             "无法从链接中解析出抖音视频ID。支持：douyin.com/video/<id>、"
             "v.douyin.com 短链、分享链接（iesdouyin.com）、主页弹层链接（modal_id=）"
         )
+    if not refresh:
+        with _meta_cache_lock:
+            hit = _META_CACHE.get(aweme_id)
+        if hit and time.monotonic() - hit[0] < _META_CACHE_TTL:
+            return hit[1]
     d = fetch_detail_sync(aweme_id)
     video = d.get("video") or {}
     play_urls = ((video.get("play_addr") or {}).get("url_list") or [])
     author = d.get("author") or {}
-    return {
+    meta = {
         "aweme_id": aweme_id,
         "title": (d.get("desc") or "").strip() or aweme_id,
         "author": author.get("nickname") or "",
@@ -208,10 +246,13 @@ def fetch_video_meta_sync(url: str) -> dict:
         "play_url": play_urls[0] if play_urls else "",
         "captions": ((video.get("cla_info") or {}).get("caption_infos") or []),
     }
+    with _meta_cache_lock:
+        _META_CACHE[aweme_id] = (time.monotonic(), meta)
+    return meta
 
 
-async def fetch_video_meta(url: str) -> dict:
-    return await asyncio.to_thread(fetch_video_meta_sync, url)
+async def fetch_video_meta(url: str, refresh: bool = False) -> dict:
+    return await asyncio.to_thread(fetch_video_meta_sync, url, refresh)
 
 
 # ============ AI 字幕（cla_info → SRT/TXT；游客态常为空，属已知边界） ============
@@ -251,19 +292,29 @@ def _caption_to_srt_txt(vtt_text: str) -> Tuple[str, str]:
     return "\n".join(srt_parts), txt
 
 
+async def _log(sio, job_id: str, msg: str) -> None:
+    """sio 缺省安全版日志（无 socket 时静默，进程日志仍由调用方打点）"""
+    if sio is not None:
+        from socket_handlers import emit_log
+        await emit_log(sio, job_id, msg)
+
+
+async def _progress(sio, job_id: str, step: str, pct: int, msg: str) -> None:
+    if sio is not None:
+        from socket_handlers import emit_progress
+        await emit_progress(sio, job_id, step, pct, msg)
+
+
 async def extract_douyin_subtitles(url: str, output_dir: Path,
                                    sio=None, job_id: str = '') -> dict:
     """尝试获取抖音 AI 字幕（cla_info），返回与 extract_bilibili_subtitles 同契约。
 
     拿不到（无字幕/接口风控）返回 success=False，由调用方回退转录，宁缺勿错。
     """
-    from socket_handlers import emit_log
-    from services.naming import safe_basename
-
     try:
         meta = await fetch_video_meta(url)
     except DouyinError as e:
-        await emit_log(sio, job_id, f'⚠️ 抖音元数据获取失败：{e}')
+        await _log(sio, job_id, f'⚠️ 抖音元数据获取失败：{e}')
         return {'success': False, 'message': str(e)}
 
     title = meta["title"]
@@ -285,12 +336,13 @@ async def extract_douyin_subtitles(url: str, output_dir: Path,
         srt_text, txt_text = _caption_to_srt_txt(vtt_text)
         if len(srt_text) < 50:
             return {'success': False, 'message': 'AI字幕内容为空（疑似降级响应），转转录'}
+        from services.naming import safe_basename
         base = safe_basename(title)[:80] or meta["aweme_id"]
         srt_path = output_dir / f'{base}.srt'
         txt_path = output_dir / f'{base}.txt'
         srt_path.write_text(srt_text, encoding='utf-8')
         txt_path.write_text(txt_text, encoding='utf-8')
-        await emit_log(sio, job_id, f'✅ 抖音AI字幕已下载（lang={caption.get("lang")}）')
+        await _log(sio, job_id, f'✅ 抖音AI字幕已下载（lang={caption.get("lang")}）')
         return {'success': True, 'srt_path': str(srt_path), 'txt_path': str(txt_path),
                 'title': title, 'message': '已获取抖音AI字幕'}
     except Exception as e:
@@ -299,29 +351,48 @@ async def extract_douyin_subtitles(url: str, output_dir: Path,
 
 
 # ============ 直链下载（音频/视频共用 play_addr） ============
-def _stream_download_sync(play_url: str, dest: Path) -> None:
-    """httpx 流式下载直链到 dest（阻塞，跑在线程池；进度在 async 壳汇报）"""
+def _stream_download_sync(play_url: str, dest: Path, prog: Optional[dict] = None) -> None:
+    """httpx 流式下载直链到 dest（阻塞，跑在线程池）。
+
+    prog 为共享进度字典 {'done','total'}，由 async 壳轮询汇报（线程里只写数字，不碰 socket）。
+    """
     headers = {"User-Agent": _UA, "Referer": "https://www.douyin.com/"}
     with httpx.stream("GET", play_url, headers=headers,
                       timeout=httpx.Timeout(_DOWNLOAD_TIMEOUT, read=60), follow_redirects=True) as r:
         if r.status_code != 200:
             raise DouyinError(f"抖音直链下载失败（HTTP {r.status_code}），直链可能已过期，请重试")
+        if prog is not None:
+            prog['total'] = int(r.headers.get("content-length") or 0)
+            prog['done'] = 0
         with open(dest, "wb") as f:
             for chunk in r.iter_bytes(_DOWNLOAD_CHUNK):
                 f.write(chunk)
+                if prog is not None:
+                    prog['done'] += len(chunk)
+
+
+def _download_via_ffmpeg_sync(play_url: str, dest: Path, max_seconds: int) -> None:
+    """ffmpeg 直读直链截取开头 N 秒（字幕抽查场景，不付整段下载成本）"""
+    cmd = [str(_FFMPEG_BIN), '-y', '-user_agent', _UA,
+           '-i', play_url, '-t', str(int(max_seconds)),
+           '-c', 'copy', str(dest)]
+    p = subprocess.run(cmd, capture_output=True, timeout=180)
+    if p.returncode != 0 or not dest.exists() or dest.stat().st_size < 1024:
+        raise DouyinError(f'ffmpeg 截取失败: {p.stderr.decode("utf-8", "ignore")[-200:]}')
 
 
 async def download_douyin_video(url: str, output_dir: Path, sio=None, job_id: str = '',
                                 max_seconds: Optional[int] = None) -> Tuple[str, str, str]:
-    """下载抖音视频（play_addr 直链 mp4）。
+    """下载抖音视频（play_addr 直链 mp4），与 download_video 同契约。
 
-    max_seconds>0 时用项目自带 ffmpeg 从直链截取开头 N 秒（字幕抽查场景）。
-    返回 (file_path, title, platform)，与 download_video 同契约。
+    max_seconds>0 时用项目自带 ffmpeg 截取开头 N 秒（字幕抽查场景）。
+    直链有时效：下载失败自动重新拉取 detail（绕过元数据缓存）换新直链重试一次。
+    返回 (file_path, title, platform)。
     """
-    from socket_handlers import emit_log, emit_progress
     from services.naming import safe_basename
 
-    await emit_progress(sio, job_id, 'download', 0, '正在解析抖音链接...')
+    await _progress(sio, job_id, 'download', 0, '正在解析抖音链接...')
+    meta = None
     try:
         meta = await fetch_video_meta(url)
     except DouyinError as e:
@@ -329,10 +400,10 @@ async def download_douyin_video(url: str, output_dir: Path, sio=None, job_id: st
 
     title = meta["title"]
     duration_s = meta["duration_ms"] / 1000
-    await emit_log(sio, job_id,
-                   f'平台: 抖音 | 作者: {meta["author"]}' if meta["author"] else '平台: 抖音')
-    await emit_log(sio, job_id, f'⬇️ 开始下载 | 平台: 抖音 | 标题: {title}'
-                   + (f' | 时长: {int(duration_s // 60):02d}:{int(duration_s % 60):02d}' if duration_s else ''))
+    await _log(sio, job_id,
+               f'平台: 抖音 | 作者: {meta["author"]}' if meta["author"] else '平台: 抖音')
+    await _log(sio, job_id, f'⬇️ 开始下载 | 平台: 抖音 | 标题: {title}'
+               + (f' | 时长: {int(duration_s // 60):02d}:{int(duration_s % 60):02d}' if duration_s else ''))
     if not meta["play_url"]:
         raise Exception('抖音未返回可下载的视频直链（可能为图文/直播等不支持类型）')
 
@@ -340,24 +411,47 @@ async def download_douyin_video(url: str, output_dir: Path, sio=None, job_id: st
     base = safe_basename(title)[:80] or meta["aweme_id"]
     dest = output_dir / f'{base}.mp4'
 
-    if max_seconds and max_seconds > 0 and _FFMPEG_BIN.exists():
-        # 抽查片段：ffmpeg 直读直链截取开头 N 秒，不付整段下载成本
-        await emit_log(sio, job_id, f'⬇️ 下载开头 {int(max_seconds)}s 片段（ffmpeg 直读直链）...')
-        cmd = [str(_FFMPEG_BIN), '-y', '-user_agent', _UA,
-               '-i', meta["play_url"], '-t', str(int(max_seconds)),
-               '-c', 'copy', str(dest)]
+    last_err: Optional[Exception] = None
+    for attempt in (1, 2):
+        if attempt == 2:
+            # 直链可能已过期：绕过缓存重拉 detail 换新直链
+            await _log(sio, job_id, '⚠ 抖音直链下载失败，重新解析换新直链重试...')
+            try:
+                meta = await fetch_video_meta(url, refresh=True)
+            except DouyinError as e:
+                raise Exception(f'抖音解析失败: {e}')
+            if not meta["play_url"]:
+                raise Exception('抖音未返回可下载的视频直链（可能为图文/直播等不支持类型）')
+        prog: dict = {'done': 0, 'total': 0}
+        try:
+            if max_seconds and max_seconds > 0 and _FFMPEG_BIN.exists():
+                await _log(sio, job_id, f'⬇️ 下载开头 {int(max_seconds)}s 片段（ffmpeg 直读直链）...')
+                await asyncio.to_thread(_download_via_ffmpeg_sync, meta["play_url"], dest, int(max_seconds))
+            else:
+                await _progress(sio, job_id, 'download', 15, '下载中（抖音）... 请稍候')
+                dl_task = asyncio.create_task(
+                    asyncio.to_thread(_stream_download_sync, meta["play_url"], dest, prog))
+                last_pct = 15
+                while not dl_task.done():
+                    await asyncio.sleep(2)
+                    if prog['total']:
+                        pct = 15 + int(prog['done'] / prog['total'] * 80)
+                        if pct != last_pct:
+                            last_pct = pct
+                            await _progress(sio, job_id, 'download', pct,
+                                            f'下载中（抖音）{prog["done"] / 1048576:.0f}MB'
+                                            + (f'/{prog["total"] / 1048576:.0f}MB' if prog['total'] else ''))
+                await dl_task  # 传播线程内异常
+            last_err = None
+            break
+        except (DouyinError, httpx.HTTPError, OSError, subprocess.TimeoutExpired) as e:
+            last_err = e
+            logger.warning(f'抖音直链下载失败（第{attempt}次）: {type(e).__name__}: {e}')
 
-        def _run_ffmpeg() -> None:
-            p = subprocess.run(cmd, capture_output=True, timeout=180)
-            if p.returncode != 0 or not dest.exists() or dest.stat().st_size < 1024:
-                raise DouyinError(f'ffmpeg 截取失败: {p.stderr.decode("utf-8", "ignore")[-200:]}')
-
-        await asyncio.to_thread(_run_ffmpeg)
-    else:
-        await emit_progress(sio, job_id, 'download', 15, '下载中（抖音）... 请稍候')
-        await asyncio.to_thread(_stream_download_sync, meta["play_url"], dest)
+    if last_err is not None:
+        raise Exception(f'抖音下载失败: {last_err}')
 
     size_mb = dest.stat().st_size / (1024 * 1024)
-    await emit_log(sio, job_id, f'✅ 下载完成 | 文件: {dest.name} | 大小: {size_mb:.1f} MB')
-    await emit_progress(sio, job_id, 'download', 100, f'下载完成！{dest.name} ({size_mb:.1f} MB)')
+    await _log(sio, job_id, f'✅ 下载完成 | 文件: {dest.name} | 大小: {size_mb:.1f} MB')
+    await _progress(sio, job_id, 'download', 100, f'下载完成！{dest.name} ({size_mb:.1f} MB)')
     return str(dest), title, '抖音'

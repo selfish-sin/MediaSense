@@ -196,3 +196,110 @@ class TestAbogusVendor:
         ab = ABogus(fp=fp, user_agent="Mozilla/5.0 test").generate_abogus("a=1&b=2", "")
         value = ab[0] if isinstance(ab, (list, tuple)) else ab
         assert value and isinstance(value, str)
+
+
+# ── 优化项：元数据缓存 / 下载重试 / 限流 / 裸短链 ──
+class TestMetaCache:
+    def setup_method(self):
+        from services.douyin import _META_CACHE
+        _META_CACHE.clear()
+
+    def test_second_call_hits_cache(self):
+        import services.douyin as dy
+        with patch.object(dy, "fetch_detail_sync", return_value={"desc": "x", "video": {}}) as fd:
+            m1 = dy.fetch_video_meta_sync("https://www.douyin.com/video/7345493142857338146")
+            m2 = dy.fetch_video_meta_sync("https://www.douyin.com/video/7345493142857338146")
+            assert fd.call_count == 1
+            assert m1 is m2
+
+    def test_refresh_bypasses_cache(self):
+        import services.douyin as dy
+        with patch.object(dy, "fetch_detail_sync", return_value={"desc": "x", "video": {}}) as fd:
+            dy.fetch_video_meta_sync("https://www.douyin.com/video/7345493142857338146")
+            dy.fetch_video_meta_sync("https://www.douyin.com/video/7345493142857338146", refresh=True)
+            assert fd.call_count == 2
+
+    def test_expired_cache_refetches(self):
+        import services.douyin as dy
+        from services.douyin import _META_CACHE
+        _META_CACHE["7345493142857338146"] = (dy.time.monotonic() - 10_000, {"aweme_id": "stale"})
+        with patch.object(dy, "fetch_detail_sync", return_value={"desc": "fresh", "video": {}}):
+            m = dy.fetch_video_meta_sync("https://www.douyin.com/video/7345493142857338146")
+            assert m["title"] == "fresh"
+
+
+class TestThrottle:
+    def test_min_interval_enforced(self):
+        import services.douyin as dy
+        sleeps = []
+        fake_now = [100.0]
+
+        def fake_monotonic():
+            return fake_now[0]
+
+        def fake_sleep(s):
+            sleeps.append(s)
+            fake_now[0] += s
+
+        dy._last_api_ts[0] = 0.0
+        with patch.object(dy.time, "monotonic", fake_monotonic), \
+             patch.object(dy.time, "sleep", fake_sleep):
+            dy._throttle_douyin_api()   # 首次不等待
+            dy._throttle_douyin_api()   # 紧接着第二次 → 等 1s
+        assert sleeps == [dy._API_MIN_INTERVAL]
+        dy._last_api_ts[0] = 0.0
+
+
+class TestBareShortLink:
+    def test_schemeless_short_link(self):
+        with patch("services.douyin._expand_short_link_sync",
+                   return_value="https://www.iesdouyin.com/share/video/6914948781100338440/?region=CN"):
+            assert extract_aweme_id_sync("v.douyin.com/L4NpDJ6") == "6914948781100338440"
+
+
+@pytest.mark.asyncio
+class TestDownloadRetry:
+    async def test_stale_url_retried_with_fresh_meta(self, tmp_path):
+        """直链过期（首次下载抛 DouyinError）→ 绕缓存重拉 detail 换新直链重试一次"""
+        import services.douyin as dy
+
+        meta = {"aweme_id": "123", "title": "测试视频", "author": "跃说中医",
+                "duration_ms": 588603, "play_url": "http://cdn/x.mp4", "captions": []}
+        calls = {"dl": 0}
+
+        async def fake_meta(url, refresh=False):
+            assert refresh is (calls["dl"] == 1)  # 第二次必须绕缓存
+            return meta
+
+        def fake_dl(play_url, dest, prog=None):
+            calls["dl"] += 1
+            if calls["dl"] == 1:
+                raise DouyinError("HTTP 403")
+            dest.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"0" * 2048)
+
+        with patch.object(dy, "fetch_video_meta", side_effect=fake_meta), \
+             patch.object(dy, "_stream_download_sync", side_effect=fake_dl):
+            path, title, platform = await dy.download_douyin_video(
+                "https://www.douyin.com/video/7345493142857338146", tmp_path)
+        assert calls["dl"] == 2
+        assert platform == "抖音" and title == "测试视频"
+        assert path.endswith(".mp4")
+
+    async def test_both_attempts_fail_raises(self, tmp_path):
+        import services.douyin as dy
+
+        meta = {"aweme_id": "123", "title": "测试视频", "author": "",
+                "duration_ms": 0, "play_url": "http://cdn/x.mp4", "captions": []}
+
+        async def fake_meta(url, refresh=False):
+            return meta
+
+        def fake_dl(play_url, dest, prog=None):
+            raise DouyinError("HTTP 403")
+
+        with patch.object(dy, "fetch_video_meta", side_effect=fake_meta), \
+             patch.object(dy, "_stream_download_sync", side_effect=fake_dl):
+            with pytest.raises(Exception) as ei:
+                await dy.download_douyin_video(
+                    "https://www.douyin.com/video/7345493142857338146", tmp_path)
+        assert "抖音下载失败" in str(ei.value)

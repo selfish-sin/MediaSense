@@ -481,7 +481,7 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
     from services.transcriber import transcribe_audio, engine_label
     from services.downloader import (
         download_video, extract_bilibili_subtitles, verify_subtitle_against_audio,
-        detect_platform, extract_youtube_subtitles,
+        detect_platform, extract_youtube_subtitles, sanitize_input_url,
     )
     from services.douyin import (
         is_douyin_url, extract_douyin_subtitles, download_douyin_video,
@@ -574,6 +574,9 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
     if is_douyin and force_transcribe:
         await emit_log(sio, job_id, f'🔧 已开启「强制转录」，跳过抖音AI字幕提取，直接下载音频转录（{_engine_desc}）')
     elif is_douyin:
+        # ★ 安全清洗（剥包裹/截断片段/裸 v.douyin.com 短链补全）——批量入口已做，
+        #   单任务 URL 此前只在 yt-dlp 路径内部清洗，抖音分支必须提前拿到干净 URL
+        input_url = sanitize_input_url(input_url)
         await emit_log(sio, job_id, '📄 检测到抖音视频，尝试提取AI字幕（游客接口）...')
         sub_result = await extract_douyin_subtitles(input_url, job_dir, sio, job_id)
         if sub_result.get('success'):
