@@ -955,19 +955,15 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
         #   校正后原 txt 备份为 .raw.txt，srt 不动（字数变化会破坏时间戳对齐）
         ai_correct = options.get('ai_correct', False)
         if ai_correct and txt_path and Path(txt_path).exists():
-            from services.ai_processor import correct_transcript_with_fallback, CORRECTION_MAX_FALLBACKS
-            from db.model_repo import get_all_models, get_default_correct_model_key
+            from services.ai_processor import correct_transcript_with_fallback
+            from db.model_repo import get_default_correct_model_key
             # 校正模型解析链：任务选项指定 → DB 校正默认（商汤 glm-5.2）→ 总结主模型
             correct_model = options.get('ai_correct_model') or get_default_correct_model_key() or model
             # 校正领域模板：default=通用 / tcm=中医（未知值由 correct_transcript 回退 default）
             correct_domain = options.get('ai_correct_domain') or 'default'
-            # 自动换模型候选：其余已配置模型（剔除密钥缺失/被星号污染的），按创建顺序
-            fallback_models = [
-                m['key'] for m in get_all_models()
-                if m['key'] != correct_model
-                and (m.get('api_key') or '').strip()
-                and '****' not in (m.get('api_key') or '')
-            ]
+            # ★ 不再在此处自造候选列表（2026-10-05）：候选统一由
+            #   db.model_repo.resolve_ai_candidates 解析（本次模型 + 用户配置的兜底环），
+            #   四个 AI 入口共用一条环，避免"校正一套、总结另一套"的行为分叉。
             try:
                 raw_text = await _read_text(txt_path)
                 if raw_text.strip():
@@ -979,8 +975,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
 
                     corrected, c_in, c_out, corr_stats, used_model = await correct_transcript_with_fallback(
                         raw_text, model=correct_model, sio=sio, job_id=job_id,
-                        domain=correct_domain, fallback_models=fallback_models,
-                        max_fallbacks=CORRECTION_MAX_FALLBACKS,
+                        domain=correct_domain,
                     )
                     # 写回 txt（校正后）
                     with open(txt_path, 'w', encoding='utf-8') as f:
@@ -1142,14 +1137,22 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                     timeout=3600.0,
                 )
             else:
+                # ctx 收实际 AI 调用链：兜底环换过模型时，任务结果里能看到"这次实际调了谁"
+                ai_ctx: dict = {}
                 result_text, in_tok, out_tok = await asyncio.wait_for(
                     ai_process(
                         text_content, summary_type=summary_type, model=model,
                         sio=sio, job_id=job_id, summary_options=summary_options,
-                        dimensions=dimensions,
+                        dimensions=dimensions, ctx=ai_ctx,
                     ),
                     timeout=1800.0,
                 )
+                if ai_ctx.get('call_chain'):
+                    result['ai_call_chain'] = ai_ctx['call_chain']
+                    # 落库：兜底环换过模型时，结果页要能看到"这次实际调了谁、哪个挂了"。
+                    # 有换模型（>1 次尝试）才存，单次成功没有展示价值。
+                    if len(ai_ctx['call_chain']) > 1:
+                        update_job(job_id, ai_call_chain=ai_ctx['call_chain'])
 
             # ★ 契约检查：AI 层失败时返回哨兵串（[处理失败: ...]）而非抛异常，
             #   若不拦截会被当作正常结果写盘并标记 success=True，用户看到的“总结”其实是错误。

@@ -235,6 +235,14 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
+    # ★ AI 调用链字段（迁移：旧 jobs 表没有，2026-10-05 兜底环）
+    #   JSON：[{model, ok, reason}, ...] —— 每次尝试的模型/成败/真实原因。
+    #   兜底环最怕"配了却看不见有没有用"，结果页据此展示实际调用链。
+    try:
+        cursor.execute("ALTER TABLE jobs ADD COLUMN ai_call_chain TEXT")
+    except sqlite3.OperationalError:
+        pass
+
     # ★ 模块化提示词覆盖表（TemplatesView 编辑器写入）
     #   用户可覆盖任意维度任意模块的 template 文本，build_modular_prompt 优先读取
     cursor.execute("""

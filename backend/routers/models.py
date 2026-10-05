@@ -4,13 +4,14 @@ YouTube Tool V2 - AI模型管理路由
 import json
 import logging
 import os
+import re
 import ssl
 import time
 import httpx
 from fastapi import APIRouter, HTTPException
 
 from models.schemas import ModelConfigCreate, ModelConfigResponse, ModelTestRequest, ModelTestResponse
-from db.model_repo import get_all_models, get_model_by_key, add_model, update_model, delete_model, get_default_model_key, set_default_model, get_default_correct_model_key, set_default_correct_model
+from db.model_repo import get_all_models, get_model_by_key, add_model, update_model, delete_model, get_default_model_key, set_default_model, get_default_correct_model_key, set_default_correct_model, get_fallback_chain, set_fallback_chain
 from services.httpx_errors import describe_http_response
 
 logger = logging.getLogger(__name__)
@@ -49,20 +50,26 @@ def _client_verify(model_cfg: dict) -> bool:
 
 
 def _normalize_endpoint(endpoint: str) -> str:
-    """OpenAI 兼容端点补全：统一规范化为 /v1/chat/completions（幂等）。
+    """OpenAI 兼容端点补全：规范化为 <base>/chat/completions（幂等）。
 
-    用户手填的格式一般不带 /v1（如 api.deepseek.com/chat/completions），
-    自动补全时统一加回 /v1；已含 /v1/chat/completions 的完整端点原样保留。
+    ★ 2026-10-05 修正：原来**无条件**插 /v1，会把自带非 v1 版本段的端点改废——
+      火山方舟 https://ark.cn-beijing.volces.com/api/v3        → .../api/v3/v1/chat/completions（404）
+      智谱 GLM https://open.bigmodel.cn/api/paas/v4             → .../api/paas/v4/v1/chat/completions（404）
+      连 app 自带的「智谱 GLM」快捷模板都是坏的。
+      现在规则是：**base 结尾已有版本段（/v1 /v3 /v4 …）就沿用它，不插 /v1**；
+      没有版本段时才按 OpenAI 惯例补 /v1（api.deepseek.com → /v1/chat/completions）。
     """
     url = (endpoint or '').strip().rstrip('/')
     if not url:
         return url
-    if '/chat/completions' in url:
-        if '/v1/chat/completions' in url:
-            return url
-        return url.replace('/chat/completions', '/v1/chat/completions')
-    url = url[:-3] if url.endswith('/v1') else url
-    return url + '/v1/chat/completions'
+    if url.endswith('/chat/completions'):
+        base = url[:-len('/chat/completions')].rstrip('/')
+    else:
+        base = url[:-3].rstrip('/') if url.endswith('/v1') else url
+    # base 结尾已是版本段 → 沿用；否则按 OpenAI 惯例补 v1
+    if re.search(r'/v\d+[a-z0-9._-]*$', base, re.IGNORECASE):
+        return base + '/chat/completions'
+    return base + '/v1/chat/completions'
 
 
 @router.get("")
@@ -98,6 +105,32 @@ async def set_default_model_api(body: dict):
     if not set_default_model(key):
         raise HTTPException(status_code=404, detail=f"模型 {key} 不存在")
     return {"success": True, "scope": "summary", "default": key, "message": f"默认模型已设为 {key}"}
+
+
+@router.get("/fallback-chain")
+async def get_fallback_chain_api():
+    """获取 AI 调用兜底环配置（enabled + 有序候选）。用 GET 而非 /{key} 分支，语义更准。"""
+    return get_fallback_chain()
+
+
+@router.post("/fallback-chain")
+async def set_fallback_chain_api(body: dict):
+    """保存 AI 调用兜底环。
+
+    body: {chain: [key, ...], enabled: bool}；chain 的**顺序即优先级**。
+    故意用 POST 而非 PUT：本路由存在 `PUT /{key}`，子路径会被其吞掉，
+    POST 与既有 `POST /default`、`POST /test` 同一约定，天然无此冲突。
+    不设条数上限；模型不存在/重复/等于当前默认模型的项在 repo 层剔除。
+    """
+    body = body or {}
+    chain = body.get('chain')
+    if not isinstance(chain, list):
+        raise HTTPException(status_code=400, detail="chain 必须是模型 key 数组")
+    if not set_fallback_chain(chain, enabled=bool(body.get('enabled', True))):
+        raise HTTPException(status_code=500, detail="保存兜底环失败，请查看后端日志")
+    cfg = get_fallback_chain()
+    return {"success": True, **cfg,
+            "message": f"兜底环已保存（{len(cfg['chain'])} 个候选）"}
 
 
 @router.post("")

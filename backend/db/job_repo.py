@@ -336,7 +336,7 @@ def update_job(job_id: str, **kwargs) -> bool:
         fields = []
         values = []
         for key, value in kwargs.items():
-            if key in ('options', 'files', 'tags', 'token_usage', 'correction_stats'):
+            if key in ('options', 'files', 'tags', 'token_usage', 'correction_stats', 'ai_call_chain'):
                 # JSON 字段需要序列化
                 value = json.dumps(value, ensure_ascii=False)
             fields.append(f"{key} = ?")
@@ -506,7 +506,9 @@ def _row_to_dict(row) -> Dict[str, Any]:
     """将 sqlite3.Row 转为 dict，JSON字段自动反序列化，时间字段转 ISO 8601"""
     d = dict(row)
     # 反序列化 JSON 字段
-    json_fields = ('options', 'files', 'tags', 'token_usage', 'correction_stats')
+    # ★ ai_call_chain 必须在列内：update_job 把它 JSON 序列化了，这里不反序列化的话
+    #   结果页拿到的就是一坨字符串而不是数组（首页走 socket 不受影响，掩盖了这个洞）。
+    json_fields = ('options', 'files', 'tags', 'token_usage', 'correction_stats', 'ai_call_chain')
     for field in json_fields:
         value = d.get(field)
         if value and isinstance(value, str):

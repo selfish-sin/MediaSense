@@ -61,6 +61,10 @@ class JobResponse(BaseModel):
     progress_msg: Optional[str] = None
     preview_text: Optional[str] = None
     error: Optional[str] = None
+    # ★ 这两个字段落库时是 JSON，但 pydantic 默认丢弃未声明字段。
+    #   不声明的话结果页的「校正统计」告警/改动明细和「AI 调用链」会永远空白。
+    correction_stats: Optional[Dict[str, Any]] = None
+    ai_call_chain: Optional[List[Dict[str, Any]]] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 

@@ -1243,6 +1243,66 @@
         }
       }
     },
+    "/api/models/fallback-chain": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Get Fallback Chain Api",
+        "description": "获取 AI 调用兜底环配置（enabled + 有序候选）。用 GET 而非 /{key} 分支，语义更准。",
+        "operationId": "get_fallback_chain_api_api_models_fallback_chain_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Set Fallback Chain Api",
+        "description": "保存 AI 调用兜底环。\n\nbody: {chain: [key, ...], enabled: bool}；chain 的**顺序即优先级**。\n故意用 POST 而非 PUT：本路由存在 `PUT /{key}`，子路径会被其吞掉，\nPOST 与既有 `POST /default`、`POST /test` 同一约定，天然无此冲突。\n不设条数上限；模型不存在/重复/等于当前默认模型的项在 repo 层剔除。",
+        "operationId": "set_fallback_chain_api_api_models_fallback_chain_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Body"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/models/{key}": {
       "delete": {
         "tags": [
@@ -4301,6 +4361,33 @@
               }
             ],
             "title": "Error"
+          },
+          "correction_stats": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Correction Stats"
+          },
+          "ai_call_chain": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ai Call Chain"
           },
           "created_at": {
             "anyOf": [

@@ -469,3 +469,69 @@ class TestNowUtcIso:
         assert "T" in iso
         assert "Z" in iso
         assert len(iso) == 20
+
+
+# ── JSON 字段往返（回归：2026-10-05 修）────────────────────────────────
+# 背景：update_job 会把 JSON 字段序列化成字符串存库，_row_to_dict 负责反序列化。
+#       ai_call_chain / correction_stats 一旦漏在 json_fields 之外，get_job 返回的就是
+#       裸字符串；而 JobResponse 也没声明这两个字段，pydantic 会直接丢弃它们。
+#       两条链路任一断掉，结果页就是永久空白——首页走 socket 反而看不出来。
+class TestJsonFieldRoundTrip:
+    def test_ai_call_chain_reads_back_as_list(self):
+        jid = create_job(input_type='file', input_file='a.mp3')
+        chain = [
+            {'model': 'bad-model', 'ok': False, 'reason': '连接断开'},
+            {'model': 'good-model', 'ok': True, 'reason': ''},
+        ]
+        assert update_job(jid, ai_call_chain=chain)
+        got = get_job(jid)['ai_call_chain']
+        assert isinstance(got, list), 'ai_call_chain 必须反序列化成 list，不能是 JSON 字符串'
+        assert got == chain
+
+    def test_correction_stats_reads_back_as_dict(self):
+        jid = create_job(input_type='file', input_file='a.mp3')
+        stats = {
+            'total_chunks': 5, 'changed_count': 2, 'failed_chunks': 0,
+            'integrity_warnings': 1, 'length_warnings': 0,
+            'changed_lines': [{'ts': '00:01', 'before': 'a', 'after': 'b'}],
+        }
+        assert update_job(jid, correction_stats=stats)
+        got = get_job(jid)['correction_stats']
+        assert isinstance(got, dict), 'correction_stats 必须反序列化成 dict'
+        assert got['total_chunks'] == 5
+        assert got['changed_lines'][0]['after'] == 'b'
+
+    def test_json_fields_survive_multiple_updates(self):
+        """二次更新不能把上一轮的调用链冲掉成字符串或 None"""
+        jid = create_job(input_type='file', input_file='a.mp3')
+        update_job(jid, ai_call_chain=[{'model': 'm1', 'ok': False, 'reason': 'x'}])
+        update_job(jid, status='completed')
+        got = get_job(jid)['ai_call_chain']
+        assert isinstance(got, list) and got[0]['model'] == 'm1'
+
+    def test_null_json_field_stays_none(self):
+        jid = create_job(input_type='file', input_file='a.mp3')
+        assert get_job(jid)['ai_call_chain'] is None
+
+
+# ── JobResponse 契约（回归：2026-10-05 修）──────────────────────────────
+# pydantic v2 默认丢弃未声明字段。不声明 = 落库再正确也传不到前端。
+class TestJobResponseCarriesJsonFields:
+    def _resp(self, **over):
+        from models.schemas import JobResponse
+        base = dict(id='j1', status='failed')
+        base.update(over)
+        return JobResponse(**base)
+
+    def test_ai_call_chain_survives_schema(self):
+        chain = [{'model': 'm1', 'ok': False, 'reason': 'HTTP 402'}]
+        assert self._resp(ai_call_chain=chain).ai_call_chain == chain
+
+    def test_correction_stats_survives_schema(self):
+        stats = {'total_chunks': 3, 'failed_chunks': 1}
+        assert self._resp(correction_stats=stats).correction_stats == stats
+
+    def test_both_default_to_none_when_absent(self):
+        r = self._resp()
+        assert r.ai_call_chain is None
+        assert r.correction_stats is None

@@ -64,11 +64,21 @@ async def _call_ai(
     round_label: str = '',
     final: bool = True,
     max_retries: int = 3,
+    state: Optional[dict] = None,
 ) -> Tuple[str, int, int]:
     """单次AI调用（支持流式输出+批量推送+断连重试），返回(content, input_tokens, output_tokens)
     
     max_retries: 流式断连时最大重试次数（指数退避: 2s → 4s → 8s）
+
+    ★ state（可选出参，2026-10-05）：调用方传入可变 dict，本函数回填
+      - state['emitted']: 本次调用是否已经向前端推送过正文 token
+      - state['content']: 成功时的完整正文
+      兜底编排（_call_ai_with_fallback）据此执行"只在一字未吐时才换模型"——
+      已经吐字再换模型会让前端出现「A 的半截 + B 的完整」的混血文档。
     """
+    if state is not None:
+        state['emitted'] = False
+        state['content'] = ''
     headers = _build_headers(model_cfg)
     payload = {
         "model": model_cfg.get('model_id', model_cfg.get('key', DEFAULT_MODEL)),
@@ -128,6 +138,8 @@ async def _call_ai(
                             if text_piece:
                                 content_parts.append(text_piece)
                                 token_count += 1
+                                if state is not None:
+                                    state['emitted'] = True
                                 # ★ 每 20 个 token 检查一次取消标记（避免高频检查影响性能）
                                 if token_count % 20 == 0:
                                     _check_cancelled(job_id)
@@ -181,6 +193,16 @@ async def _call_ai(
                 return '[处理失败: 超时]', 0, 0
             except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.ReadTimeout, ConnectionError) as e:
                 last_error = e
+                # ★ 已吐字就不再重试（2026-10-05）：重试会从头再流一遍，
+                #   而第一遍的半截已经推给前端了 → 前端变成「断连前的半截 + 重试的完整」，
+                #   一份文档里混了两次生成的文本。宁可失败让用户重试，也不产出混血文档。
+                #   零输出时（连接握手就断了）重试/换模型才是安全的。
+                if state is not None and state.get('emitted'):
+                    logger.error(f'AI流式在已输出 {token_count} token 后断开，放弃重试: {e}')
+                    if sio:
+                        from socket_handlers import emit_log
+                        await emit_log(sio, job_id, f'❌ AI连接中断（已输出部分内容，不再重试以免内容重复）: {e}')
+                    return '[处理失败: 连接中断（已输出部分内容）]', 0, 0
                 if retry < max_retries:
                     wait = 2 ** retry  # 1, 2, 4 (retry 0: 1s, retry 1: 2s, retry 2: 4s)
                     logger.warning(f'AI流式断连，{wait}s后重试 ({retry+1}/{max_retries}): {e}')
@@ -217,7 +239,8 @@ async def _call_ai(
                 return f'[处理失败: {e}]', 0, 0
 
         content = ''.join(content_parts)
-
+        if state is not None:
+            state['content'] = content
 
         # 如果 usage 没拿到，估算
         if not out_tok:
@@ -250,6 +273,125 @@ async def _call_ai(
         return f'[处理失败: {e}]', 0, 0
 
 
+# ============ 兜底编排（2026-10-05）============
+# 失败哨兵：_call_ai 全失败路径都返回 '[处理失败: ...]' 字符串而非抛异常（既有契约，
+# main.py 靠它把"AI 失败"路由成任务失败而不是把错误当总结写盘）。这里集中判定，避免各处 startswith 漏改。
+_FAIL_SENTINEL = '[处理失败'
+
+
+def is_call_failed(content: str) -> bool:
+    """AI 调用是否以失败哨兵结束。"""
+    return isinstance(content, str) and content.lstrip().startswith(_FAIL_SENTINEL)
+
+
+def _strip_sentinel(content: str) -> str:
+    """失败哨兵里的原因（供调用链展示），非失败则原样返回。"""
+    if not is_call_failed(content):
+        return content
+    reason = content.lstrip()[len(_FAIL_SENTINEL):].strip().lstrip(':： ').strip()
+    return reason.rstrip(']').strip() or '未知原因'
+
+
+async def _call_ai_with_fallback(
+    model: str,
+    prompt: str,
+    timeout: float = 120.0,
+    sio=None,
+    job_id: str = '',
+    round_label: str = '',
+    final: bool = True,
+    max_retries: int = 3,
+    call_chain: Optional[list] = None,
+) -> Tuple[str, int, int, str]:
+    """流式 AI 调用 + 兜底环编排。返回 (content, in_tok, out_tok, 实际使用的模型 key)。
+
+    换模型规则（**只在一字未吐时才换**）：
+    - 候选顺序 = [本次所选模型] + 兜底环其余模型（model_repo.resolve_ai_candidates 单点）
+    - 触发条件：本次调用返回失败哨兵
+    - **已向前端吐过字 → 绝不换模型**：换过去会变成「A 的半截 + B 的完整」混血文档，
+      对术语准确性要求高的场景是净损害。此时直接返回失败，让用户显式重试。
+    - 零输出时换模型是安全的：最常见的失败（503 账号池耗尽 / 429 / 鉴权 / 端点错）
+      都是请求一进去就被拒、根本没开始流。
+    - 每个候选只试一次，不回头（见 model_repo.resolve_ai_candidates 的语义说明）。
+    - 用户取消直接上抛，绝不换模型。
+
+    call_chain（可选 list）：每次尝试都追加 {model, ok, reason}，供任务结果展示实际调用链。
+    """
+    from db.model_repo import resolve_ai_candidates
+
+    candidates = resolve_ai_candidates(model)
+    if len(candidates) > 1:
+        logger.info(f'[{job_id}] 兜底环生效，候选顺序: {candidates}')
+
+    content, in_tok, out_tok = '', 0, 0
+    used = candidates[0]
+    # 失败原因**独立于 call_chain 累积**：call_chain 是可选出参，不传时
+    # 真实原因不能跟着丢（否则上层只拿到"全部失败"而看不到"为什么"）。
+    failures: list = []
+
+    for idx, cand in enumerate(candidates):
+        if idx > 0:
+            # 换模型决策同时落盘（logger）与推送（socket）：纯 socket 日志服务端排障时不可见
+            logger.info(f'[{job_id}] 换模型重试（候选 {idx + 1}/{len(candidates)}）：{cand}')
+            if sio:
+                from socket_handlers import emit_log
+                await emit_log(sio, job_id, f'🔄 自动换模型重试（候选 {idx + 1}/{len(candidates)}）：{cand}')
+
+        model_cfg = get_model_by_key(cand)
+        if not model_cfg:
+            reason = f'模型 {cand} 不存在'
+            logger.warning(f'[{job_id}] {reason}')
+            failures.append((cand, reason))
+            if call_chain is not None:
+                call_chain.append({'model': cand, 'ok': False, 'reason': reason})
+            continue
+
+        state: dict = {}
+        try:
+            content, in_tok, out_tok = await _call_ai(
+                model_cfg, prompt, timeout=timeout, sio=sio, job_id=job_id,
+                round_label=round_label, final=final, max_retries=max_retries,
+                state=state,
+            )
+        except TaskCancelledError:
+            # 用户取消：绝不换模型重试
+            failures.append((cand, '用户取消'))
+            if call_chain is not None:
+                call_chain.append({'model': cand, 'ok': False, 'reason': '用户取消'})
+            raise
+
+        if not is_call_failed(content):
+            used = cand
+            if call_chain is not None:
+                call_chain.append({'model': cand, 'ok': True, 'reason': ''})
+            if idx > 0 and sio:
+                from socket_handlers import emit_log
+                await emit_log(sio, job_id, f'✅ 已自动切换到模型 {cand} 完成')
+            return content, in_tok, out_tok, used
+
+        reason = _strip_sentinel(content)
+        failures.append((cand, reason))
+        if call_chain is not None:
+            call_chain.append({'model': cand, 'ok': False, 'reason': reason})
+
+        if state.get('emitted'):
+            # 已吐字：换模型会造成内容混血，放弃兜底
+            logger.warning(f'[{job_id}] 模型 {cand} 在已输出内容后失败，不再换模型: {reason}')
+            return content, in_tok, out_tok, cand
+        if idx == len(candidates) - 1:
+            break
+        content, in_tok, out_tok = '', 0, 0
+
+    tried = '、'.join(c for c in candidates)
+    # 汇总所有候选的失败原因：调用方（打标签/结果页）要看到真实原因而非只有状态码
+    joined = '；'.join(f'{k}: {why}' for k, why in failures) or '未知原因'
+    if sio:
+        from socket_handlers import emit_log
+        await emit_log(sio, job_id, f'❌ 兜底环内所有候选模型均失败（已尝试: {tried}）')
+        await emit_log(sio, job_id, f'   失败原因：{joined}')
+    return f'[处理失败: 兜底环内全部模型失败（{tried}）——{joined}]', in_tok, out_tok, used
+
+
 # ============ 标准 AI 处理 ============
 async def ai_process(
     text: str,
@@ -260,6 +402,7 @@ async def ai_process(
     job_id: str = '',
     summary_options: Optional[Dict[str, Any]] = None,
     dimensions: Optional[Dict[str, str]] = None,
+    ctx: Optional[dict] = None,
 ) -> Tuple[str, int, int]:
     """
     标准单轮/分批AI处理
@@ -268,6 +411,9 @@ async def ai_process(
     支持两种提示词模式：
     1. 模块化（推荐）：传入 dimensions 字典（7维），由 prompt_builder 拼装
     2. 回退：使用 summary_type 查找 SUMMARY_PROMPTS（保留兼容）
+
+    ★ ctx（可选出参，2026-10-05）：传入可变 dict，回填 ctx['call_chain']
+      = 实际 AI 调用链（每次尝试的模型/成败/原因），供任务结果展示。
     """
     model_cfg = get_model_by_key(model) or get_model_by_key(DEFAULT_MODEL)
     if not model_cfg:
@@ -357,6 +503,10 @@ async def ai_process(
     results = []
     total_in = 0
     total_out = 0
+    # ★ 跨批次记忆：某批次在环上换到了 cand 并成功，后续批次直接从 cand 起步
+    #   （否则每批都从环头开始重试一遍已失效的模型，兜底环反而拖慢任务）
+    preferred_model = model
+    call_chain: list = []
 
     for i, chunk in enumerate(chunks):
         # ★ 每批开始前检查取消标记
@@ -382,10 +532,14 @@ async def ai_process(
         else:
             chunk_prompt = prompt
 
-        content, in_tok, out_tok = await _call_ai(
-            model_cfg, chunk_prompt, timeout=120.0,
-            sio=sio, job_id=job_id, round_label=f'批次 {i+1}/{len(chunks)}', final=False
+        content, in_tok, out_tok, used_model = await _call_ai_with_fallback(
+            preferred_model, chunk_prompt, timeout=120.0,
+            sio=sio, job_id=job_id, round_label=f'批次 {i+1}/{len(chunks)}', final=False,
+            call_chain=call_chain,
         )
+        # 本批成功后记住它（失败的批不记忆，否则会把"已失效"传染给后续批次）
+        if not is_call_failed(content):
+            preferred_model = used_model
         results.append(content)
         total_in += in_tok
         total_out += out_tok
@@ -406,6 +560,12 @@ async def ai_process(
 
     # 更新Token统计到数据库
     _record_token_usage(model, total_in, total_out, job_id)
+
+    # ★ 回传实际调用链：ctx['call_chain'] = [{model, ok, reason}, ...]
+    #   main.py 存进任务结果，前端展示"这次实际调了谁、哪个挂了"——
+    #   兜底链最怕的就是配了却看不见有没有用。
+    if isinstance(ctx, dict):
+        ctx['call_chain'] = call_chain
 
     return full_result, total_in, total_out
 
@@ -678,8 +838,9 @@ async def correct_transcript(
     return full_corrected, total_in, total_out, stats
 
 
-# 校正失败自动换模型：最多再试 max_fallbacks 个备选，防大量失效模型无限拖长任务
-CORRECTION_MAX_FALLBACKS = 3
+# 校正失败自动换模型：候选由 db.model_repo.resolve_ai_candidates 统一解析（本次模型 + 兜底环）
+# CORRECTION_MAX_FALLBACKS 历史常量已随兜底环改造废弃（2026-10-05）——不再由校正路径自带
+# 独立的隐式候选与条数上限，四个 AI 入口共用同一条环。
 
 
 async def correct_transcript_with_fallback(
@@ -689,9 +850,15 @@ async def correct_transcript_with_fallback(
     job_id: str = '',
     domain: str = 'default',
     fallback_models: Optional[List[str]] = None,
-    max_fallbacks: int = CORRECTION_MAX_FALLBACKS,
+    max_fallbacks: Optional[int] = None,
 ) -> Tuple[str, int, int, dict, str]:
     """correct_transcript 的多模型兜底包装：所选模型不可用时自动换下一个候选。
+
+    ★ 2026-10-05 候选来源改为**统一兜底环**（db.model_repo.resolve_ai_candidates）：
+      校正不再用"其余全部有密钥的模型"这套隐式候选，也不再自带条数上限，
+      四个 AI 入口（总结/校正/打标签/思维导图）共用同一条用户可排序的环。
+      fallback_models / max_fallbacks 保留为**可选覆盖**（仅测试与临时编排用），
+      两者都为 None 时走兜底环；显式传入时以传入为准。
 
     模型"不可用"判定（满足其一即换模型重试）：
     - 调用抛异常（端点/密钥/模型不存在等）；
@@ -703,7 +870,13 @@ async def correct_transcript_with_fallback(
     返回 (校正后文本, input_tokens, output_tokens, stats, 实际使用的模型 key)。
     所有候选都不可用时抛出异常（由调用方按"校正失败不影响主流程"兜底）。
     """
-    candidates = [model] + [k for k in (fallback_models or []) if k != model][:max_fallbacks]
+    if fallback_models is None:
+        from db.model_repo import resolve_ai_candidates
+        candidates = resolve_ai_candidates(model)
+    else:
+        candidates = [model] + [k for k in fallback_models if k != model]
+        if max_fallbacks is not None:
+            candidates = candidates[:max_fallbacks + 1]
     last_error: Optional[Exception] = None
 
     for idx, cand in enumerate(candidates):
@@ -745,6 +918,100 @@ async def correct_transcript_with_fallback(
     raise Exception(f'所有候选模型均无法完成校正（尝试: {"、".join(candidates)}）；最后原因: {last_error}')
 
 
+# ============ 非流式 AI 调用（2026-10-05）============
+async def _post_chat_once(
+    model_cfg: Dict[str, Any],
+    payload: dict,
+    timeout: float,
+) -> Tuple[str, int, int]:
+    """单次非流式 chat/completions，返回 (content, in_tok, out_tok)。
+
+    与 _call_ai 的差别：**失败一律抛异常**（不返回哨兵串）。非流式路径（打标签、
+    思维导图）的调用方本来就把失败转成"这一项没产出"，由编排层决定换不换模型，
+    这里再套一层哨兵只会让真���原因被 startswith 匹配反复误判。
+    """
+    import httpx as _httpx
+    headers = _build_headers(model_cfg)
+    async with _httpx.AsyncClient(timeout=timeout, verify=_client_verify(model_cfg)) as client:
+        resp = await client.post(model_cfg['endpoint'], headers=headers, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+        # 链式安全取值：中转/推理类模型可能 200 但没有 content 字段（实测 2026-10-05）
+        content = (data.get('choices') or [{}])[0].get('message', {}).get('content', '')
+        usage = data.get('usage') or {}
+        return content or '', usage.get('prompt_tokens', 0), usage.get('completion_tokens', 0)
+
+
+async def run_with_fallback(
+    model: str,
+    step_name: str,
+    timeout: float,
+    build_payload: Any,
+    sio=None,
+    job_id: str = '',
+    call_chain: Optional[list] = None,
+    on_success: Optional[Any] = None,
+):
+    """非流式 AI 步骤的统一兜底编排：依次试候选模型，异常即换下一个。
+
+    与流式的区别：这里**没有"已吐字"约束**——非流式要么整段拿到、要么什么都没拿到，
+    换模型永远是安全的（这是打标签/思维导图能放心兜底的前提）。
+
+    build_payload(model_cfg) -> payload：按候选模型配置拼请求体。
+    on_success(content, model_key, in_tok, out_tok) -> Any：成功后的处理与返回值。
+    返回 on_success 的结果；全部候选失败则抛出最后一个异常。
+    """
+    from db.model_repo import resolve_ai_candidates
+
+    candidates = resolve_ai_candidates(model)
+    if len(candidates) > 1:
+        logger.info(f'[{job_id}] {step_name} 兜底环生效，候选顺序: {candidates}')
+
+    last_error: Optional[Exception] = None
+    last_detail: str = ''
+    for idx, cand in enumerate(candidates):
+        model_cfg = get_model_by_key(cand)
+        if not model_cfg:
+            last_error = Exception(f'模型 {cand} 不存在')
+            last_detail = '模型不存在'
+            if call_chain is not None:
+                call_chain.append({'model': cand, 'ok': False, 'reason': last_detail})
+            continue
+        if idx > 0:
+            logger.info(f'[{job_id}] {step_name} 换模型重试（候选 {idx + 1}/{len(candidates)}）：{cand}')
+            if sio:
+                from socket_handlers import emit_log
+                await emit_log(sio, job_id, f'🔄 {step_name}自动换模型重试（候选 {idx + 1}/{len(candidates)}）：{cand}')
+        try:
+            content, in_tok, out_tok = await _post_chat_once(
+                model_cfg, build_payload(model_cfg), timeout
+            )
+        except TaskCancelledError:
+            raise
+        except Exception as e:
+            last_error = e
+            # ★ 存**人话版**原因而不是原始异常：原始 httpx 异常 str() 只会得到
+            #   "403 Forbidden"，而 describe_http_error 能拿到服务端真实原因
+            #   （如"无权访问 xxx 分组""账号池耗尽"）。最终抛给上层/推给前端的是这个 detail，
+            #   否则一次具体的鉴权/额度失败会被降级成人看不懂的状态码。
+            last_detail = describe_http_error(e) if isinstance(e, httpx.HTTPStatusError) else str(e)
+            logger.warning(f'[{job_id}] {step_name} 模型 {cand} 失败: {last_detail}')
+            if call_chain is not None:
+                call_chain.append({'model': cand, 'ok': False, 'reason': last_detail})
+            continue
+
+        if call_chain is not None:
+            call_chain.append({'model': cand, 'ok': True, 'reason': ''})
+        if idx > 0 and sio:
+            from socket_handlers import emit_log
+            await emit_log(sio, job_id, f'✅ {step_name}已自动切换到模型 {cand} 完成')
+        return on_success(content, cand, in_tok, out_tok) if on_success else content
+
+    raise Exception(
+        f'{step_name}所有候选模型均失败（尝试: {"、".join(candidates)}）；最后原因: {last_detail or last_error}'
+    )
+
+
 # ============ 思维导图 ============
 
 async def generate_mindmap(
@@ -783,24 +1050,22 @@ async def generate_mindmap(
 7. 只输出 Markdown 内容，不要加任何解释、前言、后记"""
 
     # ★ 非流式调用：导图 prompt 短，不走流式，避免智谱断连
-    import httpx
-    headers = _build_headers(model_cfg)
-    payload = {
-        "model": model_cfg.get('model_id', model_cfg.get('key', '')),
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3,
-        "max_tokens": 4096,
-    }
+    def _build(cfg: dict) -> dict:
+        return {
+            "model": cfg.get('model_id', cfg.get('key', '')),
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 4096,
+        }
+
+    def _on_ok(content: str, used_model: str, in_tok: int, out_tok: int) -> str:
+        _record_token_usage(used_model, in_tok, out_tok, job_id)
+        return content
+
     try:
-        async with httpx.AsyncClient(timeout=120.0, verify=_client_verify(model_cfg)) as client:
-            resp = await client.post(model_cfg['endpoint'], headers=headers, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
-            in_tok = data.get('usage', {}).get('prompt_tokens', 0)
-            out_tok = data.get('usage', {}).get('completion_tokens', 0)
-            _record_token_usage(model, in_tok, out_tok, job_id)
-            return content or ''
+        return await run_with_fallback(
+            model, '思维导图', 120.0, _build, sio=sio, job_id=job_id, on_success=_on_ok,
+        )
     except httpx.HTTPStatusError as e:
         detail = describe_http_error(e)
         logger.error(f'思维导图生成失败: {detail}')
@@ -823,10 +1088,7 @@ async def generate_tags(
     sio=None,
     job_id: str = '',
 ) -> List[str]:
-    """用AI分析文本生成3-5个分类标签"""
-    model_cfg = get_model_by_key(model) or get_model_by_key(DEFAULT_MODEL)
-    headers = _build_headers(model_cfg)
-
+    """用AI分析文本生成3-5个分类标签（走统一兜底环：任一候选失败自动换下一个）"""
     prompt = f"""请分析以下视频转录文本的内容主题，返回 3-5 个分类标签。
 标签要求：
 - 每个标签 2-5 个字
@@ -838,36 +1100,35 @@ async def generate_tags(
 转录文本（前 3000 字）：
 {text[:3000]}"""
 
-    payload = {
-        "model": model_cfg.get('model_id', model),
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1,
-        "max_tokens": 100,
-    }
+    def _build(model_cfg: dict) -> dict:
+        return {
+            "model": model_cfg.get('model_id', model_cfg.get('key', DEFAULT_MODEL)),
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+            "max_tokens": 100,
+        }
 
-    try:
-        async with httpx.AsyncClient(timeout=30.0, verify=_client_verify(model_cfg)) as client:
-            resp = await client.post(model_cfg['endpoint'], headers=headers, json=payload)
-            resp.raise_for_status()
-            content = resp.json()['choices'][0]['message']['content']
-            # 清理 markdown 代码块包裹
-            cleaned = content.strip()
-            if cleaned.startswith('```'):
-                cleaned = re.sub(r'^```\w*\n?', '', cleaned)
-                cleaned = re.sub(r'\n?```$', '', cleaned)
-            # 提取 JSON 数组
-            match = re.search(r'\[.*?\]', cleaned, re.DOTALL)
-            if match:
+    def _parse(content: str, _used: str, in_tok: int, out_tok: int) -> List[str]:
+        # 清理 markdown 代码块包裹
+        cleaned = content.strip()
+        if cleaned.startswith('```'):
+            cleaned = re.sub(r'^```\w*\n?', '', cleaned)
+            cleaned = re.sub(r'\n?```$', '', cleaned)
+        # 提取 JSON 数组
+        match = re.search(r'\[.*?\]', cleaned, re.DOTALL)
+        if match:
+            try:
                 tags = json.loads(match.group())
                 return [t for t in tags if isinstance(t, str)][:5]
-            return []
-    except httpx.HTTPStatusError as e:
-        detail = describe_http_error(e)
-        logger.warning(f'自动打标签失败: {detail}')
-        if sio:
-            from socket_handlers import emit_log
-            await emit_log(sio, job_id, f'⚠ 打标签失败: {detail}')
+            except json.JSONDecodeError:
+                logger.warning(f'打标签：模型返回的 JSON 数组无法解析: {match.group()[:80]}')
         return []
+
+    try:
+        return await run_with_fallback(
+            model, '打标签', 30.0, _build, sio=sio, job_id=job_id,
+            on_success=_parse,
+        )
     except Exception as e:
         logger.warning(f'自动打标签失败: {e}')
         if sio:
