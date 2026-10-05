@@ -812,7 +812,11 @@ class TestSummaryRouter:
     def test_get_dimensions(self, client):
         resp = client.get("/api/summary/dimensions")
         assert resp.status_code == 200
-        assert len(resp.json()["dimensions"]) == 9
+        assert len(resp.json()["dimensions"]) == 10
+        # 口误纠错维度：单模块 + 默认启用
+        sf = resp.json()["dimensions"]["speech_fix"]
+        assert [m["key"] for m in sf["modules"]] == ["balanced"]
+        assert sf["default"] == "balanced"
 
     def test_get_recipes(self, client):
         resp = client.get("/api/summary/recipes")

@@ -198,6 +198,26 @@
         }
       }
     },
+    "/api/jobs/queue": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Job Queue",
+        "description": "处理队列快照：``running``（占用槽位）+ ``pending``（等待槽位，FIFO）。\n\n单任务也排队：全局信号量上限（``config.MAX_CONCURRENT_JOBS``，默认 1）之外的\n任务停在 pending，前端「任务进度」卡下方展示「正在处理 + 排队中」。\n\n★ 数据源是 DB 任务状态（不另造内存队列）——刷新/切页后队列仍在；\n  但 running 判定要叠加内存的 `RUNNING_JOBS[jid]['status'] == 'processing'`，\n  因为字幕/下载阶段 DB status 还停在 pending（否则正在跑的任务会被误报成排队中）。\n★ 本路由必须注册在 ``GET /{job_id}`` **之前**：它是单段路径，注册晚了会被\n  ``/{job_id}`` 捕获（job_id='queue'）→ 404。与既有的 ``/running`` 同因。",
+        "operationId": "job_queue_api_jobs_queue_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/jobs/{job_id}": {
       "get": {
         "tags": [
@@ -2539,7 +2559,7 @@
           "download"
         ],
         "summary": "Download File",
-        "description": "下载指定文件（安全：resolve防路径遍历）",
+        "description": "下载指定文件（安全：resolve防路径遍历）\n\n★ 可选 ``job_id`` + ``label``（前端「下载素材」传入）：下载名改为可读的\n  ``{视频名}_{素材类型}.{ext}``，不再直接暴露磁盘名（audio.m4a / bilibili_subtitle.srt）。\n  两参任一缺失时回落磁盘文件名——旧调用方与直接调 URL 的行为零变化。",
         "operationId": "download_file_api_download_file_get",
         "parameters": [
           {
@@ -2549,6 +2569,38 @@
             "schema": {
               "type": "string",
               "title": "Path"
+            }
+          },
+          {
+            "name": "job_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "label",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Label"
             }
           }
         ],

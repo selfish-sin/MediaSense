@@ -13,8 +13,8 @@ from services.prompt_builder import (
 
 
 class TestDimensions:
-    def test_has_9_dims(self):
-        assert len(PROMPT_DIMENSIONS) == 9
+    def test_has_10_dims(self):
+        assert len(PROMPT_DIMENSIONS) == 10
 
     def test_each_dim_has_required_fields(self):
         for dim_key, dim_cfg in PROMPT_DIMENSIONS.items():
@@ -33,7 +33,7 @@ class TestDimensions:
 
     def test_get_default_dimensions(self):
         defaults = get_default_dimensions()
-        assert len(defaults) == 9
+        assert len(defaults) == 10
         for dim_key, dim_cfg in PROMPT_DIMENSIONS.items():
             assert defaults[dim_key] == dim_cfg["default"]
 
@@ -47,6 +47,7 @@ class TestDimensions:
         assert d["tone"] == "学术严谨"
         assert d["word_count"] == "3000"
         assert d["language"] == "简体中文"
+        assert d["speech_fix"] == "balanced"
 
 
 class TestRecipes:
@@ -58,7 +59,7 @@ class TestRecipes:
             assert "key" in r
             assert "name" in r
             assert "dimensions" in r
-            assert len(r["dimensions"]) == 9
+            assert len(r["dimensions"]) == 10
 
     def test_recipe_dimensions_valid(self):
         for r in RECIPES:
@@ -71,6 +72,11 @@ class TestRecipes:
         """内置配方统一钉输出语言=简体中文：应用配方即回到默认简中"""
         for r in RECIPES:
             assert r["dimensions"].get("language") == "简体中文", r["key"]
+
+    def test_recipes_pin_speech_fix_balanced(self):
+        """内置配方统一钉口误纠错=按上下文纠错：口误残留是常态问题，配方应用即启用"""
+        for r in RECIPES:
+            assert r["dimensions"].get("speech_fix") == "balanced", r["key"]
 
     def test_tcm_recipe_and_role_module(self):
         """中医预设：专用角色模块 + 原貌保留与辨析补注型维度组合"""
@@ -160,7 +166,7 @@ class TestGetDimensionsWithOverrides:
     def test_returns_all_dims(self):
         with patch("services.prompt_builder._load_override_rows", return_value=[]):
             result = get_dimensions_with_overrides()
-            assert len(result) == 9
+            assert len(result) == 10
 
     def test_marks_customized(self):
         with patch("services.prompt_builder._load_override_rows",
@@ -339,3 +345,34 @@ class TestLanguageOption:
         """full_override 完全接管提示词，无选项块"""
         prompt = build_modular_prompt({}, "素材内容", full_override="逐字记录 {{CONTENT}}")
         assert "输出语言：" not in prompt
+
+
+class TestSpeechFix:
+    def test_default_prompt_contains_discipline(self):
+        """默认含转录纠错纪律（单模块维度默认启用）：位置在认知规则之后、深度之前"""
+        prompt = build_modular_prompt({}, "素材内容")
+        assert "【转录纠错纪律】" in prompt
+        # 拼装顺序：规则（【分析原则】）→ 纠错纪律 → 深度（【深度要求】）→ 内容
+        assert prompt.index("【转录纠错纪律】") > prompt.index("【分析原则】")
+        assert prompt.index("【转录纠错纪律】") < prompt.index("【深度要求】")
+        assert prompt.index("【转录纠错纪律】") < prompt.index("【待处理内容】")
+
+    def test_unknown_value_omits_section(self):
+        """历史任务/显式空值优雅降级：不写纠错纪律块"""
+        prompt = build_modular_prompt({"speech_fix": ""}, "素材内容")
+        assert "【转录纠错纪律】" not in prompt
+
+    def test_override_text_lands_in_prompt(self):
+        """模板中心覆盖 speech_fix 模块文本后，拼装走覆盖文本"""
+        with patch(
+            "services.prompt_builder._load_module_overrides",
+            return_value={"speech_fix": {"balanced": "【自定义纠错】\n测试覆盖文本"}},
+        ):
+            prompt = build_modular_prompt({}, "素材内容")
+            assert "【自定义纠错】" in prompt
+            assert "【转录纠错纪律】" not in prompt
+
+    def test_tcm_quote_verbatim_not_conflicting(self):
+        """纠错纪律明确豁免直接引语/经典条文：与 tcm 引文分级纪律可共存"""
+        sf = _get_module_template("speech_fix", "balanced")
+        assert "逐字保留" in sf

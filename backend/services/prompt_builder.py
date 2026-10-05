@@ -487,6 +487,27 @@ PROMPT_DIMENSIONS = {
             },
         ],
     },
+
+    # ────────────── 10. 口误与转写纠错（单模块维度：文本保真纪律，默认启用） ──────────────
+    # 背景：转录（含 AI 校正后）仍会残留同音/近音误写与讲者口误，总结逐字复述时会把错误带进正文。
+    # 纪律只作用于总结自己的转述文字；直接引语/经典条文逐字保留的既有纪律（如 tcm 引文分级）不受影响。
+    "speech_fix": {
+        "label": "口误与转写纠错",
+        "desc": "对转录中同音/近音误写与明显口误的处理纪律",
+        "default": "balanced",
+        "modules": [
+            {
+                "key": "balanced",
+                "name": "按上下文纠错",
+                "desc": "明显误写按正确写法呈现，拿不准保留原样",
+                "template": """【转录纠错纪律】
+转录文本可能含有同音/近音误写（如把“饮片”误写成“影片”）与讲者口误。整理转述时：
+- 上下文能明确判定原意的明显错字，按正确写法呈现，不把错误原字复制进总结；
+- 把握不足的一律保留原文字样，禁止凭猜测改写，禁止引入原文没有的内容；
+- 直接引用的原话与经典条文仍逐字保留，本纪律只作用于你自己的转述文字。""",
+            },
+        ],
+    },
 }
 
 
@@ -508,6 +529,7 @@ RECIPES = [
             "tone": "口语化",
             "word_count": "500",
             "language": "简体中文",
+            "speech_fix": "balanced",
         },
     },
     {
@@ -524,6 +546,7 @@ RECIPES = [
             "tone": "新闻客观",
             "word_count": "3000",
             "language": "简体中文",
+            "speech_fix": "balanced",
         },
     },
     {
@@ -540,6 +563,7 @@ RECIPES = [
             "tone": "通俗科普",
             "word_count": "3000",
             "language": "简体中文",
+            "speech_fix": "balanced",
         },
     },
     {
@@ -556,6 +580,7 @@ RECIPES = [
             "tone": "口语化",
             "word_count": "3000",
             "language": "简体中文",
+            "speech_fix": "balanced",
         },
     },
     {
@@ -572,6 +597,7 @@ RECIPES = [
             "tone": "学术严谨",
             "word_count": "10000",
             "language": "简体中文",
+            "speech_fix": "balanced",
         },
     },
     {
@@ -588,6 +614,7 @@ RECIPES = [
             "tone": "学术严谨",
             "word_count": "10000",
             "language": "简体中文",
+            "speech_fix": "balanced",
         },
     },
     {
@@ -604,6 +631,7 @@ RECIPES = [
             "tone": "学术严谨",
             "word_count": "10000",
             "language": "简体中文",
+            "speech_fix": "balanced",
         },
     },
 ]
@@ -733,8 +761,8 @@ def build_modular_prompt(dimensions: Dict[str, str], content: str,
                          custom_prompt: str = "",
                          full_override: str = "") -> str:
     """
-    根据 9 维选择拼装完整 prompt
-    dimensions: {role, rules, output, content_type, depth, tone, word_count, mode, language}
+    根据 10 维选择拼装完整 prompt
+    dimensions: {role, rules, output, content_type, depth, tone, word_count, mode, language, speech_fix}
     content: 待总结的转录文本
     custom_prompt: 用户维度级自定义指令（作为额外指引追加）
     full_override: 完全自定义提示词（非空时直接覆盖一切维度拼装，仅注入 content）
@@ -777,6 +805,11 @@ def build_modular_prompt(dimensions: Dict[str, str], content: str,
     rules_tpl = _get_module_template("rules", dims["rules"], overrides)
     if rules_tpl:
         sections.append(rules_tpl)
+
+    # 4.5 转录纠错纪律（单模块维度；模板为空或值未知时不追加）
+    sf_tpl = _get_module_template("speech_fix", dims.get("speech_fix", ""), overrides)
+    if sf_tpl:
+        sections.append(sf_tpl)
 
     # 5. 深度
     depth_tpl = _get_module_template("depth", dims["depth"], overrides)
