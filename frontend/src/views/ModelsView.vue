@@ -58,6 +58,10 @@ const PROVIDER_PRESETS = [
   { label: 'DeepSeek', engine: 'DeepSeek', endpoint: 'https://api.deepseek.com/v1/chat/completions', modelHint: 'deepseek-chat', auth: 'bearer' },
   { label: '阿里云百炼', engine: '阿里云', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', modelHint: 'qwen3.8-flash', auth: 'bearer' },
   { label: '火山方舟', engine: '字节豆包', endpoint: 'https://ark.cn-beijing.volces.com/api/v3/chat/completions', modelHint: 'doubao-seed-2-1-turbo-260628', auth: 'bearer' },
+  // 方舟 Agent Plan 是独立套餐，凭「Agent Plan-开发配置」的专属 key 调用，
+  // 端点带 /api/plan 段。它和普通方舟 key 不是一回事：普通 key 调 plan 端点会报
+  // 403 "invalid plan type"，Agent Plan 专属 key 调 /api/v3 也会被拒。
+  { label: '方舟 Agent Plan', engine: '火山方舟', endpoint: 'https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions', modelHint: 'deepseek-v4-flash', auth: 'bearer' },
   { label: 'OpenAI', engine: 'OpenAI', endpoint: 'https://api.openai.com/v1/chat/completions', modelHint: 'gpt-4o', auth: 'bearer' },
   { label: '智谱 GLM', engine: '智谱', endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', modelHint: 'glm-4.5-air', auth: 'bearer' },
   { label: '硅基流动', engine: '硅基流动', endpoint: 'https://api.siliconflow.cn/v1/chat/completions', modelHint: 'deepseek-ai/DeepSeek-V3', auth: 'bearer' },
