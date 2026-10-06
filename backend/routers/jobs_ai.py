@@ -94,12 +94,16 @@ async def resummarize_job(job_id: str, body: dict):
             text_content, summary_type=summary_type, model=model,
             sio=sio, job_id=job_id, summary_options=summary_options,
             dimensions=dimensions,
+            bypass_cache=True,  # ★ 显式重跑（"重新总结"）不读缓存：用户要的是重新生成
         )
 
         # ★ 契约检查（镜像 main.py）：AI 层失败返回 [处理失败: ...] 哨兵串时必须显式失败，
         #   否则会被当作正常结果写盘并标记 completed
         if isinstance(result_text, str) and result_text.lstrip().startswith('[处理失败'):
             raise Exception(result_text.strip().strip('[]'))
+        # ★ 空结果防线（2026-10-06）：零正文（如思考型模型只吐思考过程）不允许标 completed
+        if not str(result_text or '').strip():
+            raise Exception('AI 未返回任何内容（模型可能只输出了思考过程），请换模型重试')
 
         # 保存新结果文件
         result_md_path = txt_path.replace('.txt', f'__{summary_type}.md')
@@ -108,7 +112,8 @@ async def resummarize_job(job_id: str, body: dict):
 
         # 自动打标签
         try:
-            tags = await generate_tags(text_content, model=model, sio=sio, job_id=job_id)
+            tags = await generate_tags(text_content, model=model, sio=sio, job_id=job_id,
+                                       bypass_cache=True)
         except Exception:
             tags = []
 
@@ -259,7 +264,8 @@ async def generate_job_tags(job_id: str, body: dict = None):
     from services.ai_processor import generate_tags
     from main import sio
     try:
-        tags = await generate_tags(text_content, model=model, sio=sio, job_id=job_id)
+        tags = await generate_tags(text_content, model=model, sio=sio, job_id=job_id,
+                                   bypass_cache=True)  # ★ 显式重跑不读缓存
     except Exception as e:
         logger.error(f"AI 生成标签失败: {e}")
         raise HTTPException(status_code=500, detail=f"AI 生成标签失败: {str(e)}")
@@ -290,10 +296,17 @@ async def generate_job_mindmap(job_id: str, body: dict = None):
             model=model,
             sio=sio,
             job_id=job_id,
+            bypass_cache=True,  # ★ 显式重跑（"重新生成"）不读缓存
         )
     except Exception as e:
         logger.error(f"思维导图生成失败: {e}")
         raise HTTPException(status_code=500, detail=f"思维导图生成失败: {str(e)}")
+
+    # ★ 空结果显式失败（2026-10-06）：generate_mindmap 失败时返回 ''，
+    #   若按 success 返回空 md，前端只能给出含糊的"返回内容为空"
+    if not (mindmap_md or '').strip():
+        raise HTTPException(status_code=500,
+                            detail="思维导图生成为空：所有候选模型均未返回内容，请查看日志或换模型重试")
 
     return SuccessResponse(message="思维导图已生成", data={"mindmap_md": mindmap_md})
 

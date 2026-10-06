@@ -380,6 +380,94 @@ class TestIsCallFailed:
         assert _strip_sentinel('[处理失败]') == '未知原因'
 
 
+class TestZeroContentFallback:
+    """★ 零正文也是失败（2026-10-06 实测 41ea670a）。
+
+    思考型模型（minimax）可能只吐 reasoning_content 就正常结束流，content=''——
+    is_call_failed('') 按契约是 False（哨兵串判定），空串于是被当成"成功"一路落库，
+    任务 completed 但总结为空。编排层必须把空内容换模型重试；全部候选空 → 哨兵串。
+    """
+
+    @pytest.mark.asyncio
+    async def test_empty_content_switches_to_next_model(self, monkeypatch):
+        from services import ai_processor as ap
+        tried = []
+
+        async def fake_call_ai(model_cfg, prompt, **kw):
+            tried.append(model_cfg['key'])
+            if model_cfg['key'] == 'm1':
+                return '', 0, 0          # 思考型模型：流正常结束但零正文
+            return '真总结', 5, 7
+
+        monkeypatch.setattr(ap, '_call_ai', fake_call_ai)
+        monkeypatch.setattr("db.model_repo.get_connection", lambda: _conn(_tmp_db()))
+        _seed_two_models()
+
+        chain = []
+        content, _, _, used = await ap._call_ai_with_fallback('m1', 'p', call_chain=chain)
+        assert used == 'm2'
+        assert content == '真总结'
+        assert tried == ['m1', 'm2']
+        assert '空内容' in (chain[0]['reason'] or '')
+
+    @pytest.mark.asyncio
+    async def test_whitespace_content_also_fails(self, monkeypatch):
+        from services import ai_processor as ap
+
+        async def fake_call_ai(model_cfg, prompt, **kw):
+            return '   ', 0, 0
+
+        monkeypatch.setattr(ap, '_call_ai', fake_call_ai)
+        monkeypatch.setattr("db.model_repo.get_connection", lambda: _conn(_tmp_db()))
+        _seed_two_models()
+
+        content, _, _, _ = await ap._call_ai_with_fallback('m1', 'p')
+        assert ap.is_call_failed(content)
+        assert 'm1' in content and 'm2' in content
+        assert '空内容' in content
+
+    @pytest.mark.asyncio
+    async def test_emitted_still_wins_over_empty(self, monkeypatch):
+        """防御边界：状态异常（emitted=True 但 content 空）时守"已吐字不换"不变量。"""
+        from services import ai_processor as ap
+        tried = []
+
+        async def fake_call_ai(model_cfg, prompt, **kw):
+            tried.append(model_cfg['key'])
+            kw['state']['emitted'] = True
+            return '', 0, 0
+
+        monkeypatch.setattr(ap, '_call_ai', fake_call_ai)
+        monkeypatch.setattr("db.model_repo.get_connection", lambda: _conn(_tmp_db()))
+        _seed_two_models()
+
+        content, _, _, used = await ap._call_ai_with_fallback('m1', 'p')
+        assert tried == ['m1']
+        assert used == 'm1'
+        assert ap.is_call_failed(content)
+
+    @pytest.mark.asyncio
+    async def test_run_with_fallback_empty_content_switches(self, monkeypatch):
+        """非流式路径（打标签/思维导图）：零正文同样换下一候选，不把空串当结果。"""
+        from services import ai_processor as ap
+        tried = []
+
+        async def fake_post(model_cfg, payload, timeout, **kw):
+            tried.append(model_cfg['key'])
+            if model_cfg['key'] == 'm1':
+                return '', 0, 0
+            return '["哲学"]', 1, 1
+
+        monkeypatch.setattr(ap, '_post_chat_once', fake_post)
+        monkeypatch.setattr("db.model_repo.get_connection", lambda: _conn(_tmp_db()))
+        _seed_two_models()
+
+        out = await ap.run_with_fallback('m1', '打标签', 5.0, lambda cfg: {},
+                                         on_success=lambda c, m, i, o: c)
+        assert out == '["哲学"]'
+        assert tried == ['m1', 'm2']
+
+
 # ---------------------------------------------------------------- 辅助
 
 _TMP_DB = None

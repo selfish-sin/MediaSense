@@ -15,6 +15,7 @@ import httpx
 from config import DEFAULT_MODEL, PROXY, DATA_DIR
 from db.model_repo import get_model_by_key
 from db.database import get_connection
+from services import ai_cache
 from services.prompts import (
     SUMMARY_PROMPTS, ORG_STRATEGY_DESCS,
     build_prompt_vars,
@@ -55,6 +56,38 @@ def _client_verify(model_cfg: Dict[str, Any]) -> bool:
 
 
 # ============ 核心 AI 调用 ============
+
+async def _emit_cached_content(
+    cached: Dict[str, Any],
+    sio=None,
+    job_id: str = '',
+    round_label: str = '',
+    final: bool = True,
+    state: Optional[dict] = None,
+) -> Tuple[str, int, int]:
+    """缓存命中：把上次结果按流式的姿势推给前端（分片 + 让出事件循环），
+    行为与真实流一致（前端 token 累积 + 末尾校准），但不产生任何 token 消耗。"""
+    content = cached.get('content', '')
+    if state is not None:
+        state['emitted'] = bool(content)
+        state['content'] = content
+    if sio and content:
+        from socket_handlers import emit_ai_token, emit_log
+        await emit_log(sio, job_id,
+                       f"⚡ AI 缓存命中（{cached.get('model') or '未知模型'}，"
+                       f"{cached.get('created_at', '')} 生成）——相同内容直接复用上次结果，不重复调用")
+        step = 240
+        for i in range(0, len(content), step):
+            _check_cancelled(job_id)
+            await emit_ai_token(sio, job_id, content[i:i + step], done=False)
+            await asyncio.sleep(0)  # 让出事件循环，socket 有机会刷出
+        if final:
+            await emit_ai_token(sio, job_id, content, done=True)
+    if round_label:
+        logger.info(f'[{job_id}] {round_label} 完成（AI 缓存命中，token 消耗 0）')
+    return content, 0, 0
+
+
 async def _call_ai(
     model_cfg: Dict[str, Any],
     prompt: str,
@@ -65,6 +98,7 @@ async def _call_ai(
     final: bool = True,
     max_retries: int = 3,
     state: Optional[dict] = None,
+    bypass_cache: bool = False,
 ) -> Tuple[str, int, int]:
     """单次AI调用（支持流式输出+批量推送+断连重试），返回(content, input_tokens, output_tokens)
     
@@ -75,6 +109,10 @@ async def _call_ai(
       - state['content']: 成功时的完整正文
       兜底编排（_call_ai_with_fallback）据此执行"只在一字未吐时才换模型"——
       已经吐字再换模型会让前端出现「A 的半截 + B 的完整」的混血文档。
+
+    ★ AI 结果缓存（2026-10-06）：默认开启；键 = endpoint+model_id+temperature+max_tokens+prompt。
+      命中直接复用上次成功结果（token 消耗 0）；bypass_cache=True 跳过（显式重跑语义）。
+      只有成功且非空的结果入池——失败/零输出下次仍是真重试。
     """
     if state is not None:
         state['emitted'] = False
@@ -89,6 +127,21 @@ async def _call_ai(
     max_tokens = model_cfg.get('max_tokens')
     if max_tokens:
         payload["max_tokens"] = max_tokens
+
+    # ★ AI 结果缓存：命中即复用（2026-10-06）
+    cache_key = ''
+    if not bypass_cache and prompt:
+        cache_key = ai_cache.make_key(
+            'llm', model_cfg.get('endpoint', ''),
+            model_cfg.get('model_id', model_cfg.get('key', '')),
+            payload.get('temperature', 0.3), max_tokens or '', prompt,
+        )
+        cached = ai_cache.cache_get(cache_key)
+        if cached:
+            return await _emit_cached_content(
+                cached, sio=sio, job_id=job_id, round_label=round_label,
+                final=final, state=state,
+            )
 
     try:
         async def _stream():
@@ -242,6 +295,14 @@ async def _call_ai(
         if state is not None:
             state['content'] = content
 
+        # ★ 成功结果入缓存池（2026-10-06）：空/失败不入池，下次重试仍是真重试
+        if cache_key and content.strip():
+            ai_cache.cache_put(
+                cache_key, 'llm',
+                model_cfg.get('model_id', model_cfg.get('key', '')),
+                content, meta={'model_key': model_cfg.get('key', '')},
+            )
+
         # 如果 usage 没拿到，估算
         if not out_tok:
             out_tok = len(content) // 2  # 粗略估算
@@ -302,6 +363,7 @@ async def _call_ai_with_fallback(
     final: bool = True,
     max_retries: int = 3,
     call_chain: Optional[list] = None,
+    bypass_cache: bool = False,
 ) -> Tuple[str, int, int, str]:
     """流式 AI 调用 + 兜底环编排。返回 (content, in_tok, out_tok, 实际使用的模型 key)。
 
@@ -351,7 +413,7 @@ async def _call_ai_with_fallback(
             content, in_tok, out_tok = await _call_ai(
                 model_cfg, prompt, timeout=timeout, sio=sio, job_id=job_id,
                 round_label=round_label, final=final, max_retries=max_retries,
-                state=state,
+                state=state, bypass_cache=bypass_cache,
             )
         except TaskCancelledError:
             # 用户取消：绝不换模型重试
@@ -359,6 +421,13 @@ async def _call_ai_with_fallback(
             if call_chain is not None:
                 call_chain.append({'model': cand, 'ok': False, 'reason': '用户取消'})
             raise
+
+        # ★ 零正文也视为失败（2026-10-06）：思考型模型（如 minimax）可能只吐
+        #   reasoning_content 就正常结束流，content=''——is_call_failed('') 是 False，
+        #   此前空串被当成"成功"一路走到落库，任务 completed 但总结为空（实测 41ea670a）。
+        #   空内容必然未吐过正文（emitted 只在正文 piece 时置位），换模型是安全的。
+        if not content.strip() and not is_call_failed(content):
+            content = '[处理失败: 模型返回空内容（可能只输出了思考过程）]'
 
         if not is_call_failed(content):
             used = cand
@@ -403,6 +472,7 @@ async def ai_process(
     summary_options: Optional[Dict[str, Any]] = None,
     dimensions: Optional[Dict[str, str]] = None,
     ctx: Optional[dict] = None,
+    bypass_cache: bool = False,
 ) -> Tuple[str, int, int]:
     """
     标准单轮/分批AI处理
@@ -414,6 +484,9 @@ async def ai_process(
 
     ★ ctx（可选出参，2026-10-05）：传入可变 dict，回填 ctx['call_chain']
       = 实际 AI 调用链（每次尝试的模型/成败/原因），供任务结果展示。
+
+    ★ bypass_cache（2026-10-06）：True 跳过 AI 结果缓存（显式重跑语义，如"重新总结"）；
+      常规任务管线保持 False——同内容重复提交直接复用上次结果。
     """
     model_cfg = get_model_by_key(model) or get_model_by_key(DEFAULT_MODEL)
     if not model_cfg:
@@ -535,7 +608,7 @@ async def ai_process(
         content, in_tok, out_tok, used_model = await _call_ai_with_fallback(
             preferred_model, chunk_prompt, timeout=120.0,
             sio=sio, job_id=job_id, round_label=f'批次 {i+1}/{len(chunks)}', final=False,
-            call_chain=call_chain,
+            call_chain=call_chain, bypass_cache=bypass_cache,
         )
         # 本批成功后记住它（失败的批不记忆，否则会把"已失效"传染给后续批次）
         if not is_call_failed(content):
@@ -923,14 +996,38 @@ async def _post_chat_once(
     model_cfg: Dict[str, Any],
     payload: dict,
     timeout: float,
+    bypass_cache: bool = False,
+    sio=None,
+    job_id: str = '',
 ) -> Tuple[str, int, int]:
     """单次非流式 chat/completions，返回 (content, in_tok, out_tok)。
 
     与 _call_ai 的差别：**失败一律抛异常**（不返回哨兵串）。非流式路径（打标签、
     思维导图）的调用方本来就把失败转成"这一项没产出"，由编排层决定换不换模型，
-    这里再套一层哨兵只会让真���原因被 startswith 匹配反复误判。
+    这里再套一层哨兵只会让真实原因被 startswith 匹配反复误判。
+
+    ★ AI 结果缓存（2026-10-06）：键 = endpoint+model_id+整个 payload（含提示词）。
     """
     import httpx as _httpx
+    cache_key = ''
+    if not bypass_cache:
+        try:
+            payload_sig = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        except (TypeError, ValueError):
+            payload_sig = repr(payload)
+        cache_key = ai_cache.make_key(
+            'llm_once', model_cfg.get('endpoint', ''),
+            model_cfg.get('model_id', model_cfg.get('key', '')), payload_sig,
+        )
+        cached = ai_cache.cache_get(cache_key)
+        if cached:
+            if sio:
+                from socket_handlers import emit_log
+                await emit_log(sio, job_id,
+                               f"⚡ AI 缓存命中（{cached.get('model') or '未知模型'}，"
+                               f"{cached.get('created_at', '')} 生成）——相同内容直接复用上次结果，不重复调用")
+            return cached.get('content', ''), 0, 0
+
     headers = _build_headers(model_cfg)
     async with _httpx.AsyncClient(timeout=timeout, verify=_client_verify(model_cfg)) as client:
         resp = await client.post(model_cfg['endpoint'], headers=headers, json=payload)
@@ -939,6 +1036,12 @@ async def _post_chat_once(
         # 链式安全取值：中转/推理类模型可能 200 但没有 content 字段（实测 2026-10-05）
         content = (data.get('choices') or [{}])[0].get('message', {}).get('content', '')
         usage = data.get('usage') or {}
+        if cache_key and (content or '').strip():
+            ai_cache.cache_put(
+                cache_key, 'llm',
+                model_cfg.get('model_id', model_cfg.get('key', '')),
+                content, meta={'model_key': model_cfg.get('key', '')},
+            )
         return content or '', usage.get('prompt_tokens', 0), usage.get('completion_tokens', 0)
 
 
@@ -951,6 +1054,7 @@ async def run_with_fallback(
     job_id: str = '',
     call_chain: Optional[list] = None,
     on_success: Optional[Any] = None,
+    bypass_cache: bool = False,
 ):
     """非流式 AI 步骤的统一兜底编排：依次试候选模型，异常即换下一个。
 
@@ -984,7 +1088,8 @@ async def run_with_fallback(
                 await emit_log(sio, job_id, f'🔄 {step_name}自动换模型重试（候选 {idx + 1}/{len(candidates)}）：{cand}')
         try:
             content, in_tok, out_tok = await _post_chat_once(
-                model_cfg, build_payload(model_cfg), timeout
+                model_cfg, build_payload(model_cfg), timeout,
+                bypass_cache=bypass_cache, sio=sio, job_id=job_id,
             )
         except TaskCancelledError:
             raise
@@ -996,6 +1101,16 @@ async def run_with_fallback(
             #   否则一次具体的鉴权/额度失败会被降级成人看不懂的状态码。
             last_detail = describe_http_error(e) if isinstance(e, httpx.HTTPStatusError) else str(e)
             logger.warning(f'[{job_id}] {step_name} 模型 {cand} 失败: {last_detail}')
+            if call_chain is not None:
+                call_chain.append({'model': cand, 'ok': False, 'reason': last_detail})
+            continue
+
+        # ★ 零正文视为该候选失败（与流式路径同一不变量）：思考型模型可能只吐
+        #   reasoning 就正常返回，content=''——换下一个候选，而不是把空串当结果
+        if not (content or '').strip():
+            last_error = Exception('模型返回空内容（可能只输出了思考过程）')
+            last_detail = str(last_error)
+            logger.warning(f'[{job_id}] {step_name} 模型 {cand} 返回空内容，视为失败换下一候选')
             if call_chain is not None:
                 call_chain.append({'model': cand, 'ok': False, 'reason': last_detail})
             continue
@@ -1020,6 +1135,7 @@ async def generate_mindmap(
     model: str = DEFAULT_MODEL,
     sio=None,
     job_id: str = '',
+    bypass_cache: bool = False,
 ) -> str:
     """基于总结结果生成 markmap 兼容的 Markdown 思维导图
 
@@ -1065,6 +1181,7 @@ async def generate_mindmap(
     try:
         return await run_with_fallback(
             model, '思维导图', 120.0, _build, sio=sio, job_id=job_id, on_success=_on_ok,
+            bypass_cache=bypass_cache,
         )
     except httpx.HTTPStatusError as e:
         detail = describe_http_error(e)
@@ -1087,6 +1204,7 @@ async def generate_tags(
     model: str = DEFAULT_MODEL,
     sio=None,
     job_id: str = '',
+    bypass_cache: bool = False,
 ) -> List[str]:
     """用AI分析文本生成3-5个分类标签（走统一兜底环：任一候选失败自动换下一个）"""
     prompt = f"""请分析以下视频转录文本的内容主题，返回 3-5 个分类标签。
@@ -1127,7 +1245,7 @@ async def generate_tags(
     try:
         return await run_with_fallback(
             model, '打标签', 30.0, _build, sio=sio, job_id=job_id,
-            on_success=_parse,
+            on_success=_parse, bypass_cache=bypass_cache,
         )
     except Exception as e:
         logger.warning(f'自动打标签失败: {e}')

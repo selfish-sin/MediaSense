@@ -1159,6 +1159,11 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             #   这里显式失败，路由到下方 except → finish_job(False) + done{success:false, error}
             if isinstance(result_text, str) and result_text.lstrip().startswith('[处理失败'):
                 raise Exception(result_text.strip())
+            # ★ 空结果防线（2026-10-06）：零正文已被兜底环判失败，这里是最后一道闸——
+            #   绝不允许任务 completed 而总结为空（实测 41ea670a：minimax 只吐思考过程，
+            #   空串不是哨兵串、绕过了上面的检查，任务照样 completed）
+            if not str(result_text or '').strip():
+                raise Exception('AI 未返回任何内容（模型可能只输出了思考过程），任务按失败处理；可重新总结并换模型重试')
 
             # 保存结果到文件
             result_md_path = txt_path.replace('.txt', f'__{summary_type}.md')
