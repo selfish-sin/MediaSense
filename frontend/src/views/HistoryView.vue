@@ -452,19 +452,20 @@ onMounted(() => {
         <span class="select-all-bar__hint">翻页 / 改筛选都会保留已勾选项，可跨页累加后再批量操作</span>
       </div>
 
-      <!-- 批量操作栏（选中任务时显示；全选模式下统计同样生效） -->
-      <div v-if="activeSelection.length > 0" class="batch-toolbar">
+      <!-- 批量操作栏（有任务时常驻，未选中时按钮禁用；若选中才渲染，首次勾选会突然插入把表格顶下去）
+           allFilteredJobs 全选模式下当前页可能为空，所以带 activeSelection 条件兜底 -->
+      <div v-if="jobs.length > 0 || activeSelection.length > 0" class="batch-toolbar">
         <span class="batch-toolbar__count">
           已选 {{ activeSelection.length }} 项{{ selectAllMode ? '（当前筛选全部）' : '' }}
         </span>
-        <el-button size="small" type="warning" @click="handleBatchCancel">
+        <el-button size="small" type="warning" :disabled="!activeSelection.length" @click="handleBatchCancel">
           批量取消（{{ activeSelection.filter(j => activeStatuses.includes(j.status)).length }}）
         </el-button>
-        <el-button size="small" type="danger" @click="handleBatchDelete">批量删除</el-button>
-        <el-button size="small" type="success" @click="handleBatchExport">
+        <el-button size="small" type="danger" :disabled="!activeSelection.length" @click="handleBatchDelete">批量删除</el-button>
+        <el-button size="small" type="success" :disabled="!activeSelection.length" @click="handleBatchExport">
           批量导出结果（{{ activeSelection.filter(j => j.status === 'completed').length }}）
         </el-button>
-        <el-button size="small" link @click="resetSelection">取消选择</el-button>
+        <el-button size="small" link :disabled="!activeSelection.length" @click="resetSelection">取消选择</el-button>
       </div>
 
       <div ref="tableWrapRef" class="table-wrap">
