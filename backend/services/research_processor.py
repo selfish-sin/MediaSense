@@ -27,7 +27,7 @@ RESEARCH_SEARCH_RESULTS = 6
 
 async def _extract_topics(
     text: str, title: str, model_cfg: Dict,
-    sio=None, job_id: str = '',
+    sio=None, job_id: str = '', bypass_cache: bool = False,
 ) -> List[str]:
     """从转录文本提取 3-8 个研究主题"""
     if sio:
@@ -55,6 +55,7 @@ async def _extract_topics(
     content, _, _ = await _call_ai(
         model_cfg, prompt, timeout=120.0,
         sio=sio, job_id=job_id, round_label='提取主题',
+        bypass_cache=bypass_cache,
     )
     if content.startswith('[处理失败'):
         return ['核心内容分析', '背景知识扩展', '关键概念解析']
@@ -71,7 +72,7 @@ async def _extract_topics(
 
 async def _expand_topic(
     topic: str, transcript_snippet: str,
-    model_cfg: Dict, sio=None, job_id: str = '',
+    model_cfg: Dict, sio=None, job_id: str = '', bypass_cache: bool = False,
 ) -> str:
     """对一个主题做联网检索，并交给用户所选模型写成研究段落。
 
@@ -122,6 +123,7 @@ async def _expand_topic(
     content, _, _ = await _call_ai(
         model_cfg, prompt, timeout=180.0,
         sio=sio, job_id=job_id, round_label=f'扩展·{topic[:15]}',
+        bypass_cache=bypass_cache,
     )
     if not content or content.startswith('[处理失败'):
         return f'### {topic}\n\n（该主题研究扩展暂不可用）'
@@ -136,6 +138,7 @@ async def research_process(
     model: str = DEFAULT_MODEL,
     sio=None,
     job_id: str = '',
+    bypass_cache: bool = False,
 ) -> Tuple[str, int, int]:
     """深度研究模式主流程
 
@@ -160,7 +163,8 @@ async def research_process(
         await emit_log(sio, job_id, f'🔬 AI 模型: {model}')
 
     # Step 1: 提取主题
-    topics = await _extract_topics(text, title, model_cfg, sio, job_id)
+    topics = await _extract_topics(text, title, model_cfg, sio, job_id,
+                                   bypass_cache=bypass_cache)
 
     if sio:
         from socket_handlers import emit_log
@@ -179,6 +183,7 @@ async def research_process(
 
         section = await _expand_topic(
             topic, transcript_snippet, model_cfg, sio=sio, job_id=job_id,
+            bypass_cache=bypass_cache,
         )
         expanded_sections.append(section)
 

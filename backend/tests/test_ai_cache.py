@@ -204,3 +204,42 @@ class TestCallAiCache:
         content2, i2, o2 = await ap._call_ai(cfg, prompt)
         assert content2 == '流式结果'
         assert (i2, o2) == (0, 0)
+
+
+# ---------------------------------------------------------------- transcribe_audio 的 bypass 链路
+
+class TestTranscribeAudioBypass:
+    """「忽略缓存」开关（2026-10-06）：bypass_cache=True 跳过 ASR 缓存读取、
+    强制重新识别，但重新生成的结果仍回写缓存池修复旧条目。"""
+
+    def _setup(self, monkeypatch, tmp_path, seen):
+        import services.transcriber as tr
+        audio = tmp_path / 'a.mp3'
+        audio.write_bytes(b'AUDIO')
+        srt = tmp_path / 'a.srt'
+        srt.write_text('1\n00:00:00,000 --> 00:00:01,000\n你\n', encoding='utf-8')
+        txt = tmp_path / 'a.txt'
+        txt.write_text('你', encoding='utf-8')
+        monkeypatch.setattr(ai_cache, 'lookup_transcription',
+                            lambda *a, **k: seen.__setitem__('lookup', seen['lookup'] + 1))
+        monkeypatch.setattr(ai_cache, 'store_transcription',
+                            lambda *a, **k: seen.__setitem__('store', seen['store'] + 1) or True)
+        monkeypatch.setattr(tr, '_transcribe_sync',
+                            lambda **kw: (str(srt), str(txt), 1))
+        return tr
+
+    @pytest.mark.asyncio
+    async def test_bypass_skips_lookup_but_still_stores(self, cache_on, monkeypatch, tmp_path):
+        seen = {'lookup': 0, 'store': 0}
+        tr = self._setup(monkeypatch, tmp_path, seen)
+        out = await tr.transcribe_audio(str(tmp_path / 'a.mp3'), engine='cloud_free',
+                                        language='zh', bypass_cache=True)
+        assert out[2] == 1
+        assert seen == {'lookup': 0, 'store': 1}
+
+    @pytest.mark.asyncio
+    async def test_default_reads_cache_then_stores(self, cache_on, monkeypatch, tmp_path):
+        seen = {'lookup': 0, 'store': 0}
+        tr = self._setup(monkeypatch, tmp_path, seen)
+        await tr.transcribe_audio(str(tmp_path / 'a.mp3'), engine='cloud_free', language='zh')
+        assert seen == {'lookup': 1, 'store': 1}

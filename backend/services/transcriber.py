@@ -980,12 +980,16 @@ async def transcribe_audio(
     cancel_check=None,
     device: str = 'auto',
     engine: str = 'cloud_free',
+    bypass_cache: bool = False,
 ) -> Tuple[str, str, int]:
     """
     异步转录音频（在线程池中运行同步引擎，云端/本地由 engine 路由）
     使用 asyncio.Queue 跨线程桥接进度回调
     engine 缺省/非法值落免费档链（付费档只能显式选择；见 `_transcribe_sync`）
     返回：(srt_path, txt_path, segment_count)
+
+    bypass_cache（2026-10-06）：True 跳过 ASR 缓存**读取**（用户勾了"忽略缓存"，
+    缓存不全/有害时强制重新识别）；重新生成的结果仍回写缓存池修复旧条目。
     """
     if sio:
         from socket_handlers import emit_progress, emit_log
@@ -998,18 +1002,22 @@ async def transcribe_audio(
     #   同一视频反复提交/失败重试时直接复用上次识别结果，不重跑分片调用或本地推理
     #   （实测同一 B 站视频一天内被重复提交 3 次，每次都白跑 72 片 XingChen）。
     #   换引擎/换语言是不同的键，天然不串。
-    from services import ai_cache as _ai_cache
-    _cached = await asyncio.to_thread(
-        _ai_cache.lookup_transcription, audio_path, engine, language, bool(speaker_diarization),
-    )
-    if _cached:
-        if sio:
-            from socket_handlers import emit_progress, emit_log
-            await emit_log(sio, job_id,
-                           f"⚡ 命中转录缓存（引擎 {_cached['engine']}，{_cached['created_at']} 识别）"
-                           f"——相同音频直接复用上次结果，共 {_cached['seg_count']} 段，不重新识别")
-            await emit_progress(sio, job_id, 'transcribe', 100, '转录完成（缓存命中）！')
-        return _cached['srt_path'], _cached['txt_path'], _cached['seg_count']
+    if not bypass_cache:
+        from services import ai_cache as _ai_cache
+        _cached = await asyncio.to_thread(
+            _ai_cache.lookup_transcription, audio_path, engine, language, bool(speaker_diarization),
+        )
+        if _cached:
+            if sio:
+                from socket_handlers import emit_progress, emit_log
+                await emit_log(sio, job_id,
+                               f"⚡ 命中转录缓存（引擎 {_cached['engine']}，{_cached['created_at']} 识别）"
+                               f"——相同音频直接复用上次结果，共 {_cached['seg_count']} 段，不重新识别")
+                await emit_progress(sio, job_id, 'transcribe', 100, '转录完成（缓存命中）！')
+            return _cached['srt_path'], _cached['txt_path'], _cached['seg_count']
+    elif sio:
+        from socket_handlers import emit_log
+        await emit_log(sio, job_id, '⏭ 已忽略转录缓存（用户勾选），将全新识别')
 
     # 跨线程进度桥接：线程 → Queue → async emit
     # 队列容量放大，避免密集进度回调丢消息
