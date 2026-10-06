@@ -236,6 +236,15 @@ const transcribeLanguageHint = computed(() => {
               <span class="adv-switch-name">转录预览</span>
             </span>
           </label>
+          <!-- ★ 忽略缓存（2026-10-06）：相同内容默认复用上次转录/AI 缓存结果；
+               缓存不全或有害时打开它强制全新生成，新结果仍回写缓存池修复旧条目 -->
+          <label class="adv-switch-tile" :class="{ on: settings.advancedOptions.bypass_cache }">
+            <el-switch v-model="settings.advancedOptions.bypass_cache" size="small" />
+            <span class="adv-switch-meta">
+              <span class="adv-switch-name">忽略缓存</span>
+              <span class="adv-switch-desc">本次任务不复用上次的识别/总结缓存，全部重新生成（缓存不全或有害时用）</span>
+            </span>
+          </label>
         </div>
         <!-- ★ 校正子选项：仅开启 AI 校正时显示（跟在处理开关后） -->
         <div v-if="settings.advancedOptions.ai_correct" class="adv-field-grid adv-correct-grid">

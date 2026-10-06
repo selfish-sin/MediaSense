@@ -84,6 +84,9 @@ export const useSettingsStore = defineStore('settings', () => {
     ai_correct_model: '',
     // ★ 校正领域提示词模板：default=通用 / tcm=中医（保护经典引文与用量观点不被改写）
     ai_correct_domain: 'default',
+    // ★ 忽略缓存（2026-10-06）：true 时本次任务的语音识别与 AI 加工都不复用上次缓存结果、
+    //   全部重新生成（缓存内容不全或有害时用）；重新生成的新结果仍回写缓存池修复旧条目
+    bypass_cache: false,
   })
   // ★ 用户是否手动动过「转录引擎」下拉：动过之后 loadCloudAsrStatus 不再用推荐值覆盖它。
   //   用显式标记而非"当前值 === 占位值"判断——后者无法把"用户主动选了付费档"与"仍是占位"分开。
