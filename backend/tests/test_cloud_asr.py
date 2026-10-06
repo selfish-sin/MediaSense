@@ -524,17 +524,38 @@ class TestTranscribeAudioCloud:
         assert starts == sorted(starts)
 
     def test_empty_chunk_dropped(self, monkeypatch, tmp_path, fake_audio):
+        """★ 2026-10-06 起空文本片不再静默丢弃：按失败进补录链；补录无收获时
+        该段成为**有告警**的空洞，其余 4 段照常。"""
         texts = ['文本一', '', '文本三', '文本四', '文本五']
         _setup_orchestration(monkeypatch, tmp_path, texts=texts)
+        monkeypatch.setattr(cloud_asr, '_rescue_failed_chunks',
+                            lambda chunks, *a, **k: ('无可用补录引擎', []))
         srt, txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
         assert seg_count == 4
         assert '文本一' in Path(srt).read_text(encoding='utf-8')
 
-    def test_all_empty_returns_zero_segments(self, monkeypatch, tmp_path, fake_audio):
-        _setup_orchestration(monkeypatch, tmp_path, texts=[''] * 5)
+    def test_empty_chunk_rescued_by_backup(self, monkeypatch, tmp_path, fake_audio):
+        """空文本片必须进补录链：备用引擎接得住 → 5 段完整，不再是 4 段 + 无声洞。"""
+        texts = ['文本一', '', '文本三', '文本四', '文本五']
+        _setup_orchestration(monkeypatch, tmp_path, texts=texts)
+
+        def fake_rescue(chunks, *a, **k):
+            assert len(chunks) == 1, '只有那片空文本应进补录'
+            return ('XingChen', [(chunks[0][1], chunks[0][2], '补录文本')])
+
+        monkeypatch.setattr(cloud_asr, '_rescue_failed_chunks', fake_rescue)
         srt, txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
-        assert seg_count == 0
-        assert Path(srt).read_text(encoding='utf-8') == ''
+        assert seg_count == 5
+        assert '补录文本' in Path(srt).read_text(encoding='utf-8')
+
+    def test_all_empty_returns_zero_segments(self, monkeypatch, tmp_path, fake_audio):
+        """全部空文本 + 补录无收获 → 全部按失败 → 抛 Unavailable 整体回退本地 Whisper
+        （2026-10-06 起不再把空片段静默当成功写空 SRT）。"""
+        _setup_orchestration(monkeypatch, tmp_path, texts=[''] * 5)
+        monkeypatch.setattr(cloud_asr, '_rescue_failed_chunks',
+                            lambda chunks, *a, **k: ('无可用补录引擎', []))
+        with pytest.raises(cloud_asr.CloudASRUnavailableError, match='全部分片失败'):
+            transcribe_audio_cloud(fake_audio, provider='mimo')
 
     def test_cancel_between_chunks(self, monkeypatch, tmp_path, fake_audio):
         chunk_paths, _ = _setup_orchestration(monkeypatch, tmp_path)
@@ -832,3 +853,50 @@ class TestSentenceLevelOutput:
         _setup_orchestration(monkeypatch, tmp_path, texts=['文本一', '文本二', '文本三', '文本四', '文本五'])
         srt, txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
         assert seg_count == 5
+
+
+# ============ 200 但空文本按失败（2026-10-06 排查，与"空总结当成功"同类） ============
+# 旧行为：HTTP 200 + content='' 直接 return ''——分片循环把它按成功计数，
+# 该段成为无告警空洞且不触发备用引擎补录。现必须重试后抛 Unavailable 进补录链。
+class TestEmptyTextIsFailure:
+
+    def _mock_200(self, payload):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.text = ''
+        resp.json = lambda: payload
+        return resp
+
+    def test_chat_api_empty_content_raises_unavailable(self, asr_enabled, no_sleep, monkeypatch):
+        calls = []
+        resp = self._mock_200({'choices': [{'message': {'content': ''}}]})
+
+        def fake_do_request(cfg, p, t):
+            calls.append(1)
+            return resp
+
+        monkeypatch.setattr(cloud_asr, '_do_request', fake_do_request)
+        with pytest.raises(cloud_asr.CloudASRUnavailableError, match='空文本'):
+            transcribe_file('a.mp3', provider='mimo', max_retries=2)
+        assert len(calls) == 2, '空文本必须先重试再判失败'
+
+    def test_multipart_empty_text_raises_unavailable(self, asr_enabled, no_sleep, monkeypatch):
+        monkeypatch.setattr(
+            cloud_asr, '_do_request',
+            lambda cfg, p, t: self._mock_200({'text': ''}))
+        with pytest.raises(cloud_asr.CloudASRUnavailableError, match='空文本'):
+            transcribe_file('a.mp3', provider='xingchen', max_retries=1)
+
+    def test_whitespace_only_text_also_raises(self, asr_enabled, no_sleep, monkeypatch):
+        monkeypatch.setattr(
+            cloud_asr, '_do_request',
+            lambda cfg, p, t: self._mock_200({'choices': [{'message': {'content': '  \n  '}}]}))
+        with pytest.raises(cloud_asr.CloudASRUnavailableError, match='空文本'):
+            transcribe_file('a.mp3', provider='mimo', max_retries=1)
+
+    def test_nonempty_text_still_succeeds(self, asr_enabled, no_sleep, monkeypatch):
+        """反防：正常文本不得被误杀。"""
+        monkeypatch.setattr(
+            cloud_asr, '_do_request',
+            lambda cfg, p, t: self._mock_200({'choices': [{'message': {'content': '正常转写文本'}}]}))
+        assert transcribe_file('a.mp3', provider='mimo', max_retries=1) == '正常转写文本'

@@ -600,7 +600,15 @@ def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int
                     last_reason = f'响应非 JSON: {resp.text[:200]}'
                     logger.warning(f'云端 ASR 响应异常: {last_reason}')
                 else:
-                    return strip_rich_tags(text)
+                    cleaned = strip_rich_tags(text)
+                    if not cleaned.strip():
+                        # ★ 200 但零文本也是失败（2026-10-06 排查）：静默返回空串会让
+                        #   分片循环按成功计数——该段成为无告警空洞且不触发备用引擎补录
+                        #   （与"空总结被当成功落库 completed"同类，见 41ea670a）
+                        last_reason = 'HTTP 200 但返回空文本'
+                        logger.warning(f'云端 ASR 空响应（第 {attempt + 1}/{max_retries} 次）: {Path(path).name}')
+                    else:
+                        return cleaned
             elif resp.status_code in (401, 402, 403, 404):
                 detail = resp.text[:200]
                 if resp.status_code == 401:
@@ -831,8 +839,15 @@ def transcribe_audio_cloud(
                 continue
             completed += 1
             completed_audio += seg_end - seg_start
-            succeeded += 1
-            if text:
+            if not (text or '').strip():
+                # ★ 双保险（2026-10-06）：transcribe_file 已把空文本按失败抛出，
+                #   这里兜住未来"成功却返回空白"的回归——绝不把空片段当成功计数
+                failures += 1
+                failed_ranges.append(f'{_format_mmss(seg_start)}-{_format_mmss(seg_end)}')
+                failed_chunks.append((_cp, seg_start, seg_end))
+                logger.error(f'云端分片返回空文本，按失败待补录（{Path(_cp).name}）')
+            else:
+                succeeded += 1
                 results.append((seg_start, seg_end, text))
             _report()
 
