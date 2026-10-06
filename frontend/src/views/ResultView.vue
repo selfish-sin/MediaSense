@@ -437,9 +437,19 @@ const canResummarize = computed(() => {
 
 async function generateMindmap() {
   if (mindmapLoading.value) return
+  // ★ 无总结结果不发起请求（2026-10-06）：后端会 400，前端先给出可行动提示
+  if (!job.value?.result_text) {
+    ElMessage.warning('该任务没有总结结果，无法生成思维导图（可先重新总结或到工作台重做）')
+    return
+  }
   await nextTick()  // ★ 先等 DOM，再设 loading
-  const container = mindmapContainer.value
-  if (!container) { ElMessage.error('容器未就绪，请刷新页面'); return }
+  let container = mindmapContainer.value
+  if (!container) {
+    // 结果卡是 v-if 条件渲染，从其它 tab 切过来时可能需要再等一拍
+    await nextTick()
+    container = mindmapContainer.value
+  }
+  if (!container) { ElMessage.error('思维导图容器未能挂载，请刷新页面重试'); return }
   mindmapLoading.value = true
   mindmapReady.value = false
   try {
@@ -492,6 +502,8 @@ async function generateMindmap() {
 
 function switchToMindmapTab() {
   resultTab.value = 'mindmap'
+  // ★ 无总结结果：容器内显示占位说明，不自动发起生成（2026-10-06）
+  if (!job.value?.result_text) return
   if (!mindmapReady.value && !mindmapLoading.value) {
     generateMindmap()
   }
@@ -726,7 +738,9 @@ async function copyTranscript() {
       </div>
 
       <!-- 结果内容 -->
-      <el-card v-if="displayResult || isStreaming || mindmapReady || resultTab === 'transcript'" class="app-card" shadow="never">
+      <!-- ★ mindmap 必须在条件里（2026-10-06）：任务没有总结结果时 displayResult 为 false，
+           此前点思维导图 tab 卡片不渲染、容器恒为 null，必弹「容器未就绪」 -->
+      <el-card v-if="displayResult || isStreaming || mindmapReady || resultTab === 'mindmap' || resultTab === 'transcript'" class="app-card" shadow="never">
         <!-- ★ 失败任务横幅：可只重跑 AI 总结步骤，无需重新下载/转录 -->
         <el-alert v-if="job?.status === 'failed'" type="error" :closable="false" show-icon style="margin-bottom: 12px;">
           <template #title>
@@ -833,8 +847,11 @@ async function copyTranscript() {
             </div>
           </div>
           <div ref="mindmapContainer" class="mindmap-container" style="width: 100%; height: 560px; overflow: auto; background: #fff; border-radius: 4px;">
-            <div v-if="!mindmapReady && !mindmapLoading" style="text-align: center; padding: 40px; color: var(--app-text-secondary);">
-              点击上方 <strong><el-icon style="vertical-align: -2px;"><Cpu /></el-icon> 思维导图</strong> 标签生成
+            <div v-if="!mindmapReady && !mindmapLoading && !job?.result_text" style="text-align: center; padding: 40px; color: var(--app-text-secondary);">
+              该任务没有总结结果，无法生成思维导图（可先重新总结或到工作台重做）
+            </div>
+            <div v-else-if="!mindmapReady && !mindmapLoading" style="text-align: center; padding: 40px; color: var(--app-text-secondary);">
+              思维导图未生成或上次生成失败，点击上方「思维导图」标签重试
             </div>
           </div>
         </div>
