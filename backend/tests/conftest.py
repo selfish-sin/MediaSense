@@ -26,6 +26,12 @@ def _isolate_data_dir():
     """把 config 的数据目录指向临时目录，避免污染真实 data/"""
     tmp_downloads = TEST_DATA_DIR / "downloads"
     tmp_downloads.mkdir(exist_ok=True)
+    # ★ 测试期默认关闭 AI/转录结果缓存（2026-10-06）：测试共用会话级临时 DB，
+    #   同 endpoint+model+prompt 的键会跨测试命中（前一测试的结果污染后一测试，
+    #   实测 TestCallAiEmptyChoicesChunk 拿到别的用例缓存的"你好"）。要测缓存的
+    #   用例自行用 cache_on fixture 打开（tests/test_ai_cache.py）。
+    import config as _config
+    _config.AI_CACHE_ENABLED = False
     from db.database import init_db
     init_db()
     yield TEST_DATA_DIR

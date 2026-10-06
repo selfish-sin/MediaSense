@@ -304,6 +304,22 @@ def init_db():
         )
     """)
 
+    # ★ AI/转录结果缓存池（2026-10-06）：key=sha256(输入要素)，读写单点 services/ai_cache.py。
+    #   op='llm'（AI 文本：endpoint+model_id+提示词+内容）/ op='asr'（转录：音频哈希+引擎+语言）。
+    #   相同输入直接复用上次结果，不重跑计费调用；只缓存成功且非空的结果。
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ai_cache (
+            key TEXT PRIMARY KEY,
+            op TEXT NOT NULL,
+            model TEXT DEFAULT '',
+            content TEXT NOT NULL,
+            meta TEXT DEFAULT '',
+            size INTEGER DEFAULT 0,
+            hits INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+
     # ★ 索引（IF NOT EXISTS，纯增量；加速列表/去重/批量/token汇总/追问历史查询）
     _index_stmts = [
         "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)",
@@ -316,6 +332,7 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_chat_sessions_job_id ON chat_sessions(job_id)",
         "CREATE INDEX IF NOT EXISTS idx_summary_history_job_id ON summary_history(job_id)",
         "CREATE INDEX IF NOT EXISTS idx_asr_providers_engine ON asr_providers(engine, enabled, sort_order)",
+        "CREATE INDEX IF NOT EXISTS idx_ai_cache_created ON ai_cache(created_at)",
     ]
     for _stmt in _index_stmts:
         try:

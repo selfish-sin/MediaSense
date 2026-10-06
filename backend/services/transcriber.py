@@ -994,6 +994,23 @@ async def transcribe_audio(
         await emit_progress(sio, job_id, 'transcribe', 0, f'正在初始化转录（引擎: {label}, 模型: {model_size}, 语言: {language or "自动检测"}）...')
         await emit_log(sio, job_id, f'🎬 开始转录 | 音频: {Path(audio_path).name} | 引擎: {label} | 模型: {model_size} | 语言: {language or "自动检测"}')
 
+    # ★ ASR 结果缓存（2026-10-06）：键 = 音频文件内容哈希 + 引擎 + 语言 + 说话人分离。
+    #   同一视频反复提交/失败重试时直接复用上次识别结果，不重跑分片调用或本地推理
+    #   （实测同一 B 站视频一天内被重复提交 3 次，每次都白跑 72 片 XingChen）。
+    #   换引擎/换语言是不同的键，天然不串。
+    from services import ai_cache as _ai_cache
+    _cached = await asyncio.to_thread(
+        _ai_cache.lookup_transcription, audio_path, engine, language, bool(speaker_diarization),
+    )
+    if _cached:
+        if sio:
+            from socket_handlers import emit_progress, emit_log
+            await emit_log(sio, job_id,
+                           f"⚡ 命中转录缓存（引擎 {_cached['engine']}，{_cached['created_at']} 识别）"
+                           f"——相同音频直接复用上次结果，共 {_cached['seg_count']} 段，不重新识别")
+            await emit_progress(sio, job_id, 'transcribe', 100, '转录完成（缓存命中）！')
+        return _cached['srt_path'], _cached['txt_path'], _cached['seg_count']
+
     # 跨线程进度桥接：线程 → Queue → async emit
     # 队列容量放大，避免密集进度回调丢消息
     progress_queue: asyncio.Queue = asyncio.Queue(maxsize=256)
@@ -1090,5 +1107,16 @@ async def transcribe_audio(
         await emit_log(sio, job_id, f'✅ 转录完成: 共 {result[2]} 段')
         await emit_log(sio, job_id, f'📄 SRT: {Path(result[0]).name}')
         await emit_log(sio, job_id, f'📄 TXT: {Path(result[1]).name}')
+
+    # ★ 转录成功结果入缓存池（2026-10-06）：键按音频内容哈希，下次同音频同引擎直接复用
+    try:
+        from services import ai_cache as _ai_cache
+        await asyncio.to_thread(
+            _ai_cache.store_transcription,
+            audio_path, engine, language, bool(speaker_diarization),
+            result[0], result[1], result[2],
+        )
+    except Exception as e:  # 缓存是加速项，绝不影响转录结果
+        logger.warning(f'转录结果入缓存失败（不影响主流程）: {e}')
 
     return result

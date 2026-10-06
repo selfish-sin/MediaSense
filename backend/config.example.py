@@ -22,6 +22,14 @@ CLEANUP_QUARANTINE_TTL_DAYS = int(os.getenv('YT_CLEANUP_QUARANTINE_TTL_DAYS', '3
 CLEANUP_MAX_ITEMS = int(os.getenv('YT_CLEANUP_MAX_ITEMS', '1000'))
 CLEANUP_MAX_BYTES = int(os.getenv('YT_CLEANUP_MAX_BYTES', str(20 * 1024**3)))
 
+# ============ AI/转录结果缓存池（2026-10-06，读写单点 services/ai_cache.py） ============
+# 相同输入直接复用上次成功结果，不重跑计费调用：
+# - AI 文本（总结/校正/打标签/思维导图）：同模型+同提示词+同内容 → 命中；
+# - 转录（ASR）：同音频文件+同引擎+同语言 → 命中（同一视频反复提交/失败重试时省 1~2 分钟+免费档额度）。
+# 显式重跑（重新总结/重新生成导图/重新打标签）由调用方传 bypass_cache 绕过，保持"重新"语义。
+AI_CACHE_ENABLED = os.getenv('YT_AI_CACHE_ENABLED', '1') == '1'
+AI_CACHE_MAX_ENTRIES = int(os.getenv('YT_AI_CACHE_MAX_ENTRIES', '500'))
+
 # 确保目录存在
 DATA_DIR.mkdir(exist_ok=True)
 DOWNLOAD_DIR.mkdir(exist_ok=True)
