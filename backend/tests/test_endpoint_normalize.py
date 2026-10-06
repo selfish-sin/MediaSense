@@ -36,6 +36,13 @@ class TestNormalizeEndpoint:
          "https://open.bigmodel.cn/api/paas/v4/chat/completions"),
         ("https://example.com/api/v2beta",
          "https://example.com/api/v2beta/chat/completions"),
+        # —— ★ 方舟 Agent Plan（/api/plan/v3）：与 /api/v3 同类，绝不能插 /v1 ——
+        # 2026-10-06 实测：DB 里存的是 /api/plan/v3/v1/chat/completions（旧版无条件插 /v1 的产物），
+        # 每次调用 404 后才换模型白耗一个候选位
+        ("https://ark.cn-beijing.volces.com/api/plan/v3",
+         "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions"),
+        ("https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions",
+         "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions"),
     ])
     def test_normalize(self, raw, expect):
         assert _normalize_endpoint(raw) == expect
