@@ -559,3 +559,62 @@ class TestCallAiStreamHttpError:
         # 必须透出服务端真实原因，而不是 httpx 的 ResponseNotRead 流错误
         assert "无权访问 gemini高级普通 分组" in content
         assert "Attempted to access streaming response content" not in content
+
+
+# ── 思考期取消（2026-10-06 排查：d5615485 取消后打标签仍烧了一次 API）─────────
+# 思考型模型可能连续几分钟只吐 reasoning_content——取消检查不能只挂在正文 token 上。
+@pytest.mark.asyncio
+class TestCallAiThinkingPhaseCancel:
+
+    def _mock_cfg(self):
+        return MOCK_CFG
+
+    async def test_cancel_during_reasoning_only_stream(self, monkeypatch):
+        """纯 reasoning 流（零正文 token）也必须能被取消：第 20 片 reasoning 触发检查。"""
+        import socket_handlers
+        from services.ai_processor import TaskCancelledError
+
+        monkeypatch.setattr(socket_handlers, 'check_cancelled', lambda job_id: True)
+
+        async def fake_aiter_lines():
+            for i in range(25):
+                yield f'data: {{"choices": [{{"delta": {{"reasoning_content": "思{i}"}}}}]}}'
+            yield 'data: {"choices": [{"delta": {"content": "正文"}}]}'
+            yield 'data: [DONE]'
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.aiter_lines = fake_aiter_lines
+        stream_cm = MagicMock()
+        stream_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.stream = MagicMock(return_value=stream_cm)
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            with pytest.raises(TaskCancelledError):
+                await _call_ai(self._mock_cfg(), "提示词", job_id="j1")
+
+    async def test_no_cancel_when_not_cancelled(self, monkeypatch):
+        """反防：未取消时纯 reasoning 流正常走完（不因检查本身而中断）。"""
+        import socket_handlers
+        monkeypatch.setattr(socket_handlers, 'check_cancelled', lambda job_id: False)
+
+        async def fake_aiter_lines():
+            for i in range(25):
+                yield f'data: {{"choices": [{{"delta": {{"reasoning_content": "思{i}"}}}}]}}'
+            yield 'data: {"choices": [{"delta": {"content": "正文"}}]}'
+            yield 'data: [DONE]'
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.aiter_lines = fake_aiter_lines
+        stream_cm = MagicMock()
+        stream_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.stream = MagicMock(return_value=stream_cm)
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            content, _, _ = await _call_ai(self._mock_cfg(), "提示词", job_id="j1")
+        assert content == "正文"

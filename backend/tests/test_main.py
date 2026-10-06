@@ -55,6 +55,8 @@ class TestProcessJob:
     def test_text_with_summary(self):
         from main import process_job
         jid = self._make_job()
+        # ★ 空转录防线（2026-10-06）：摘要前会读 txt 并拒绝空文本——
+        #   测试装置必须给真实正文，不能靠 _read_text 的 OSError 兜底拿 ''
         with patch("main.get_job") as mj, patch("main.update_job"), \
              patch("main.finish_job") as mf, \
              patch(MOCK_HANDLE, return_value=(Path("/t.txt"),Path("/t.srt"))), \
@@ -63,6 +65,7 @@ class TestProcessJob:
              patch("socket_handlers.emit_ai_token", new_callable=AsyncMock), \
              patch("socket_handlers.emit_log", new_callable=AsyncMock), \
              patch("socket_handlers.emit_progress", new_callable=AsyncMock), \
+             patch("main._read_text", new_callable=AsyncMock, return_value="转录正文内容"), \
              patch("main.open", MagicMock()):
             mj.return_value = {"id":jid,"model":"glm","summary_type":"s",
                 "input_url":"","input_text":"x","input_file":"","title":"t",

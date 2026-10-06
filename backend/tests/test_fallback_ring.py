@@ -499,3 +499,52 @@ def _seed_two_models():
     model_repo.add_model(key='m2', name='M2', endpoint='https://x/v1/chat/completions', api_key='k')
     model_repo.set_default_model('m1')
     model_repo.set_fallback_chain(['m2'], enabled=True)
+
+
+class TestNonStreamingCancel:
+    """★ 非流式候选循环必须逐候选查取消（2026-10-06 排查：打标签/思维导图此前
+    全程不查取消，思考期取消的任务仍会把剩余候选烧完——实测 d5615485）。"""
+
+    @pytest.mark.asyncio
+    async def test_cancel_checked_before_each_candidate(self, monkeypatch):
+        import socket_handlers
+        from services import ai_processor as ap
+
+        tried = []
+
+        async def fake_post(model_cfg, payload, timeout, **kw):
+            tried.append(model_cfg['key'])
+            return 'x', 0, 0
+
+        monkeypatch.setattr(ap, '_post_chat_once', fake_post)
+        monkeypatch.setattr(socket_handlers, 'check_cancelled', lambda job_id: True)
+        monkeypatch.setattr("db.model_repo.get_connection", lambda: _conn(_tmp_db()))
+        _seed_two_models()
+
+        with pytest.raises(ap.TaskCancelledError):
+            await ap.run_with_fallback('m1', '打标签', 5.0, lambda cfg: {}, job_id='j1')
+        assert tried == [], '取消后不允许再发起任何候选调用'
+
+    @pytest.mark.asyncio
+    async def test_no_cancel_probe_when_not_cancelled(self, monkeypatch):
+        """反防：未取消时正常走完候选（取消检查本身不误伤）。"""
+        import socket_handlers
+        from services import ai_processor as ap
+
+        tried = []
+
+        async def fake_post(model_cfg, payload, timeout, **kw):
+            tried.append(model_cfg['key'])
+            if model_cfg['key'] == 'm1':
+                return '', 0, 0
+            return 'ok', 0, 0
+
+        monkeypatch.setattr(ap, '_post_chat_once', fake_post)
+        monkeypatch.setattr(socket_handlers, 'check_cancelled', lambda job_id: False)
+        monkeypatch.setattr("db.model_repo.get_connection", lambda: _conn(_tmp_db()))
+        _seed_two_models()
+
+        out = await ap.run_with_fallback('m1', '打标签', 5.0, lambda cfg: {}, job_id='j1',
+                                         on_success=lambda c, m, i, o: c)
+        assert out == 'ok'
+        assert tried == ['m1', 'm2']

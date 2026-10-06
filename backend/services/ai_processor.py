@@ -150,6 +150,7 @@ async def _call_ai(
             in_tok = 0
             out_tok = 0
             token_count = 0
+            reasoning_count = 0
 
             # ★ 批量推送缓冲区：每 BATCH_TOKENS 个 token 或每 BATCH_INTERVAL 秒发送一次
             _BATCH_TOKENS = 10
@@ -182,12 +183,19 @@ async def _call_ai(
                             delta = choices[0].get('delta', {}) if choices else {}
                             text_piece = delta.get('content', '')
                             reasoning_piece = delta.get('reasoning_content', '')
-                            if reasoning_piece and sio:
-                                thinking_buffer.append(reasoning_piece)
-                                if len(thinking_buffer) >= _BATCH_TOKENS:
-                                    from socket_handlers import emit_ai_thinking
-                                    await emit_ai_thinking(sio, job_id, ''.join(thinking_buffer), done=False)
-                                    thinking_buffer = []
+                            if reasoning_piece:
+                                reasoning_count += 1
+                                # ★ 思考型模型可能连续几分钟只吐 reasoning——取消检查不能
+                                #   只挂在正文 token 上（此前思考期取消要等流自然结束才生效，
+                                #   实测 d5615485：取消后打标签仍继续烧了一次 API）
+                                if reasoning_count % 20 == 0:
+                                    _check_cancelled(job_id)
+                                if sio:
+                                    thinking_buffer.append(reasoning_piece)
+                                    if len(thinking_buffer) >= _BATCH_TOKENS:
+                                        from socket_handlers import emit_ai_thinking
+                                        await emit_ai_thinking(sio, job_id, ''.join(thinking_buffer), done=False)
+                                        thinking_buffer = []
                             if text_piece:
                                 content_parts.append(text_piece)
                                 token_count += 1
@@ -767,6 +775,7 @@ async def correct_transcript(
     sio=None,
     job_id: str = '',
     domain: str = 'default',
+    bypass_cache: bool = False,
 ) -> Tuple[str, int, int, dict]:
     """
     用云端模型校正语音转写文本。
@@ -837,7 +846,8 @@ async def correct_transcript(
 
         content, in_tok, out_tok = await _call_ai(
             model_cfg, prompt, timeout=120.0,
-            sio=sio, job_id=job_id, round_label=f'校正批次 {i+1}/{len(chunks)}'
+            sio=sio, job_id=job_id, round_label=f'校正批次 {i+1}/{len(chunks)}',
+            bypass_cache=bypass_cache,
         )
 
         used = content
@@ -924,6 +934,7 @@ async def correct_transcript_with_fallback(
     domain: str = 'default',
     fallback_models: Optional[List[str]] = None,
     max_fallbacks: Optional[int] = None,
+    bypass_cache: bool = False,
 ) -> Tuple[str, int, int, dict, str]:
     """correct_transcript 的多模型兜底包装：所选模型不可用时自动换下一个候选。
 
@@ -962,6 +973,7 @@ async def correct_transcript_with_fallback(
         try:
             corrected, in_tok, out_tok, stats = await correct_transcript(
                 text, model=cand, sio=sio, job_id=job_id, domain=domain,
+                bypass_cache=bypass_cache,
             )
         except TaskCancelledError:
             raise
@@ -1074,6 +1086,9 @@ async def run_with_fallback(
     last_error: Optional[Exception] = None
     last_detail: str = ''
     for idx, cand in enumerate(candidates):
+        # ★ 每个候选尝试前查取消（2026-10-06 排查）：非流式路径此前全程不查取消，
+        #   思考期取消的任务会继续把打标签/导图的剩余候选烧完（实测 d5615485）
+        _check_cancelled(job_id)
         model_cfg = get_model_by_key(cand)
         if not model_cfg:
             last_error = Exception(f'模型 {cand} 不存在')

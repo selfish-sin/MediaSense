@@ -454,7 +454,8 @@ async def _handle_subtitle_file(input_file, job_dir, sio, job_id):
 
 
 async def _handle_media_file(input_file, job_dir, sio, job_id, model_size, speaker_diarization, language,
-                             whisper_device: str = 'auto', transcribe_engine: str = 'cloud_free'):
+                             whisper_device: str = 'auto', transcribe_engine: str = 'cloud_free',
+                             bypass_cache: bool = False):
     """音视频文件上传：提取音频后转录（云端/本地由引擎路由）。"""
     from services.downloader import handle_file_upload
     from services.transcriber import transcribe_audio
@@ -469,6 +470,7 @@ async def _handle_media_file(input_file, job_dir, sio, job_id, model_size, speak
         cancel_check=lambda: check_cancelled(job_id),
         device=whisper_device,
         engine=transcribe_engine,
+        bypass_cache=bypass_cache,
     )
     return srt_path, txt_path, seg_count, title, platform, files
 
@@ -672,6 +674,7 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                 cancel_check=lambda: check_cancelled(job_id),
                 device=whisper_device,
                 engine=transcribe_engine,
+                bypass_cache=bool(options.get('bypass_cache', False)),
             )
 
     return srt_path, txt_path, seg_count, title, platform, files
@@ -929,6 +932,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                     model_size=model_size, speaker_diarization=speaker_diarization,
                     language=language, whisper_device=whisper_device,
                     transcribe_engine=transcribe_engine,
+                    bypass_cache=bool(options.get('bypass_cache', False)),
                 )
         else:
             # URL输入
@@ -956,9 +960,16 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
         ai_correct = options.get('ai_correct', False)
         if ai_correct and txt_path and Path(txt_path).exists():
             from services.ai_processor import correct_transcript_with_fallback
-            from db.model_repo import get_default_correct_model_key
+            from db.model_repo import get_default_correct_model_key, get_model_by_key
             # 校正模型解析链：任务选项指定 → DB 校正默认（商汤 glm-5.2）→ 总结主模型
             correct_model = options.get('ai_correct_model') or get_default_correct_model_key() or model
+            # ★ 死指针防线（2026-10-06 排查）：DB 校正默认可能指向已删模型
+            #   （实测 default_correct_model=longcat-2-0 已不在模型表）——环会跳过它但
+            #   每次白耗一个候选槽位并刷"模型不存在"，直接落回总结模型
+            if not get_model_by_key(correct_model):
+                await emit_log(sio, job_id, f'⚠ 校正模型 {correct_model} 不存在（已被删除），改用总结模型 {model}')
+                logger.warning(f'[{job_id}] 校正模型 {correct_model} 不存在，回退总结模型 {model}')
+                correct_model = model
             # 校正领域模板：default=通用 / tcm=中医（未知值由 correct_transcript 回退 default）
             correct_domain = options.get('ai_correct_domain') or 'default'
             # ★ 不再在此处自造候选列表（2026-10-05）：候选统一由
@@ -976,6 +987,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                     corrected, c_in, c_out, corr_stats, used_model = await correct_transcript_with_fallback(
                         raw_text, model=correct_model, sio=sio, job_id=job_id,
                         domain=correct_domain,
+                        bypass_cache=bool(options.get('bypass_cache', False)),
                     )
                     # 写回 txt（校正后）
                     with open(txt_path, 'w', encoding='utf-8') as f:
@@ -1098,6 +1110,14 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
 
             text_content = await _read_text(txt_path)
 
+            # ★ 空转录防线（2026-10-06 排查）：识别结果为空还去调 AI 总结，
+            #   只会产出无中生有的幻觉文本——明确失败并给可行动指引
+            if not (text_content or '').strip():
+                raise Exception(
+                    '转录文本为空（视频可能无语音、字幕被判定不可用或识别全部失败）'
+                    '——任务按失败处理；可换转录引擎或关闭强制转录后重试'
+                )
+
             update_job(job_id, status='summarizing', progress_msg='AI处理中')
 
             summary_options = {
@@ -1128,11 +1148,15 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             )
 
             # ★ 路由：根据模式选择处理管线 + 超时
+            # ★ 忽略缓存（2026-10-06）：用户勾选后本次 AI 加工不复用缓存、全新生成
+            _bypass_cache = bool(options.get('bypass_cache', False))
+            if _bypass_cache:
+                await emit_log(sio, job_id, '⏭ 已忽略 AI 缓存（用户勾选），将全新生成')
             if is_research:
                 result_text, in_tok, out_tok = await asyncio.wait_for(
                     research_process(
                         text_content, title=title or options.get('input_url', '未命名'), model=model,
-                        sio=sio, job_id=job_id,
+                        sio=sio, job_id=job_id, bypass_cache=_bypass_cache,
                     ),
                     timeout=3600.0,
                 )
@@ -1143,7 +1167,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                     ai_process(
                         text_content, summary_type=summary_type, model=model,
                         sio=sio, job_id=job_id, summary_options=summary_options,
-                        dimensions=dimensions, ctx=ai_ctx,
+                        dimensions=dimensions, ctx=ai_ctx, bypass_cache=_bypass_cache,
                     ),
                     timeout=1800.0,
                 )
@@ -1174,7 +1198,8 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             result['token_usage'] = {'input': in_tok, 'output': out_tok}
 
             # 自动打标签
-            tags = await generate_tags(text_content, model=model, sio=sio, job_id=job_id)
+            tags = await generate_tags(text_content, model=model, sio=sio, job_id=job_id,
+                                       bypass_cache=_bypass_cache)
             if tags:
                 result['tags'] = tags
                 await emit_log(sio, job_id, f'标签: {", ".join(tags)}')
