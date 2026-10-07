@@ -261,6 +261,93 @@ class TestAiBypassRefresh:
 
 # ---------------------------------------------------------------- transcribe_audio 的 bypass 链路
 
+class TestTranscriptionIdentity:
+    def _engine(self, monkeypatch):
+        from services import transcriber as tr
+        calls = []
+
+        def infer(engine, audio_path, **kw):
+            calls.append((engine, kw['model_size']))
+            audio = Path(audio_path)
+            text = f"{engine}:{kw['model_size']}:{len(calls)}"
+            srt, txt = audio.with_suffix('.srt'), audio.with_suffix('.txt')
+            srt.write_text('1\n00:00:00,000 --> 00:00:01,000\n' + text, encoding='utf-8')
+            txt.write_text(text, encoding='utf-8')
+            return str(srt), str(txt), 1
+
+        monkeypatch.setattr(tr, '_transcribe_by_engine', infer)
+        return tr, calls
+
+    @pytest.mark.asyncio
+    async def test_same_config_hits_but_whisper_size_change_runs(self, cache_on, monkeypatch, tmp_path):
+        tr, calls = self._engine(monkeypatch)
+        for size in ('base', 'base', 'medium'):
+            audio = tmp_path / f'{len(calls)}-{size}.mp3'
+            audio.write_bytes(b'SAME LOCAL AUDIO')
+            out = await tr.transcribe_audio(str(audio), model_size=size, engine='local', language='zh')
+            assert Path(out[1]).read_text(encoding='utf-8').startswith(f'local:{size}:')
+        assert calls == [('local', 'base'), ('local', 'medium')]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('field', ['key', 'endpoint', 'model', 'api'])
+    async def test_cloud_config_change_invalidates(self, cache_on, monkeypatch, tmp_path, field):
+        from services import cloud_asr
+        tr, calls = self._engine(monkeypatch)
+        provider = {'key': 'free1', 'endpoint': 'https://asr.invalid/v1', 'model': 'm1',
+                    'api': 'multipart', 'api_key': 'secret-must-not-be-cached', 'enabled': True}
+        monkeypatch.setattr(cloud_asr, 'provider_for_engine', lambda engine: provider['key'])
+        monkeypatch.setattr(cloud_asr, '_provider_cfg', lambda key: dict(provider))
+        audio = tmp_path / f'{field}.mp3'
+        audio.write_bytes(f'cloud-{field}'.encode())
+        first = await tr.transcribe_audio(str(audio), engine='cloud_free')
+        original = Path(first[1]).read_text(encoding='utf-8')
+        await tr.transcribe_audio(str(audio), engine='cloud_free')
+        assert len(calls) == 1
+        provider[field] += '-changed'
+        second = await tr.transcribe_audio(str(audio), engine='cloud_free')
+        assert Path(second[1]).read_text(encoding='utf-8') != original
+        assert len(calls) == 2
+        from db.database import get_connection
+        conn = get_connection()
+        try:
+            rows = conn.execute('SELECT key, meta FROM ai_cache').fetchall()
+            assert all(provider['api_key'] not in str(tuple(row)) for row in rows)
+        finally:
+            conn.close()
+
+    @pytest.mark.asyncio
+    async def test_fallback_does_not_cache_as_primary(self, cache_on, monkeypatch, tmp_path):
+        tr, calls = self._engine(monkeypatch)
+        infer = tr._transcribe_by_engine
+        state = {'failed': True}
+
+        def transient(engine, audio_path, **kw):
+            if engine == 'cloud_free' and state['failed']:
+                raise RuntimeError('temporary outage')
+            return infer(engine, audio_path, **kw)
+
+        monkeypatch.setattr(tr, '_transcribe_by_engine', transient)
+        monkeypatch.setattr(tr, '_fallback_chain', lambda engine: ('cloud_free', 'local'))
+        audio = tmp_path / 'fallback.mp3'
+        audio.write_bytes(b'FALLBACK TEST')
+        first = await tr.transcribe_audio(str(audio), engine='cloud_free')
+        assert Path(first[1]).read_text(encoding='utf-8').startswith('local:')
+        state['failed'] = False
+        second = await tr.transcribe_audio(str(audio), engine='cloud_free')
+        assert Path(second[1]).read_text(encoding='utf-8').startswith('cloud_free:')
+        assert [engine for engine, _ in calls] == ['local', 'cloud_free']
+
+    @pytest.mark.asyncio
+    async def test_old_cache_is_not_reused(self, cache_on, monkeypatch, tmp_path):
+        tr, calls = self._engine(monkeypatch)
+        audio = tmp_path / 'old.mp3'
+        audio.write_bytes(b'OLD CACHE')
+        key = ai_cache.make_key('asr', ai_cache.file_sha256(str(audio)), 'local', '', 0)
+        ai_cache.cache_put(key, 'asr', 'local', 'old', {'txt': 'old', 'seg_count': 1})
+        await tr.transcribe_audio(str(audio), engine='local')
+        assert len(calls) == 1
+
+
 class TestTranscribeAudioBypass:
     """「忽略缓存」开关（2026-10-06）：bypass_cache=True 跳过 ASR 缓存读取、
     强制重新识别，但重新生成的结果仍回写缓存池修复旧条目。"""

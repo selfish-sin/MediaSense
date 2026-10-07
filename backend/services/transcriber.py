@@ -793,6 +793,7 @@ def _transcribe_sync(
     cancel_check=None,
     device: str = 'auto',
     engine: str = 'cloud_free',
+    execution_state: Optional[dict] = None,
 ) -> Tuple[str, str, int]:
     """同步转录入口（引擎路由递归回退 + Whisper 长音频分片）
 
@@ -806,13 +807,16 @@ def _transcribe_sync(
     chain = _fallback_chain(engine)
     for i, eng in enumerate(chain):
         try:
-            return _transcribe_by_engine(
+            result = _transcribe_by_engine(
                 eng, audio_path,
                 model_size=model_size, platform=platform,
                 speaker_diarization=speaker_diarization, language=language,
                 progress_callback=progress_callback, cancel_check=cancel_check,
                 device=device,
             )
+            if execution_state is not None:
+                execution_state['engine'] = eng
+            return result
         except TranscriptionCancelledError:
             raise  # 用户主动取消不是故障，不回退
         except Exception as e:
@@ -969,6 +973,44 @@ def transcribe_audio_sample(audio_path: str, max_seconds: float = 90.0, language
             pass
 
 
+def _transcription_cache_key(audio_path, engine, language, speaker_diarization,
+                             model_size, platform, device):
+    """只记录影响识别结果的上下文，配置白名单不包含密钥。在线程内计算。"""
+    from services import ai_cache, cloud_asr, local_asr
+
+    chain = _FALLBACK_CHAINS[engine]
+    providers = []
+    models = []
+
+    def stamp(path):
+        path = Path(path)
+        try:
+            stat = path.stat()
+            return [str(path), stat.st_size, stat.st_mtime_ns]
+        except FileNotFoundError:
+            return [str(path), None, None]
+
+    for candidate in chain:
+        if candidate in ('cloud', 'cloud_free'):
+            provider = cloud_asr.provider_for_engine(candidate)
+            cfg = cloud_asr._provider_cfg(provider) if provider else {}
+            providers.append({
+                'engine': candidate, 'key': provider,
+                **{field: cfg.get(field) for field in ('enabled', 'endpoint', 'model', 'api')},
+            })
+        elif candidate == 'local':
+            for size, path in sorted(LOCAL_MODEL_DIRS.items()):
+                models.append([size, [stamp(path / name) for name in
+                                     ('model.bin', 'tokenizer.json', 'config.json')]])
+        elif candidate in local_asr.LOCAL_ENGINES:
+            models.append([candidate, [stamp(part.resolver.resolve() or part.resolver.primary())
+                                      for part in local_asr.LOCAL_ENGINES[candidate].parts]])
+    return ai_cache.transcription_key(audio_path, engine, language, speaker_diarization, {
+        'model_size': model_size, 'platform': platform, 'device': device,
+        'providers': providers, 'models': models,
+    })
+
+
 async def transcribe_audio(
     audio_path: str,
     model_size: str = DEFAULT_WHISPER_MODEL,
@@ -991,6 +1033,9 @@ async def transcribe_audio(
     bypass_cache（2026-10-06）：True 跳过 ASR 缓存**读取**（用户勾了"忽略缓存"，
     缓存不全/有害时强制重新识别）；重新生成的结果仍回写缓存池修复旧条目。
     """
+    engine = engine if engine in ENGINE_VALUES else 'cloud_free'
+    if cancel_check and cancel_check():
+        raise TranscriptionCancelledError('用户取消，转录中止')
     if sio:
         from socket_handlers import emit_progress, emit_log
         # 引擎标签单一事实源：engine_label() → _ENGINE_LABELS（四态 cloud/cloud_free/firered/local）
@@ -998,14 +1043,26 @@ async def transcribe_audio(
         await emit_progress(sio, job_id, 'transcribe', 0, f'正在初始化转录（引擎: {label}, 模型: {model_size}, 语言: {language or "自动检测"}）...')
         await emit_log(sio, job_id, f'🎬 开始转录 | 音频: {Path(audio_path).name} | 引擎: {label} | 模型: {model_size} | 语言: {language or "自动检测"}')
 
-    # ★ ASR 结果缓存（2026-10-06）：键 = 音频文件内容哈希 + 引擎 + 语言 + 说话人分离。
+    # ASR v2 身份包含请求档位、设备/平台、provider 配置与本地模型文件签名。
     #   同一视频反复提交/失败重试时直接复用上次识别结果，不重跑分片调用或本地推理
     #   （实测同一 B 站视频一天内被重复提交 3 次，每次都白跑 72 片 XingChen）。
-    #   换引擎/换语言是不同的键，天然不串。
-    if not bypass_cache:
-        from services import ai_cache as _ai_cache
+    # 旧键不读；一次调用共用同一键，不让读取和写入各算一套身份。
+    from services import ai_cache as _ai_cache
+    cache_key = None
+    if _ai_cache.config.AI_CACHE_ENABLED:
+        try:
+            cache_key = await asyncio.to_thread(
+                _transcription_cache_key, audio_path, engine, language, bool(speaker_diarization),
+                model_size, platform, device,
+            )
+        except Exception as e:
+            logger.warning(f'转录缓存身份生成失败（本次跳过缓存）: {e}')
+    if cancel_check and cancel_check():
+        raise TranscriptionCancelledError('用户取消，转录中止')
+    if not bypass_cache and cache_key:
         _cached = await asyncio.to_thread(
             _ai_cache.lookup_transcription, audio_path, engine, language, bool(speaker_diarization),
+            cache_key=cache_key,
         )
         if _cached:
             if sio:
@@ -1015,7 +1072,7 @@ async def transcribe_audio(
                                f"——相同音频直接复用上次结果，共 {_cached['seg_count']} 段，不重新识别")
                 await emit_progress(sio, job_id, 'transcribe', 100, '转录完成（缓存命中）！')
             return _cached['srt_path'], _cached['txt_path'], _cached['seg_count']
-    elif sio:
+    elif bypass_cache and sio:
         from socket_handlers import emit_log
         await emit_log(sio, job_id, '⏭ 已忽略转录缓存（用户勾选），将全新识别')
 
@@ -1080,6 +1137,7 @@ async def transcribe_audio(
 
     reader_task = asyncio.create_task(_progress_reader())
 
+    execution_state = {}
     try:
         # 在线程池中运行同步转录
         result = await asyncio.to_thread(
@@ -1093,6 +1151,7 @@ async def transcribe_audio(
             cancel_check=cancel_check,
             device=device,
             engine=engine,
+            execution_state=execution_state,
         )
     finally:
         # 通知 reader 排空后退出；超时则 cancel 兜底
@@ -1119,11 +1178,15 @@ async def transcribe_audio(
     # ★ 转录成功结果入缓存池（2026-10-06）：键按音频内容哈希，下次同音频同引擎直接复用
     try:
         from services import ai_cache as _ai_cache
-        await asyncio.to_thread(
-            _ai_cache.store_transcription,
-            audio_path, engine, language, bool(speaker_diarization),
-            result[0], result[1], result[2],
-        )
+        actual_engine = execution_state.get('engine', engine)
+        if cache_key and actual_engine == engine:
+            await asyncio.to_thread(
+                _ai_cache.store_transcription,
+                audio_path, engine, language, bool(speaker_diarization),
+                result[0], result[1], result[2], cache_key=cache_key, actual_engine=actual_engine,
+            )
+        elif actual_engine != engine:
+            logger.info(f'转录使用降级引擎 {actual_engine}，不缓存为 {engine}，下次重试首选引擎')
     except Exception as e:  # 缓存是加速项，绝不影响转录结果
         logger.warning(f'转录结果入缓存失败（不影响主流程）: {e}')
 

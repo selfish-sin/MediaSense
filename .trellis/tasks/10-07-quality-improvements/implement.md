@@ -1,6 +1,7 @@
 # 实施与验证
 
-- [ ] ASR 身份/实际引擎：补真实函数回归，定向 ASR/cache/管理测试，commit。
+- [x] ASR 身份/实际引擎：7 条新回归修复前全失败；修复后 cache/transcriber/cloud/管理共 242 条通过。
+  v2 键纳入模型档位、设备/平台、provider 白名单及模型文件签名；整条降级结果不写成首选缓存。
 - [ ] Python 静态门禁/测试告警：修真实基线，运行 ruff 与 backend 验证，commit。
 - [ ] 依赖锁/启动兼容/CI：干净安装与依赖检查，全量 verify，commit。
 - [ ] 过时任务/索引/规范：核对证据、归档、文档回写，commit。

@@ -7,7 +7,7 @@ YouTube Tool V2 - AI/转录结果缓存池（2026-10-06）
     key 要素 = endpoint + model_id + temperature + max_tokens + prompt
     ——提示词或模型任一变化自然 miss；显式重跑（重新总结等）由调用方传 bypass_cache。
 - op='asr'：转录结果（transcriber.transcribe_audio）
-    key 要素 = 音频文件 sha256 + 引擎 + 语言 + 说话人分离
+    key 要素 = asr_v2 + 音频 sha256 + 引擎 + 语言 + 说话人分离 + 模型/配置上下文
     ——同一视频反复提交/失败重试时，转录（分片调用或本地推理）是大头开销。
 
 契约：
@@ -126,8 +126,16 @@ def _prune(conn) -> None:
 
 # ============ 转录（ASR）缓存 ============
 
+def transcription_key(audio_path: str, engine: str, language: Optional[str],
+                      speaker_diarization: bool, context: Optional[dict] = None) -> str:
+    """v2 身份：完整请求/模型上下文序列化后散列，旧四要素缓存不再读取。"""
+    signature = json.dumps(context or {}, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+    return make_key('asr_v2', file_sha256(audio_path), engine, language or '',
+                    int(bool(speaker_diarization)), signature)
+
+
 def lookup_transcription(audio_path: str, engine: str, language: Optional[str],
-                         speaker_diarization: bool) -> Optional[Dict[str, Any]]:
+                         speaker_diarization: bool, *, cache_key: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """同音频+同引擎已有识别结果时，把上次 SRT/TXT 写回约定路径。
 
     返回 {'srt_path','txt_path','seg_count','created_at','engine'}；未命中/异常返回 None。
@@ -136,11 +144,10 @@ def lookup_transcription(audio_path: str, engine: str, language: Optional[str],
     if not config.AI_CACHE_ENABLED:
         return None
     try:
-        audio_hash = file_sha256(audio_path)
+        key = cache_key or transcription_key(audio_path, engine, language, speaker_diarization)
     except OSError as e:
         logger.warning(f'转录缓存跳过（音频不可读）: {e}')
         return None
-    key = make_key('asr', audio_hash, engine or '', language or '', int(bool(speaker_diarization)))
     hit = cache_get(key)
     if not hit:
         return None
@@ -164,7 +171,8 @@ def lookup_transcription(audio_path: str, engine: str, language: Optional[str],
 
 def store_transcription(audio_path: str, engine: str, language: Optional[str],
                         speaker_diarization: bool,
-                        srt_path: str, txt_path: str, seg_count: int) -> bool:
+                        srt_path: str, txt_path: str, seg_count: int, *,
+                        cache_key: Optional[str] = None, actual_engine: Optional[str] = None) -> bool:
     """转录成功后把 SRT/TXT 入池（键 = 音频内容哈希，换文件名不影响命中）。"""
     if not config.AI_CACHE_ENABLED:
         return False
@@ -177,10 +185,10 @@ def store_transcription(audio_path: str, engine: str, language: Optional[str],
     if not srt.strip() or not txt.strip():
         return False
     try:
-        audio_hash = file_sha256(audio_path)
+        key = cache_key or transcription_key(audio_path, engine, language, speaker_diarization)
     except OSError as e:
         logger.warning(f'转录缓存跳过（音频不可读）: {e}')
         return False
-    key = make_key('asr', audio_hash, engine or '', language or '', int(bool(speaker_diarization)))
-    return cache_put(key, 'asr', engine or '', srt,
-                     meta={'txt': txt, 'seg_count': int(seg_count)})
+    actual_engine = actual_engine or engine
+    return cache_put(key, 'asr', actual_engine, srt,
+                     meta={'txt': txt, 'seg_count': int(seg_count), 'actual_engine': actual_engine})
