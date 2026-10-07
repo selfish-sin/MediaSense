@@ -206,6 +206,45 @@ class TestCallAiCache:
         assert (i2, o2) == (0, 0)
 
 
+class TestAiBypassRefresh:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('streaming', [True, False])
+    async def test_bypass_refreshes_cache_for_next_normal_call(self, cache_on, monkeypatch, streaming):
+        """强制重新生成要替换旧缓存；随后普通调用应复用新结果。"""
+        import httpx
+        from services import ai_processor as ap
+
+        cfg = dict(TestCallAiCache._CFG)
+        prompt = f'刷新缓存-{streaming}'
+        payload = {'model': cfg['model_id'], 'messages': [{'role': 'user', 'content': prompt}]}
+        requests = []
+        response_text = ['旧结果']
+
+        def respond(request):
+            requests.append(request)
+            content = response_text[0]
+            if streaming:
+                import json
+                event = json.dumps({'choices': [{'delta': {'content': content}}]})
+                return httpx.Response(200, text=f'data: {event}\n\ndata: [DONE]\n\n')
+            return httpx.Response(200, json={'choices': [{'message': {'content': content}}]})
+
+        original_client = httpx.AsyncClient
+        monkeypatch.setattr(ap.httpx, 'AsyncClient',
+                            lambda **kw: original_client(transport=httpx.MockTransport(respond), **kw))
+
+        async def call(bypass=False):
+            if streaming:
+                return await ap._call_ai(cfg, prompt, bypass_cache=bypass)
+            return await ap._post_chat_once(cfg, payload, 5, bypass_cache=bypass)
+
+        assert (await call())[0] == '旧结果'
+        response_text[0] = '新结果'
+        assert (await call(True))[0] == '新结果'
+        assert (await call())[0] == '新结果'
+        assert len(requests) == 2, '刷新后的普通调用必须命中新缓存'
+
+
 # ---------------------------------------------------------------- transcribe_audio 的 bypass 链路
 
 class TestTranscribeAudioBypass:

@@ -130,13 +130,13 @@ async def _call_ai(
 
     # ★ AI 结果缓存：命中即复用（2026-10-06）
     cache_key = ''
-    if not bypass_cache and prompt:
+    if prompt:
         cache_key = ai_cache.make_key(
             'llm', model_cfg.get('endpoint', ''),
             model_cfg.get('model_id', model_cfg.get('key', '')),
             payload.get('temperature', 0.3), max_tokens or '', prompt,
         )
-        cached = ai_cache.cache_get(cache_key)
+        cached = None if bypass_cache else ai_cache.cache_get(cache_key)
         if cached:
             return await _emit_cached_content(
                 cached, sio=sio, job_id=job_id, round_label=round_label,
@@ -1021,16 +1021,15 @@ async def _post_chat_once(
     ★ AI 结果缓存（2026-10-06）：键 = endpoint+model_id+整个 payload（含提示词）。
     """
     import httpx as _httpx
-    cache_key = ''
+    try:
+        payload_sig = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        payload_sig = repr(payload)
+    cache_key = ai_cache.make_key(
+        'llm_once', model_cfg.get('endpoint', ''),
+        model_cfg.get('model_id', model_cfg.get('key', '')), payload_sig,
+    )
     if not bypass_cache:
-        try:
-            payload_sig = json.dumps(payload, sort_keys=True, ensure_ascii=False)
-        except (TypeError, ValueError):
-            payload_sig = repr(payload)
-        cache_key = ai_cache.make_key(
-            'llm_once', model_cfg.get('endpoint', ''),
-            model_cfg.get('model_id', model_cfg.get('key', '')), payload_sig,
-        )
         cached = ai_cache.cache_get(cache_key)
         if cached:
             if sio:
