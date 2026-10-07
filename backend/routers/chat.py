@@ -54,6 +54,7 @@ class ChatMessage(BaseModel):
     # 联网模式：strict=严格依据材料 / broad=广泛收集；None 时回退 enable_search（向后兼容）
     search_mode: Optional[Literal["strict", "broad", "off"]] = None
     regenerate: bool = False
+    # 重新生成的目标轮：指定提问行 id（任意一轮都能重生）；缺省 = 最后一轮
     user_message_id: Optional[int] = None
 
 
@@ -156,22 +157,52 @@ def _activate_variant(job_id, session_id, group, msg_id):
         conn.close()
 
 
-def _get_session_history(job_id, session_id, limit=30):
-    """模型上下文用：排除非激活变体（后续提问只引用生效版本）。
+def _get_session_history(job_id, session_id, limit=30, before_id=None):
+    """模型上下文用：排除非激活变体（后续提问只引用生效版本），并按「轮」归位排序。
 
-    is_active 兜底：存量行/用户行默认 1；条件写成
-    `(role = 'user' OR is_active = 1)`——用户消息恒参与，assistant 只取生效版本。
+    排序不是纯 id：中间轮重新生成时新变体行 append 在会话末尾，纯 id 排序会让它在
+    上下文里排到最后一轮之后（错位）。归位规则：
+      - 变体组的「位置锚点」= 组内最早一行的 id（组的所有版本共享同一位置）；
+      - 每行归属「锚点之前最近的一条 user 行」所在轮，轮内按 id 升序。
+    before_id 用于只要某轮之前的历史（重生成中间轮）。
     """
     conn = get_connection()
     try:
-        rows = conn.execute(
-            "SELECT role, content FROM job_chats WHERE job_id = ? AND session_id = ? "
-            "AND (role = 'user' OR is_active = 1) ORDER BY id DESC LIMIT ?",
-            (job_id, session_id, limit),
-        ).fetchall()
-        return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+        sql = ("SELECT id, role, content, is_active, variant_group FROM job_chats "
+               "WHERE job_id = ? AND session_id = ?")
+        params: List = [job_id, session_id]
+        if before_id is not None:
+            sql += " AND id < ?"
+            params.append(before_id)
+        rows = conn.execute(sql + " ORDER BY id ASC", tuple(params)).fetchall()
     finally:
         conn.close()
+
+    group_anchor: Dict[str, int] = {}
+    for r in rows:
+        g = r["variant_group"] or ""
+        if g:
+            group_anchor[g] = min(group_anchor.get(g, r["id"]), r["id"])
+    user_ids = [r["id"] for r in rows if r["role"] == "user"]
+
+    def _owner_of(anchor: int):
+        """锚点之前最近的一条 user 行 id（无则 None）"""
+        owner = None
+        for uid in user_ids:
+            if uid <= anchor:
+                owner = uid
+            else:
+                break
+        return owner
+
+    positioned = []
+    for r in rows:
+        anchor = group_anchor.get(r["variant_group"] or "", r["id"])
+        owner = _owner_of(anchor)
+        positioned.append((owner if owner is not None else anchor, anchor, r["id"], r))
+    positioned.sort(key=lambda t: (t[0], t[1], t[2]))
+    kept = [r for _, _, _, r in positioned if r["role"] == "user" or r["is_active"] == 1]
+    return [{"role": r["role"], "content": r["content"]} for r in kept[-limit:]]
 
 
 def _maybe_rename_session(job_id, session_id, question):
@@ -331,6 +362,51 @@ def _delete_answer(conn, job_id, msg_id):
         anchor = msg_id
     _prune_orphan_question(conn, job_id, session_id, anchor)
     return True
+
+
+def _resolve_regenerate_turn(job_id, session_id, user_message_id=None):
+    """定位要重新生成的一轮。
+
+    返回 `{question, user_id, prev, group}`；无可重生对象返回 None：
+      - user_message_id 指定提问行（任意一轮）；缺省取最后一轮（向后兼容）
+      - prev = 该轮现有回答里生效的那条（无激活则取最新一条）
+      - group = prev 的变体组（空串表示尚未归组）
+    """
+    conn = get_connection()
+    try:
+        if user_message_id:
+            urow = conn.execute(
+                "SELECT id, content FROM job_chats WHERE job_id = ? AND session_id = ? "
+                "AND id = ? AND role = 'user'",
+                (job_id, session_id, user_message_id),
+            ).fetchone()
+        else:
+            urow = conn.execute(
+                "SELECT id, content FROM job_chats WHERE job_id = ? AND session_id = ? "
+                "AND role = 'user' ORDER BY id DESC LIMIT 1",
+                (job_id, session_id),
+            ).fetchone()
+        if not urow:
+            return None
+        nxt = _next_user_id(conn, job_id, session_id, urow["id"])
+        sql = ("SELECT id, variant_group, is_active FROM job_chats "
+               "WHERE job_id = ? AND session_id = ? AND role = 'assistant' AND id > ?")
+        params: List = [job_id, session_id, urow["id"]]
+        if nxt is not None:
+            sql += " AND id < ?"
+            params.append(nxt)
+        answers = conn.execute(sql + " ORDER BY id ASC", tuple(params)).fetchall()
+    finally:
+        conn.close()
+    if not answers:
+        return None
+    prev = next((a for a in answers if a["is_active"] == 1), answers[-1])
+    return {
+        "question": urow["content"] or "",
+        "user_id": urow["id"],
+        "prev": prev,
+        "group": prev["variant_group"] or "",
+    }
 
 
 def _sse(obj):
@@ -700,38 +776,28 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
             # 先取历史再插入新问题——否则历史里已含本条问题，
             # _build_messages 末尾再 append 一次会把问题发给模型两遍
             history = _get_session_history(job_id, session_id)
+            # 本轮发给模型的问题：新提问 = 用户输入；重新生成中间轮 = 该轮原提问
+            ask = question
 
             if not msg.regenerate:
-                user_id = _insert_chat(job_id, session_id, "user", question)
-                _maybe_rename_session(job_id, session_id, question)
+                user_id = _insert_chat(job_id, session_id, "user", ask)
+                _maybe_rename_session(job_id, session_id, ask)
             else:
-                # 重新生成 = 追加新变体：定位最后一条 user 行之后的当前生效回答，
-                # 归入其 variant_group（无组则从本代起新建组），组内旧版本全部转为非激活
-                conn = get_connection()
-                try:
-                    last_user = conn.execute(
-                        "SELECT id, content FROM job_chats "
-                        "WHERE job_id = ? AND session_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1",
-                        (job_id, session_id),
-                    ).fetchone()
-                    prev = None
-                    if last_user:
-                        prev = conn.execute(
-                            "SELECT id, variant_group FROM job_chats "
-                            "WHERE job_id = ? AND session_id = ? AND role = 'assistant' AND id > ? "
-                            "ORDER BY id ASC LIMIT 1",
-                            (job_id, session_id, last_user["id"]),
-                        ).fetchone()
-                finally:
-                    conn.close()
-                if prev is None:
+                # 重新生成 = 追加新变体（目标轮由 user_message_id 指定，缺省最后一轮）：
+                # 归入该轮回答的 variant_group（无组则从本代起新建组），组内旧版本全部转为非激活。
+                # 中间轮的提问不在 history 末尾 → 取该轮之前的历史，并把该提问作为本轮问题传回。
+                target = _resolve_regenerate_turn(job_id, session_id, msg.user_message_id)
+                if target is None:
                     yield _sse({"type": "error", "message": "没有可重新生成的回答"})
                     return
-                variant_group = prev["variant_group"] or _gen_variant_group()
+                prev = target["prev"]
+                variant_group = target["group"] or _gen_variant_group()
+                history = _get_session_history(job_id, session_id, before_id=target["user_id"])
+                ask = target["question"]
                 conn = get_connection()
                 try:
                     # 存量独立回答（无组）先认领进组，否则旧版本仍 is_active=1 继续进上下文
-                    if not prev["variant_group"]:
+                    if not target["group"]:
                         conn.execute(
                             "UPDATE job_chats SET variant_group = ? WHERE id = ?",
                             (variant_group, prev["id"]),
@@ -748,8 +814,9 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
             search_mode = _resolve_search_mode(msg)
             search_text = ""
             if search_mode != "off":
-                # 重生成时提问可能为空 → 回退用最近一条用户消息作检索词（无检索词则如实报失败）
-                search_query = question
+                # 检索词 = 本轮提问（重生成中间轮时即该轮提问）；
+                # 仅存量空提问行才回退用历史里最近一条用户消息
+                search_query = ask
                 if not search_query and msg.regenerate:
                     search_query = next(
                         (h["content"] for h in reversed(history) if h.get("role") == "user"), "")
@@ -785,8 +852,9 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
                                 "message": outcome.error,
                             })
 
+            # 提问一律显式传入（重生成的中间轮提问不在 history 末尾，故不再靠 history 携带）
             messages = _build_messages(
-                original_ctx, result_ctx, history, question, search_text, msg.regenerate,
+                original_ctx, result_ctx, history, ask, search_text, False,
                 search_mode=search_mode,
             )
 

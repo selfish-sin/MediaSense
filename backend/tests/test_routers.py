@@ -1496,6 +1496,171 @@ class TestChatBatchDelete:
         assert resp.json()["deleted"] == 0
 
 
+class TestChatRegenAnyTurn:
+    """任意一轮重新生成：按 user_message_id 定位目标轮 + 上下文按「轮」归位（不因 id 追加跑位）。"""
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, client):
+        """三轮会话：第 1 轮两条变体（生效 v2），第 2/3 轮各一条单变体回答。
+        ★ 每测唯一 job/session：DB 是会话级共享的，同 id 会跨测试串数据。"""
+        import uuid
+        from routers.chat import _insert_chat, _gen_variant_group, _ensure_session, _activate_variant
+        from db.database import get_connection
+        self.JID = "jr-" + uuid.uuid4().hex[:8]
+        self.SID = "sr-" + uuid.uuid4().hex[:8]
+        conn = get_connection()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO jobs (id, title, status, result_text) VALUES (?, '重生成测试', 'completed', '结果')",
+                (self.JID,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        _ensure_session(self.JID, self.SID)
+        self.group = _gen_variant_group()
+        self.u1 = _insert_chat(self.JID, self.SID, "user", "问题一")
+        self.a1 = _insert_chat(self.JID, self.SID, "assistant", "答案一v1", variant_group=self.group)
+        self.a2 = _insert_chat(self.JID, self.SID, "assistant", "答案一v2", variant_group=self.group)
+        _activate_variant(self.JID, self.SID, self.group, self.a2)
+        self.u2 = _insert_chat(self.JID, self.SID, "user", "问题二")
+        self.a3 = _insert_chat(self.JID, self.SID, "assistant", "答案二")
+        self.u3 = _insert_chat(self.JID, self.SID, "user", "问题三")
+        self.a4 = _insert_chat(self.JID, self.SID, "assistant", "答案三")
+
+    def _stub_model(self, monkeypatch):
+        """只短路模型调用（httpx）与任务/模型配置；DB 助手保持真实——本类要验证落库与上下文顺序"""
+        monkeypatch.setattr("routers.chat.get_job", lambda job_id: {
+            "id": job_id, "status": "completed", "result_text": "已有分析", "files": {}, "model": "m1",
+        })
+        monkeypatch.setattr("routers.chat.get_model_by_key", lambda key: {
+            "key": "m1", "model_id": "m1",
+            "endpoint": "https://x.example.com/v1/chat/completions", "api_key": "sk-x", "auth_type": "bearer",
+        })
+
+        def _boom(*a, **k):
+            raise RuntimeError("模型调用被测试短路")
+
+        monkeypatch.setattr("routers.chat.httpx.AsyncClient", _boom)
+
+        async def _not_disconnected(self):
+            return False
+
+        monkeypatch.setattr("starlette.requests.Request.is_disconnected", _not_disconnected)
+
+    def _stream(self, client, payload):
+        return client.post(f"/api/jobs/{self.JID}/chat/sessions/{self.SID}/stream", json=payload)
+
+    def _rows(self, ids):
+        from db.database import get_connection
+        conn = get_connection()
+        try:
+            marks = ",".join("?" * len(ids))
+            rows = conn.execute(
+                f"SELECT id, role, variant_group, is_active, content FROM job_chats WHERE id IN ({marks}) ORDER BY id",
+                tuple(ids),
+            ).fetchall()
+            return {r["id"]: dict(r) for r in rows}
+        finally:
+            conn.close()
+
+    def test_regenerate_middle_turn_appends_variant_to_that_turn(self, client, monkeypatch):
+        """★ 回归锚点：指定第 1 轮提问 → 新变体入该轮原组且生效，后续轮次原样不动"""
+        import re as _re
+        self._stub_model(monkeypatch)
+        resp = self._stream(client, {"content": "", "regenerate": True, "user_message_id": self.u1})
+        assert resp.status_code == 200
+        m = _re.search(r'"variant_group": "([^"]+)", "variant_count": (\d+)', resp.text)
+        assert m, resp.text
+        assert m.group(1) == self.group      # 沿用该轮原组
+        assert int(m.group(2)) == 3          # a1 + a2 + 新变体
+        from routers.chat import _variant_rows
+        rows = _variant_rows(self.JID, self.SID, self.group)
+        assert len(rows) == 3
+        new_id = rows[-1]["id"]
+        marks = self._rows([self.a1, self.a2, new_id, self.a3, self.a4])
+        assert marks[new_id]["is_active"] == 1          # 新版本生效
+        assert marks[self.a1]["is_active"] == 0 and marks[self.a2]["is_active"] == 0
+        assert marks[self.a3]["is_active"] == 1         # 后续轮次不受影响
+        assert marks[self.a4]["is_active"] == 1
+        assert marks[self.a3]["content"] == "答案二" and marks[self.a4]["content"] == "答案三"
+
+    def test_regenerate_middle_turn_keeps_context_position(self, client, monkeypatch):
+        """★ 回归锚点：新变体行 id 在会话末尾，但模型上下文里必须紧跟其提问（不能排到最后一轮之后）"""
+        self._stub_model(monkeypatch)
+        self._stream(client, {"content": "", "regenerate": True, "user_message_id": self.u1})
+        from routers.chat import _get_session_history, _variant_rows
+        new_id = _variant_rows(self.JID, self.SID, self.group)[-1]["id"]
+        new_content = self._rows([new_id])[new_id]["content"]
+        contents = [h["content"] for h in _get_session_history(self.JID, self.SID)]
+        assert contents[0] == "问题一"
+        assert contents[1] == new_content               # 紧跟其提问
+        assert contents[2:] == ["问题二", "答案二", "问题三", "答案三"]
+        assert contents[-1] == "答案三"                  # 不是新变体
+
+    def test_regenerate_first_turn_history_excludes_target_question(self, client, monkeypatch):
+        """重生成中间轮时 history = 该轮之前（提问由 ask 显式带回，不得重复出现）"""
+        from routers.chat import _build_messages as real_build
+        self._stub_model(monkeypatch)
+        seen = {}
+
+        def _spy(original_ctx, result_ctx, history, question, search_text, regenerate, search_mode="off"):
+            seen["history"] = [h["content"] for h in history]
+            seen["question"] = question
+            return real_build(original_ctx, result_ctx, history, question, search_text, regenerate, search_mode)
+
+        monkeypatch.setattr("routers.chat._build_messages", _spy)
+        self._stream(client, {"content": "", "regenerate": True, "user_message_id": self.u2})
+        assert seen["history"] == ["问题一", "答案一v2"]   # 第 2 轮之前（含第 1 轮生效版本）
+        assert seen["question"] == "问题二"
+
+    def test_regenerate_middle_turn_searches_that_question(self, client, monkeypatch):
+        """联网检索词 = 目标轮提问（此前固定取最近一条用户消息 → 中间轮会搜错问题）"""
+        from services.web_search import SearchOutcome
+        self._stub_model(monkeypatch)
+        seen = {}
+
+        async def _fake_search(mode, question, job_title=""):
+            seen["question"] = question
+            return SearchOutcome(error="测试短路")
+
+        monkeypatch.setattr("routers.chat._run_search", _fake_search)
+        resp = self._stream(client, {"content": "", "regenerate": True, "user_message_id": self.u1,
+                                     "search_mode": "strict"})
+        assert resp.status_code == 200
+        assert seen["question"] == "问题一"
+
+    def test_regenerate_unknown_or_assistant_target_rejected(self, client, monkeypatch):
+        self._stub_model(monkeypatch)
+        resp = self._stream(client, {"content": "", "regenerate": True, "user_message_id": 999999})
+        assert "没有可重新生成的回答" in resp.text
+        # 指向回答行（非 user 行）同样拒绝
+        resp2 = self._stream(client, {"content": "", "regenerate": True, "user_message_id": self.a3})
+        assert "没有可重新生成的回答" in resp2.text
+
+    def test_regenerate_target_of_other_session_rejected(self, client, monkeypatch):
+        """目标提问行必须属于本会话（防跨会话误操作）"""
+        from routers.chat import _insert_chat, _ensure_session
+        self._stub_model(monkeypatch)
+        _ensure_session(self.JID, "other-sid")
+        other_u = _insert_chat(self.JID, "other-sid", "user", "别的问题")
+        resp = self._stream(client, {"content": "", "regenerate": True, "user_message_id": other_u})
+        assert "没有可重新生成的回答" in resp.text
+
+    def test_regenerate_without_target_still_uses_last_turn(self, client, monkeypatch):
+        """向后兼容：不传 user_message_id = 重生成最后一轮（现行为）"""
+        import re as _re
+        self._stub_model(monkeypatch)
+        resp = self._stream(client, {"content": "", "regenerate": True})
+        m = _re.search(r'"assistant_id": (\d+), "token_usage"', resp.text)
+        assert m, resp.text
+        new_id = int(m.group(1))
+        marks = self._rows([new_id, self.a4, self.a3])
+        assert marks[new_id]["is_active"] == 1 and marks[self.a4]["is_active"] == 0   # a4 归组转非激活
+        assert marks[new_id]["variant_group"] and marks[new_id]["variant_group"] == marks[self.a4]["variant_group"]
+        assert marks[self.a3]["is_active"] == 1                                       # 其它轮不动
+
+
 # ── ASR 状态 ──
 class TestAsrStatusRouter:
     @pytest.fixture(autouse=True)
