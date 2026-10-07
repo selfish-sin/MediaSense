@@ -11,7 +11,6 @@ hiddenimports += collect_submodules('uvicorn')
 hiddenimports += collect_submodules('engineio')
 hiddenimports += collect_submodules('yt_dlp')
 hiddenimports += collect_submodules('faster_whisper')
-hiddenimports += collect_submodules('bilibili_api')
 hiddenimports += collect_submodules('httpx')
 tmp_ret = collect_all('ctranslate2')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
