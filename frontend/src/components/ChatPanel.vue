@@ -13,6 +13,7 @@
           class="cp-ghost-select cp-session-select"
           placeholder="选择对话"
           :disabled="streaming"
+          filterable
           @change="onSelectSession"
         >
           <el-option v-for="s in sessions" :key="s.id" :label="s.title" :value="s.id">
@@ -49,6 +50,7 @@
               <el-dropdown-item command="new" :icon="Plus">新建对话</el-dropdown-item>
               <el-dropdown-item command="rename" :icon="Pencil" :disabled="!activeSessionId || streaming">重命名</el-dropdown-item>
               <el-dropdown-item command="copy" :icon="Copy" :disabled="!messages.length">复制对话</el-dropdown-item>
+              <el-dropdown-item command="export" :icon="Download" :disabled="!messages.length">导出对话(.md)</el-dropdown-item>
               <el-dropdown-item command="clear" :icon="Trash2" :disabled="!messages.length || streaming" divided>清空当前对话</el-dropdown-item>
               <el-dropdown-item command="delete" :icon="Trash2" :disabled="!activeSessionId || streaming">删除当前对话</el-dropdown-item>
             </el-dropdown-menu>
@@ -108,6 +110,7 @@
                 <div class="cp-ai-main" :class="{ 'cp-streaming': msg === activeMsg && streaming }">
                   <div class="cp-ai-head">
                     <span v-if="msgTime(msg)" class="cp-time">{{ msgTime(msg) }}</span>
+                    <span v-if="msg.durationMs" class="cp-tokens">{{ durationLabel(msg.durationMs) }}</span>
                     <span v-if="msg.token_usage && (msg.token_usage.input || msg.token_usage.output)" class="cp-tokens">
                       {{ tokenLabel(msg.token_usage) }}
                     </span>
@@ -195,6 +198,16 @@
                       </span>
                     </a>
                   </div>
+
+                  <!-- 快捷追问（豆包式）：仅最后一条 AI 回答下方显示，点击即发送 -->
+                  <div
+                    v-if="!streaming && msg.content && !msg.content.includes('[错误]') && msg === messages[messages.length - 1]"
+                    class="cp-followups"
+                  >
+                    <button v-for="q in FOLLOWUPS" :key="q" type="button" class="cp-chip cp-chip-sm" @click="onSend(q)">
+                      {{ q }}
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -280,7 +293,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import {
   MessageCircle, Plus, Pencil, Trash2, ArrowDown, ArrowUp, Sparkles,
-  Search, Copy, ChevronDown, Globe, Square, MoreVertical, RefreshCw,
+  Search, Copy, ChevronDown, Globe, Square, MoreVertical, RefreshCw, Download,
 } from 'lucide-vue-next'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatApi } from '../utils/api'
@@ -336,6 +349,13 @@ const SUGGESTIONS = [
   '围绕这个主题，给我 3 个值得深挖的问题',
 ]
 
+// 快捷追问（豆包式）：最后一条 AI 回答下方展示，点击即发送
+const FOLLOWUPS = [
+  '再展开讲讲上面的重点',
+  '帮我把这些整理成结构化笔记',
+  '针对内容给我 3 个可执行的建议',
+]
+
 function hostOf(url) {
   try {
     return new URL(url).host
@@ -347,6 +367,10 @@ function hostOf(url) {
 function tokenLabel(usage) {
   const total = (usage.input || 0) + (usage.output || 0)
   return total >= 1000 ? `${(total / 1000).toFixed(1)}k tokens` : `${total} tokens`
+}
+
+function durationLabel(ms) {
+  return `${(ms / 1000).toFixed(1)}s`
 }
 
 // ===== 多会话状态 =====
@@ -450,8 +474,29 @@ function onMenuCommand(cmd) {
   if (cmd === 'new') createSession()
   else if (cmd === 'rename') renameSession()
   else if (cmd === 'copy') copyConversation()
+  else if (cmd === 'export') exportConversation()
   else if (cmd === 'clear') onClear()
   else if (cmd === 'delete') deleteSession()
+}
+
+// 导出当前对话为 .md 文件下载（格式与「复制对话」同源：chatExport.buildConversationMarkdown）
+function exportConversation() {
+  if (!messages.value.length) {
+    ElMessage.warning('当前对话还没有消息')
+    return
+  }
+  const title = sessions.value.find((s) => s.id === activeSessionId.value)?.title || '追问对话'
+  const md = buildConversationMarkdown(messages.value, title)
+  const stamp = new Date().toISOString().slice(0, 10)
+  const safe = (title.replace(/[\\/:*?"<>|]/g, '_').trim() || '追问对话').slice(0, 40)
+  const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${safe}-${stamp}.md`
+  a.click()
+  URL.revokeObjectURL(url)
+  ElMessage.success('已导出 Markdown 文件')
 }
 
 // 加载当前会话历史
@@ -566,6 +611,7 @@ async function onSend(overrideContent) {
   scrollToBottom(true)
 
   abortCtrl = new AbortController()
+  const startedAt = Date.now()
   chatApi.streamChat(
     props.jobId,
     sessionId,
@@ -597,14 +643,17 @@ async function onSend(overrideContent) {
         streaming.value = false
         activeMsg.value = null
         abortCtrl = null
+        markDuration(assistant, Date.now() - startedAt)
         scrollToBottom()
         refreshSessionMeta()
         if (aborted && !disposed) {
           // 后端在断连时已落库，稍后重载以获取真实 id 与最终内容（卸载后不再触发）
           clearTimeout(historyTimer)
-          historyTimer = setTimeout(() => {
+          historyTimer = setTimeout(async () => {
             historyTimer = null
-            loadHistory()
+            await loadHistory()
+            // 历史重载会重建 messages（本地 durationMs 不落库），给最后一条回答补回耗时
+            markLastDuration(Date.now() - startedAt)
           }, 300)
         }
       },
@@ -612,6 +661,7 @@ async function onSend(overrideContent) {
         streaming.value = false
         activeMsg.value = null
         abortCtrl = null
+        markDuration(assistant, Date.now() - startedAt)
         assistant.content = (assistant.content || '') + '\n\n**[错误]** ' + (err?.message || '网络错误')
         ElMessage.error('追问失败: ' + (err?.message || '未知错误'))
         scrollToBottom()
@@ -622,6 +672,28 @@ async function onSend(overrideContent) {
 
 function onStop() {
   if (abortCtrl) abortCtrl.abort()
+}
+
+// 生成耗时写入响应式代理（raw 对象直接改不触发视图更新，同 setSearchState 的坑）
+function markDuration(assistant, ms) {
+  const live = messages.value.find((m) => m.id === assistant.id)
+  if (live) live.durationMs = ms
+  else assistant.durationMs = ms
+}
+
+// 给最后一条 AI 回答补耗时（中断后历史重载场景用）
+function markLastDuration(ms) {
+  const assistants = messages.value.filter((m) => m.role === 'assistant')
+  const last = assistants[assistants.length - 1]
+  if (last && !last.durationMs) last.durationMs = ms
+}
+
+// Esc 中断流式生成（ChatGPT/豆包惯例；流式中不会同时开着确认对话框，无冲突）
+function onKeydown(e) {
+  if (e.key === 'Escape' && streaming.value) {
+    e.stopPropagation()
+    onStop()
+  }
 }
 
 // 联网检索状态写入该条消息的响应式代理（直接改局部裸对象不会触发视图更新）
@@ -732,6 +804,7 @@ async function onClear() {
 }
 
 onMounted(async () => {
+  window.addEventListener('keydown', onKeydown)
   await ensureModels()
   await loadSessions()
 })
@@ -739,6 +812,7 @@ onMounted(async () => {
 // 组件卸载：终止流式请求 + 清理延时重载，避免对已卸载组件写状态
 onUnmounted(() => {
   disposed = true
+  window.removeEventListener('keydown', onKeydown)
   if (abortCtrl) {
     abortCtrl.abort()
     abortCtrl = null
@@ -951,6 +1025,18 @@ watch(
   background: var(--app-chip-hover-bg, var(--app-hover-bg));
   border-color: rgba(var(--app-accent-1-rgb), 0.45);
   color: var(--app-text);
+}
+.cp-chip-sm {
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+/* 快捷追问（最后一条 AI 回答下方） */
+.cp-followups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
 }
 
 /* ---- 消息行（保留 .chat-row/data-mid：onScroll 导航轨跟踪依赖） ---- */
