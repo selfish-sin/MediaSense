@@ -1,6 +1,6 @@
 # youtube_tool_v2 CONTEXT
 
-> 最近核对：2026-10-07 | FastAPI + Socket.IO | 默认端口：7001
+> 最近核对：2026-10-08 | FastAPI + Socket.IO | 默认端口：7001
 
 ## 一分钟速览
 
@@ -45,12 +45,12 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `backend/routers/jobs.py` | 任务核心域：上传/提交/列表/删除/清理/取消/重试/编辑结果/**处理队列快照 `GET /api/jobs/queue`（单段路径，必须注册在 `GET /{job_id}` 之前）** + 共享的 `normalize_url`/`extract_urls` | 改任务生命周期 API 或队列读取 |
 | `backend/routers/jobs_ai.py` | AI 域：重新总结/总结历史/标签/思维导图 | 改 AI 重跑相关端点 |
 | `backend/routers/jobs_batch.py` | 批量域：批量提交/批量状态/转录全文搜索 | 改批量提交或跨任务搜索 |
-| `backend/routers/` | 其余 API 路由（models/summary/export/bilibili/download/templates/chat/search/storage cleanup/asr/asr_admin；export 含单任务 4 格式与 `/export/batch` 批量 ZIP；`asr.py` 只读 `status`/`overview`（`recommended_engine` 用户设置优先、否则免费优先；overview 的 local 段是**引擎列表**，`local_engines` 为工作台下拉轻量清单）与脱敏/收费标识单点 `mask_provider`，`asr_admin.py` 为写操作）。**`models.py` 兜底环端点 `GET/POST /api/models/fallback-chain` 用 POST 不用 PUT**（存在 `PUT /{key}` 会吞子路径）；`_normalize_endpoint` **base 结尾已有版本段就沿用**（火山方舟 `/api/v3`、智谱 `/api/paas/v4` 不能被插成 `/v1`） | 加/改其他 HTTP API |
+| `backend/routers/` | 其余 API 路由（models/summary/export/bilibili/download/templates/chat/search/storage cleanup/asr/asr_admin；export 含单任务 4 格式与 `/export/batch` 批量 ZIP；**chat 的多选批量删除 `POST /api/jobs/{id}/chat/messages/delete` body `{ids:[]}`——提问行=整轮（不含后续轮次）、回答行=该条全部版本 + 孤儿提问清理，单事务、不存在 id 幂等跳过**；`asr.py` 只读 `status`/`overview`（`recommended_engine` 用户设置优先、否则免费优先；overview 的 local 段是**引擎列表**，`local_engines` 为工作台下拉轻量清单）与脱敏/收费标识单点 `mask_provider`，`asr_admin.py` 为写操作）。**`models.py` 兜底环端点 `GET/POST /api/models/fallback-chain` 用 POST 不用 PUT**（存在 `PUT /{key}` 会吞子路径）；`_normalize_endpoint` **base 结尾已有版本段就沿用**（火山方舟 `/api/v3`、智谱 `/api/paas/v4` 不能被插成 `/v1`） | 加/改其他 HTTP API |
 | `backend/db/asr_repo.py` | ASR 配置数据层：`asr_providers` 表 CRUD、槽位解析 `get_provider_for_engine`（回退链 cloud/cloud_free 取 enabled+sort_order 最小者）、内置播种（表空时从 config.py 一次性迁移 endpoint/model/key）、`app_settings` 三项默认值（默认引擎/Whisper 档位/设备） | 改云端 provider 存储、本地默认值或播种逻辑 |
 | `backend/routers/asr_admin.py` | ASR 管理写操作：provider CRUD（内置不可删可停用；密钥留空或含 `****` = 不修改）、测试连接（2s 正弦探测音频真实调用，HTTP 200 + success 字段）、默认设置、本地模型生命周期（**`/local/{engine}/*` 按引擎 key 通用**：后台下载/取消/删除；Whisper 档位单列端点；下载中与转录中禁删） | 改 ASR 管理页端点或本地模型下载/删除 |
 | `backend/socket_handlers.py` | 实时日志和进度事件 | 改前端实时反馈 |
 | `backend/scripts/cleanup_storage.py` | staged/orphan/export/media 清理 | 改清理策略；删除必须显式确认 |
-| `backend/scripts/export_openapi.py` + `contracts/` | 导出/存放 OpenAPI 契约快照（`openapi.json`，**78 端点**，2026-10-07 重导出——JobResponse 增 transcript_meta） | 改后端 API 后**必须**重新导出；查全部端点契约时读它 |
+| `backend/scripts/export_openapi.py` + `contracts/` | 导出/存放 OpenAPI 契约快照（`openapi.json`，**80 端点**，2026-10-07 重导出——新增追问批量删除端点） | 改后端 API 后**必须**重新导出；查全部端点契约时读它 |
 | `backend/scripts/eval_quality.py` + `eval_metrics.py` | **真实内容质量评测**：转录引擎横评（CER 近似/术语/剂量命中/耗时/降级落点）+ 摘要模型横评（钉死单模型不走兜底环；术语保留/剂量保留/无出处数字代理幻觉/token 成本，summary 全文落 results.json）。指南 `eval/README.md`，样本 `eval/samples/`，报告 `eval/reports/`（不入库） | 做引擎/模型选型横评或改评测指标时（真实跑批需自备音频+参考文本+术语清单；付费档 cloud 仅显式列入 --engines 才调用） |
 | `verify.py`（**仓库根**，不在 backend/） | 一键验证：`python verify.py [backend\|frontend\|all]` = Python ruff + backend pytest（用 `backend/venv/Scripts/python.exe`）+ frontend lint/vitest/build；无效目标失败 | 改完代码做全量验证，或想快速回归 |
 | `backend/requirements.in` / `requirements-dev.in` 及对应 `.txt` | 直接依赖意图/完整版本锁，Windows x64/Python 3.13；运行锁先于开发锁生成 | 改 Python 依赖或干净安装时 |
@@ -65,7 +65,7 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `frontend/src/utils/effects.js` | 效果层：`DEFAULT_EFFECTS` + `effectVars(effects, mode)` 把氛围参数换算为 CSS 变量——**四层 scrim**（中性黑/白 + 上下渐晕 + 径向暗角 + 整体浓度）、玻璃三件套（blur/saturate/高光描边）、surface 三档、`--app-card-rest`+`--el-card-box-shadow`、`--app-glass-sheen`（dark 卡片高光）、light 材质补偿 +12%；`loadEffects` 兼容旧 `background` 内嵌效果参数 | 改遮罩/暗角/玻璃参数或默认值时 |
 | `frontend/src/utils/skinSchema.js` | 皮肤 JSON 校验与归一化：`normalizeSkin()` 返回 `{ok, skin}` 或 `{ok:false, error}`（**错误原因必须可行动**）+ `REQUIRED_PALETTE_KEYS`（palette 必需色单一事实源）+ `skinToJson()` | 改皮肤导入格式或校验规则时 |
 | `frontend/src/components/BackgroundPanel.vue` | 背景与配色设置面板：皮肤选择（色块预览卡 + 导入/导出）、内置氛围背景 + **动态背景卡**（左上角发光点标记）、**背景图库网格**（缩略图切换 / hover 删除 / `N/24 · XMB` 用量）、上传后**亮度推荐直接展示数值并可一键采用**、提色板、氛围遮罩 5 滑块、卡片材质 2 滑块、背景提示条（`bgNotice` / `storageError`） | 改背景设置面板 UI 时 |
-| `frontend/src/components/ChatPanel.vue` | 追问聊天面板（2026-10-07 重设计为豆包/DeepSeek 风格）：**单行纤细头部**（品牌+会话下拉[filterable]+模型下拉+⋯菜单[新建/重命名/复制对话/**导出.md**/清空/删除会话]）；消息流居中 860px，用户消息=弱强调色右对齐气泡、AI 回答=平铺无气泡（头像列+内容列，操作 hover 显形，meta 含**耗时+tokens**）；**检索状态条点击展开两列来源卡片栅格**（默认折叠）；Composer 输入舱（联网三态/思考开关内嵌底栏、圆形发送/停止钮、**Esc 中断**）；空态建议 chips + **回答下方快捷追问 chips**；流式尾光标+跳到最新浮动钮；导航轨保留。**坑点：el-dropdown 直接子元素套 el-tooltip 会拦截触发点击（菜单弹不出）**；历史消息 `search` 事件不落库（loadHistory 恒 null），来源展开入口必须按 `msg.sources` 判断而非 `msg.search`；`data-mid` 是字符串，与消息 id 比较须 `String()` 双侧归一 | 改追问交互、引用来源展示、联网模式或检索状态时 |
+| `frontend/src/components/ChatPanel.vue` | 追问聊天面板（2026-10-07 重设计为豆包/DeepSeek 风格）：**单行纤细头部**（品牌+会话下拉[filterable]+模型下拉+**「多选」按钮**+⋯菜单[新建/重命名/复制对话/**导出.md**/清空/删除会话]）；消息流居中 860px，用户消息=弱强调色右对齐气泡、AI 回答=平铺无气泡（头像列+内容列，操作 hover 显形，meta 含**耗时+tokens**）；**检索状态条点击展开两列来源卡片栅格**（默认折叠）；**多选删除模式**（整行点选+圆形勾选圈、操作条「已选 N 项/全选/取消/删除所选」、删除前确认弹窗、Esc 退出、切换会话自动退出）；Composer 输入舱（联网三态/思考开关内嵌底栏、圆形发送/停止钮、**Esc 中断**）；空态建议 chips + **回答下方快捷追问 chips**；流式尾光标+跳到最新浮动钮；导航轨保留。**坑点：el-dropdown 直接子元素套 el-tooltip 会拦截触发点击（菜单弹不出）**；历史消息 `search` 事件不落库（loadHistory 恒 null），来源展开入口必须按 `msg.sources` 判断而非 `msg.search`；`data-mid` 是字符串，与消息 id 比较须 `String()` 双侧归一；**多选模式下 `.chat-row > *` 全部 pointer-events:none（点哪都落到行上），行内 actions/追问 chips/版本切换器被隐藏——自动化点选必须点 `.chat-row[data-mid]` 行本身，点内层文本会被 Playwright 判为被拦截** | 改追问交互、引用来源展示、联网模式、多选删除或检索状态时 |
 | `frontend/src/utils/chatExport.js` | 追问复制/导出格式化纯函数：`parseChatTime`（SQLite naive 时间戳按 **UTC** 解析）、`buildAiText`（正文 ± 参考来源）、`buildConversationMarkdown`（`### 你` / `### AI` 分节）、**`SEARCH_MODES`/`searchProviderName`/`searchStateLabel`（联网三态取值与状态气泡文案，与后端 search_mode 契约对齐）** | 改追问复制内容、时间戳显示或联网模式文案时 |
 | `frontend/src/utils/codeCopy.js` | Markdown 代码块「复制」按钮的 **document 全局事件委托**（`data-md-code-copy`），main.js 安装一次 | 改代码块复制，或排查"复制按钮点了没反应"/"某页面复制是死的"时 |
 | `frontend/src/utils/shortcut.js` | 工作台提交快捷键纯函数：`isSubmitShortcut`（Ctrl/Cmd+Enter 判定，含小键盘/keyCode 兜底）、`modifierLabel`/`shortcutHint`（macOS ⌘、其余 Ctrl）；HomeView 绑 window keydown + HomeInputPanel 头部提示共用 | 改/加工作台键盘快捷键时 |
@@ -104,6 +104,8 @@ python main.py
 存储清理默认 dry-run；应用删除需要脚本的 `--apply --confirm DELETE`。staged 默认 72 小时、orphan 14 天、export/media 7 天、quarantine 30 天，具体阈值可由环境变量覆盖。不要把数据库、下载媒体、日志、模型或 API key 写入文档/Git。
 
 ## 当前状态
+
+- 追问对话多选删除（2026-10-08，task 10-08-10-07-chat-multiselect-delete，M0，pytest 1053 / vitest 283 / lint + build / verify 全绿 + 浏览器明暗双主题实测）：头部新增**「多选」**按钮进入多选模式（整行点选 + 圆形勾选圈 + 操作条「已选 N 项 / 全选 / 取消 / 删除所选」；Esc、切换会话、新建/清空/删除会话自动退出），点「删除所选」先弹**确认弹窗**再走新端点 `POST /api/jobs/{id}/chat/messages/delete`（body `{ids:[]}`，单事务，不存在 id 幂等跳过）。**语义按项**：勾**提问**=删整轮（提问 + 其全部回答版本，**不牵连后续轮次**——与单删 user 行的级联语义刻意不同，多选语境下防误删）；勾**回答**=删该条全部历史版本 + 该轮回答删空后连带删提问（防孤儿，与单删一致）；回答行依赖变体组因此勾一条即整组消失，不留「删了还在」的接管残影。三个既有单删入口（`/{msg_id}`、`/from/{msg_id}`、清空）行为零变化（编辑回填仍用级联）。OpenAPI 已重导（80 端点）。浏览器实测：删中间一轮前后轮完整、勾带 ‹2/2› 的回答整条消失且提问一并删除、全选/取消全选/弹窗取消/Esc 均正常；测试数据已清理。**坑点**：多选模式下行内容全部 `pointer-events:none`，自动化点选必须点 `.chat-row[data-mid]` 行本身（点内层文本会被判定被拦截）。
 
 - 重新生成保留历史版本（2026-10-07，task 10-07-chat-regen-variants，M1，pytest 1045 / vitest 283 / verify 全绿 + 浏览器实测切换/持久化/上下文）：**重生成不再删旧回答**。`job_chats` 加 `variant_group`/`is_active` 列（try/except ALTER）；重生成=对最后一轮生效回答归组追加新变体（存量独立行先认领进组再整体转非激活——**坑点：不认领会留两个 active 版**）；SSE done 带 `variant_group`/`variant_count`；`POST /api/jobs/{id}/chat/variants/{msg_id}/activate` 切换生效版本；模型上下文 `_get_session_history` 只取 `(role='user' OR is_active=1)`；history 返回全行+组摘要，前端每组只显示激活版本、meta 行 ‹ N/M › 切换（本地整套换显+activate 持久化）；单删 assistant=只删该变体（删生效版本组内最新接管、组空连带删提问行），user 行=整轮。UI 亦有重生成五项常用功能（快捷追问 chips/导出.md/会话过滤/耗时/Esc 中断）同行生效。服务已重启、OpenAPI 79 端点已重导。
 
