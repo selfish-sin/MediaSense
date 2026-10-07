@@ -3417,6 +3417,57 @@
         }
       }
     },
+    "/api/jobs/{job_id}/chat/messages/delete": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Delete Chat Messages",
+        "description": "多选批量删除（单事务）。语义与单删一致但按\"项\"删除、不级联到后续轮次：\n\n- 提问行 → 删该提问整轮（提问 + 其全部回答版本）；\n- 回答行 → 删该回答的全部版本（含历史变体）；该轮回答删空后提问成孤儿 → 一并删除。\n不存在/已删除的 id 静默跳过（幂等），返回实际删除行数。",
+        "operationId": "delete_chat_messages_api_jobs__job_id__chat_messages_delete_post",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MessagesDelete"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/storage-cleanup/status": {
       "get": {
         "tags": [
@@ -4550,6 +4601,21 @@
         ],
         "title": "JobSubmitResponse",
         "description": "任务提交响应"
+      },
+      "MessagesDelete": {
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Ids",
+            "default": []
+          }
+        },
+        "type": "object",
+        "title": "MessagesDelete",
+        "description": "多选批量删除的入参（消息行 id 集合）"
       },
       "ModelConfigCreate": {
         "properties": {
