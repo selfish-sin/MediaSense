@@ -114,9 +114,11 @@ async def _call_ai(
       命中直接复用上次成功结果（token 消耗 0）；bypass_cache=True 跳过（显式重跑语义）。
       只有成功且非空的结果入池——失败/零输出下次仍是真重试。
     """
-    if state is not None:
-        state['emitted'] = False
-        state['content'] = ''
+    # 重试安全必须由本次调用维护，不能依赖调用方是否需要 state 出参。
+    if state is None:
+        state = {}
+    state['emitted'] = False
+    state['content'] = ''
     headers = _build_headers(model_cfg)
     payload = {
         "model": model_cfg.get('model_id', model_cfg.get('key', DEFAULT_MODEL)),
@@ -259,7 +261,7 @@ async def _call_ai(
                 #   一份文档里混了两次生成的文本。宁可失败让用户重试，也不产出混血文档。
                 #   零输出时（连接握手就断了）重试/换模型才是安全的。
                 if state is not None and state.get('emitted'):
-                    logger.error(f'AI流式在已输出 {token_count} token 后断开，放弃重试: {e}')
+                    logger.error(f'AI流式在已输出正文后断开，放弃重试: {e}')
                     if sio:
                         from socket_handlers import emit_log
                         await emit_log(sio, job_id, f'❌ AI连接中断（已输出部分内容，不再重试以免内容重复）: {e}')

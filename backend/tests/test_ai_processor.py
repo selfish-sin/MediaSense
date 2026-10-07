@@ -561,6 +561,52 @@ class TestCallAiStreamHttpError:
         assert "Attempted to access streaming response content" not in content
 
 
+@pytest.mark.asyncio
+class TestCallAiStreamDisconnect:
+    @pytest.mark.parametrize('with_state', [True, False])
+    @pytest.mark.parametrize('has_content', [True, False])
+    async def test_disconnect_retries_only_before_content(self, monkeypatch, with_state, has_content):
+        """跑真实流读取：已推送正文不能重试，无正文断连仍可重试。"""
+        from services import ai_processor as ap
+        import socket_handlers
+
+        requests = []
+        emitted = AsyncMock()
+        monkeypatch.setattr(socket_handlers, 'emit_ai_token', emitted)
+        monkeypatch.setattr(socket_handlers, 'emit_log', AsyncMock())
+        monkeypatch.setattr(ap.asyncio, 'sleep', AsyncMock())
+
+        class BrokenStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                if has_content:
+                    for _ in range(10):
+                        yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+                raise httpx.ReadError('upstream disconnected')
+
+        def respond(request):
+            requests.append(request)
+            if len(requests) == 1:
+                return httpx.Response(200, stream=BrokenStream())
+            return httpx.Response(200, text='data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n')
+
+        original_client = httpx.AsyncClient
+        monkeypatch.setattr(ap.httpx, 'AsyncClient',
+                            lambda **kw: original_client(transport=httpx.MockTransport(respond), **kw))
+        state = {} if with_state else None
+        content, _, _ = await ap._call_ai(MOCK_CFG, '断连回归', sio=object(),
+                                         max_retries=1, state=state)
+        if has_content:
+            assert content == '[处理失败: 连接中断（已输出部分内容）]'
+            assert len(requests) == 1
+            assert emitted.await_count == 1
+            assert emitted.await_args.args[2] == 'partial' * 10
+        else:
+            assert content == 'ok'
+            assert len(requests) == 2
+        if with_state:
+            assert state['emitted'] is True
+
+
 # ── 思考期取消（2026-10-06 排查：d5615485 取消后打标签仍烧了一次 API）─────────
 # 思考型模型可能连续几分钟只吐 reasoning_content——取消检查不能只挂在正文 token 上。
 @pytest.mark.asyncio
