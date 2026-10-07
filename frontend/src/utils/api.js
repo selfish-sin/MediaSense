@@ -251,7 +251,8 @@ export const chatApi = {
   // handlers: { signal, onEvent(ev), onEnd(aborted?), onError(err) }
   // searchMode: 'off' | 'strict'（严格依据材料） | 'broad'（广泛收集），见 utils/chatExport SEARCH_MODES
   // regenerate: true = 重新生成（不插新提问，回答作为新变体入组）
-  streamChat: (jobId, sessionId, { content, model, searchMode, regenerate }, handlers) => {
+  // userMessageId: 重生成的目标轮（提问行 id，任意一轮都可）；不传 = 最后一轮
+  streamChat: (jobId, sessionId, { content, model, searchMode, regenerate, userMessageId }, handlers) => {
     const { signal, onEvent, onEnd, onError } = handlers
     return fetch(`/api/jobs/${jobId}/chat/sessions/${sessionId}/stream`, {
       method: 'POST',
@@ -261,6 +262,7 @@ export const chatApi = {
         model: model || undefined,
         search_mode: searchMode || 'off',
         regenerate: !!regenerate,
+        user_message_id: userMessageId || undefined,
       }),
       signal,
     }).then(async (resp) => {

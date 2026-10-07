@@ -115,6 +115,10 @@
                   <el-tooltip content="编辑：回到此提问点重新发送" placement="top">
                     <button class="cp-icon-btn" type="button" :disabled="streaming" @click="onEdit(msg)"><el-icon :size="14"><Pencil /></el-icon></button>
                   </el-tooltip>
+                  <!-- 重新生成挪到提问行：任意一轮都能重生成自己那一条回答 -->
+                  <el-tooltip content="重新生成该轮回答：保留旧版本，可切换查看" placement="top">
+                    <button class="cp-icon-btn" type="button" :disabled="streaming || !answerByUser.get(msg.id)" @click="onRegenerate(msg)"><el-icon :size="14"><RefreshCw /></el-icon></button>
+                  </el-tooltip>
                   <el-tooltip content="删除该提问及其回答" placement="top">
                     <button class="cp-icon-btn cp-danger" type="button" :disabled="streaming" @click="onDeleteTurn(msg)"><el-icon :size="14"><Trash2 /></el-icon></button>
                   </el-tooltip>
@@ -165,9 +169,6 @@
                         <button class="cp-icon-btn" type="button" :disabled="!msg.content" @click="onCopyAi(msg, 'body')">
                           <el-icon :size="14"><Copy /></el-icon>
                         </button>
-                      </el-tooltip>
-                      <el-tooltip content="重新生成：保留当前版本并生成新版本，可切换查看" placement="top">
-                        <button class="cp-icon-btn" type="button" :disabled="streaming || !isLastAssistant(msg)" @click="onRegenerate(msg)"><el-icon :size="14"><RefreshCw /></el-icon></button>
                       </el-tooltip>
                       <el-tooltip content="删除该回答" placement="top">
                         <button class="cp-icon-btn cp-danger" type="button" :disabled="streaming" @click="onDelete(msg)"><el-icon :size="14"><Trash2 /></el-icon></button>
@@ -348,6 +349,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatApi } from '../utils/api'
 import { copyText } from '../utils/clipboard'
 import { buildAiText, buildConversationMarkdown, formatChatTime, SEARCH_MODES, searchStateLabel } from '../utils/chatExport'
+import { buildChatTurns } from '../utils/chatTurns'
 import { isDialogCancel } from '../utils/errorNotice'
 import { useMarkdownListCache } from '../composables/useMarkdownRender'
 import { useModelStore } from '../stores/modelStore'
@@ -618,7 +620,7 @@ function exportConversation() {
   ElMessage.success('已导出 Markdown 文件')
 }
 
-// 加载当前会话历史
+// 加载当前会话历史：原始行按「轮」归位（变体组锚点规则，与后端 _get_session_history 同一套）
 async function loadHistory() {
   if (!props.jobId || !activeSessionId.value) {
     messages.value = []
@@ -626,36 +628,7 @@ async function loadHistory() {
   }
   try {
     const res = await chatApi.sessionHistory(props.jobId, activeSessionId.value)
-    const raw = res.messages || []
-    // 变体组：同组 assistant 全量行（含非激活），展示时每组只显示激活版本
-    const groupMap = new Map()
-    for (const m of raw) {
-      if (m.role === 'assistant' && m.variant_group) {
-        if (!groupMap.has(m.variant_group)) groupMap.set(m.variant_group, [])
-        groupMap.get(m.variant_group).push(m)
-      }
-    }
-    messages.value = raw
-      .filter((m) => {
-        // 非激活变体不直接渲染；组内全不激活（双失败边缘）兜底显示最新一条
-        if (m.role !== 'assistant' || !m.variant_group) return true
-        const siblings = groupMap.get(m.variant_group) || []
-        if (m.is_active) return true
-        const anyActive = siblings.some((s) => s.is_active)
-        return !anyActive && siblings[siblings.length - 1]?.id === m.id
-      })
-      .map((m) => ({
-        id: m.id,
-        role: m.role,
-        content: m.content || '',
-        thinking: m.thinking || '',
-        sources: m.sources || [],
-        token_usage: m.token_usage || null,
-        created_at: m.created_at || '',
-        search: null,
-        variant_group: m.variant_group || '',
-        variants: m.role === 'assistant' ? (m.variant_group ? (groupMap.get(m.variant_group) || []) : []) : [],
-      }))
+    messages.value = buildChatTurns((res.messages || []).map(normalizeChatRow))
   } catch (e) {
     console.warn('加载追问历史失败', e)
   }
@@ -663,11 +636,38 @@ async function loadHistory() {
   scrollToBottom(true)
 }
 
-// ===== 变体版本切换（重新生成保留历史版本） =====
-function isLastAssistant(msg) {
-  const list = messages.value.filter((m) => m.role === 'assistant')
-  return list.length > 0 && list[list.length - 1].id === msg.id
+// 历史行标准化：补齐模板与导出用到的字段（变体组字段透传，供 buildChatTurns 判定生效版本）
+function normalizeChatRow(m) {
+  return {
+    id: m.id,
+    role: m.role,
+    content: m.content || '',
+    thinking: m.thinking || '',
+    sources: m.sources || [],
+    token_usage: m.token_usage || null,
+    created_at: m.created_at || '',
+    search: null,
+    variant_group: m.variant_group || '',
+    is_active: m.is_active ? 1 : 0,
+  }
 }
+
+// ===== 变体版本切换（重新生成保留历史版本） =====
+// 提问行 id → 该轮回答（buildChatTurns 保证两者相邻）；无回答的轮不在表中
+const answerByUser = computed(() => {
+  const map = new Map()
+  const list = messages.value
+  for (let i = 0; i < list.length - 1; i++) {
+    if (list[i].role === 'user' && list[i + 1].role === 'assistant') map.set(list[i].id, list[i + 1])
+  }
+  return map
+})
+
+// 最后一轮的提问行 id：决定重生成后是跟到最新还是停在原轮
+const lastTurnUserId = computed(() => {
+  const users = messages.value.filter((m) => m.role === 'user')
+  return users.length ? users[users.length - 1].id : null
+})
 
 function variantIndex(msg) {
   if (!msg.variants || msg.variants.length === 0) return -1
@@ -943,66 +943,67 @@ async function onEdit(msg) {
   }
 }
 
-// 重新生成：不再删除旧回答——新回答作为同组新变体原地流式生成，完成后版本计数 +1
-async function onRegenerate(msg) {
+// 重新生成：针对**该提问行所属那一轮**追加新变体（不删除旧回答），原地流式生成，完成后版本计数 +1
+async function onRegenerate(userMsg) {
   if (streaming.value || !props.jobId || !activeSessionId.value) return
-  // 只支持最后一轮（较早轮的截断语义已弃用）；切到其它版本时以当前展示版本为基准
-  const assistants = messages.value.filter((m) => m.role === 'assistant')
-  const last = assistants[assistants.length - 1]
-  if (!last || last.id !== msg.id) {
-    ElMessage.info('只能对最后一个回答重新生成')
+  const answer = answerByUser.value.get(userMsg.id)
+  if (!answer) {
+    ElMessage.info('这一轮还没有回答，无法重新生成')
     return
   }
-
+  // 目标轮是最后一轮 → 生成时跟到最新；中间轮 → 停在原轮回看（不跟着滚到底部）
+  const isLastTurn = userMsg.id === lastTurnUserId.value
+  const targetUserId = userMsg.id
   const aid = 'tmp-a-' + ++tmpSeq
   // 当前展示版本快照进 variants（单版本行此前没有 variants 数组）
   const snapshot = {
-    id: msg.id, content: msg.content, thinking: msg.thinking, sources: msg.sources,
-    token_usage: msg.token_usage, created_at: msg.created_at,
+    id: answer.id, content: answer.content, thinking: answer.thinking, sources: answer.sources,
+    token_usage: answer.token_usage, created_at: answer.created_at,
   }
-  if (!msg.variants || !msg.variants.length) msg.variants = [snapshot]
+  if (!answer.variants || !answer.variants.length) answer.variants = [snapshot]
   // 原地换装成新变体流式占位（旧版本留在 variants 里可切回）
-  msg.id = aid
-  msg.content = ''
-  msg.thinking = ''
-  msg.sources = []
-  msg.search = null
-  msg.token_usage = null
-  msg.durationMs = null
-  activeMsg.value = msg
+  answer.id = aid
+  answer.content = ''
+  answer.thinking = ''
+  answer.sources = []
+  answer.search = null
+  answer.token_usage = null
+  answer.durationMs = null
+  activeMsg.value = answer
   streaming.value = true
-  nearBottom.value = true
-  scrollToBottom(true)
+  nearBottom.value = isLastTurn
+  if (isLastTurn) scrollToBottom(true)
+  else scrollToMsg(targetUserId)
 
   abortCtrl = new AbortController()
   const startedAt = Date.now()
   chatApi.streamChat(
     props.jobId,
     activeSessionId.value,
-    { content: '', searchMode: searchMode.value, regenerate: true },
+    { content: '', searchMode: searchMode.value, regenerate: true, userMessageId: targetUserId },
     {
       signal: abortCtrl.signal,
       onEvent: (ev) => {
         if (ev.type === 'thinking') {
-          msg.thinking += ev.delta || ''
+          answer.thinking += ev.delta || ''
         } else if (ev.type === 'content') {
-          msg.content += ev.delta || ''
+          answer.content += ev.delta || ''
         } else if (ev.type === 'search') {
-          setSearchState(msg, ev)
+          setSearchState(answer, ev)
         } else if (ev.type === 'sources') {
-          msg.sources = ev.sources || []
+          answer.sources = ev.sources || []
         } else if (ev.type === 'done') {
-          if (ev.assistant_id != null) msg.id = ev.assistant_id
-          if (ev.token_usage) msg.token_usage = ev.token_usage
+          if (ev.assistant_id != null) answer.id = ev.assistant_id
+          if (ev.token_usage) answer.token_usage = ev.token_usage
           // 新变体落位进组（随后即可 ‹› 切换回看旧版本）
-          msg.variants = [
-            ...msg.variants.filter((v) => v.id !== msg.id && v.id !== aid),
-            { id: msg.id, content: msg.content, thinking: msg.thinking, sources: msg.sources,
-              token_usage: msg.token_usage, created_at: new Date().toISOString() },
+          answer.variants = [
+            ...answer.variants.filter((v) => v.id !== answer.id && v.id !== aid),
+            { id: answer.id, content: answer.content, thinking: answer.thinking, sources: answer.sources,
+              token_usage: answer.token_usage, created_at: new Date().toISOString() },
           ]
-          markDuration(msg, Date.now() - startedAt)
+          markDuration(answer, Date.now() - startedAt)
         } else if (ev.type === 'error') {
-          msg.content = (msg.content || '') + '\n\n**[错误]** ' + (ev.message || '生成出错')
+          answer.content = (answer.content || '') + '\n\n**[错误]** ' + (ev.message || '生成出错')
         }
         scrollToBottom()
       },
@@ -1010,15 +1011,17 @@ async function onRegenerate(msg) {
         streaming.value = false
         activeMsg.value = null
         abortCtrl = null
-        markDuration(msg, Date.now() - startedAt)
+        markDuration(answer, Date.now() - startedAt)
         scrollToBottom()
         refreshSessionMeta()
         if (aborted && !disposed) {
-          // 中断：后端已把半成品落库为新变体，重载以对齐服务端状态
+          // 中断：后端已把半成品落库为新变体，重载以对齐服务端状态；
+          // 重载会重建 messages（本地 durationMs 不落库），按提问行 id 给该轮回答补回耗时
           clearTimeout(historyTimer)
-          historyTimer = setTimeout(() => {
+          historyTimer = setTimeout(async () => {
             historyTimer = null
-            loadHistory()
+            await loadHistory()
+            markTurnDuration(targetUserId, Date.now() - startedAt)
           }, 300)
         }
       },
@@ -1026,13 +1029,19 @@ async function onRegenerate(msg) {
         streaming.value = false
         activeMsg.value = null
         abortCtrl = null
-        markDuration(msg, Date.now() - startedAt)
-        msg.content = (msg.content || '') + '\n\n**[错误]** ' + (err?.message || '网络错误')
+        markDuration(answer, Date.now() - startedAt)
+        answer.content = (answer.content || '') + '\n\n**[错误]** ' + (err?.message || '网络错误')
         ElMessage.error('重新生成失败: ' + (err?.message || '未知错误'))
         scrollToBottom()
       },
     },
   )
+}
+
+// 给指定轮的回答补耗时（重生成中断后历史重载场景用；提问行 id 在重载后仍然有效）
+function markTurnDuration(userId, ms) {
+  const answer = answerByUser.value.get(userId)
+  if (answer && !answer.durationMs) answer.durationMs = ms
 }
 
 async function onDelete(msg) {
