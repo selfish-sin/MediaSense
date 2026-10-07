@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import inspect
+from contextlib import asynccontextmanager
 
 # Windows 必须用 ProactorEventLoop 才能支持 asyncio.create_subprocess_exec
 # 否则 yt-dlp 等子进程调用会抛 NotImplementedError
@@ -168,11 +169,36 @@ async def _emit_batch_progress(job_id: str):
     except Exception as e:
         logger.warning(f'batch_progress 推送失败 (job={job_id}): {e}')
 
+# ============ 启动时初始化 ============
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    logger.info("数据库初始化完成")
+
+    # ★ 重启恢复：上次进程遗留的非终态任务（pending/downloading/transcribing/
+    #   preview/summarizing）已无执行者，标记为 failed（注明服务重启中断），
+    #   使其可被 retry，避免永久悬挂
+    interrupted = fail_interrupted_jobs()
+    if interrupted:
+        logger.warning(f"检测到 {interrupted} 个被服务重启中断的任务，已标记为 failed（可重试）")
+
+    # 清理格式转换器过期文件（24小时）
+    from services.format_converter import cleanup_expired_files
+    removed = cleanup_expired_files()
+    if removed:
+        logger.info(f"格式转换器文件清理完成，移除了 {removed} 个过期项")
+
+    logger.info(f"Swagger UI: http://localhost:{SERVER_PORT}/docs")
+    logger.info(f"API根路径: http://localhost:{SERVER_PORT}/api")
+    yield
+
+
 # ============ FastAPI 应用 ============
 app = FastAPI(
     title="YouTube Tool V2",
     description="本地视频/音频智能处理工作站",
     version="2.0.0",
+    lifespan=lifespan,
 )
 
 # ★ 安全：本应用生产/局域网访问均为同源（前端由后端 static 提供），
@@ -1330,29 +1356,6 @@ def start_job(job_id: str):
             logger.error(f"❌ 任务 {job_id} 异常退出: {exc}", exc_info=exc)
     task.add_done_callback(_on_task_done)
     return task
-
-
-# ============ 启动时初始化 ============
-@app.on_event("startup")
-async def startup():
-    init_db()
-    logger.info("数据库初始化完成")
-
-    # ★ 重启恢复：上次进程遗留的非终态任务（pending/downloading/transcribing/
-    #   preview/summarizing）已无执行者，标记为 failed（注明服务重启中断），
-    #   使其可被 retry，避免永久悬挂
-    interrupted = fail_interrupted_jobs()
-    if interrupted:
-        logger.warning(f"检测到 {interrupted} 个被服务重启中断的任务，已标记为 failed（可重试）")
-
-    # 清理格式转换器过期文件（24小时）
-    from services.format_converter import cleanup_expired_files
-    removed = cleanup_expired_files()
-    if removed:
-        logger.info(f"格式转换器文件清理完成，移除了 {removed} 个过期项")
-
-    logger.info(f"Swagger UI: http://localhost:{SERVER_PORT}/docs")
-    logger.info(f"API根路径: http://localhost:{SERVER_PORT}/api")
 
 
 # ============ 启动方式 ============
