@@ -347,6 +347,28 @@ class TestTranscriptionIdentity:
         await tr.transcribe_audio(str(audio), engine='local')
         assert len(calls) == 1
 
+    @pytest.mark.asyncio
+    async def test_config_changed_during_inference_does_not_poison_old_identity(self, cache_on, monkeypatch, tmp_path):
+        from services import cloud_asr
+        tr, calls = self._engine(monkeypatch)
+        provider = {'enabled': True, 'endpoint': 'https://asr.invalid', 'model': 'm1', 'api': 'multipart'}
+        monkeypatch.setattr(cloud_asr, 'provider_for_engine', lambda engine: 'free1')
+        monkeypatch.setattr(cloud_asr, '_provider_cfg', lambda key: dict(provider))
+        infer = tr._transcribe_by_engine
+
+        def change_config(engine, audio_path, **kw):
+            if not calls:
+                provider['model'] = 'm2'  # 模拟用户在识别期间更新 provider
+            return infer(engine, audio_path, **kw)
+
+        monkeypatch.setattr(tr, '_transcribe_by_engine', change_config)
+        audio = tmp_path / 'changing.mp3'
+        audio.write_bytes(b'CHANGING PROVIDER')
+        await tr.transcribe_audio(str(audio), engine='cloud_free')
+        provider['model'] = 'm1'
+        await tr.transcribe_audio(str(audio), engine='cloud_free')
+        assert len(calls) == 2, '识别期间换模型的结果不得写进旧配置身份'
+
 
 class TestTranscribeAudioBypass:
     """「忽略缓存」开关（2026-10-06）：bypass_cache=True 跳过 ASR 缓存读取、

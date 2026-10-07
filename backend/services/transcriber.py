@@ -1180,11 +1180,20 @@ async def transcribe_audio(
         from services import ai_cache as _ai_cache
         actual_engine = execution_state.get('engine', engine)
         if cache_key and actual_engine == engine:
-            await asyncio.to_thread(
-                _ai_cache.store_transcription,
-                audio_path, engine, language, bool(speaker_diarization),
-                result[0], result[1], result[2], cache_key=cache_key, actual_engine=actual_engine,
+            # 配置可在模型管理页即时修改，模型也可能在首次推理时下载。
+            # 完成时身份有变化就不写旧键，避免把新模型结果冒充旧配置缓存。
+            current_key = await asyncio.to_thread(
+                _transcription_cache_key, audio_path, engine, language, bool(speaker_diarization),
+                model_size, platform, device,
             )
+            if current_key == cache_key:
+                await asyncio.to_thread(
+                    _ai_cache.store_transcription,
+                    audio_path, engine, language, bool(speaker_diarization),
+                    result[0], result[1], result[2], cache_key=cache_key, actual_engine=actual_engine,
+                )
+            else:
+                logger.warning('转录期间音频/模型配置发生变化，本次不写入旧身份缓存')
         elif actual_engine != engine:
             logger.info(f'转录使用降级引擎 {actual_engine}，不缓存为 {engine}，下次重试首选引擎')
     except Exception as e:  # 缓存是加速项，绝不影响转录结果
