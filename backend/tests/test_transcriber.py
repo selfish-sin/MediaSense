@@ -607,3 +607,148 @@ class TestTranscribeInfoOutParam:
         result = await transcriber.transcribe_audio('a.wav', engine='cloud_free')
 
         assert result == ('a.srt', 'a.txt', 1)
+
+
+# ============ 长音频分片检查点（2026-10-07 断点恢复） ============
+
+class _FakeSeg:
+    def __init__(self, start, end, text):
+        self.start = start
+        self.end = end
+        self.text = text
+
+
+class TestChunkCheckpoints:
+    """分片检查点：失败恢复只重跑缺失片；bypass_cache 不读；完成后清理。"""
+
+    def _patch_chunked_env(self, monkeypatch, tmp_path, chunks):
+        """把 _transcribe_chunked 的外部依赖钉到临时目录与可注入的假模型。"""
+        import services.transcriber as tr
+
+        audio = tmp_path / 'long_video.m4a'
+        audio.write_bytes(b'audio')
+
+        monkeypatch.setattr(tr, '_split_audio_chunks', lambda path, secs: chunks)
+        monkeypatch.setattr(tr, '_select_model', lambda size, plat: (str(tmp_path / 'model'), 'base', True))
+        monkeypatch.setattr(tr, '_resolve_device', lambda device, cb=None: ('cpu', 'int8', ''))
+        monkeypatch.setattr(tr, '_get_audio_duration_seconds', lambda p: 900.0)
+        return tr, audio
+
+    def _fake_model(self, transcribed, segments_per_chunk, fail_on=None):
+        """假 faster-whisper 模型：记录被转录的 chunk，可在指定 chunk 上抛错。"""
+
+        class FakeModel:
+            def transcribe(self, chunk_path, language=None, beam_size=5, vad_filter=True):
+                transcribed.append(chunk_path)
+                idx = int(chunk_path.split('_chunk')[-1].split('.')[0])
+                if fail_on is not None and idx == fail_on:
+                    raise RuntimeError(f'chunk {idx} boom')
+                segs = [_FakeSeg(j * 2.0, j * 2.0 + 2.0, f'第{idx}片第{j}句')
+                        for j in range(segments_per_chunk)]
+                return iter(segs), {}
+
+        return FakeModel()
+
+    def test_resume_skips_completed_chunks_and_cleans_up(self, monkeypatch, tmp_path):
+        chunk_files = []
+        for i in range(3):
+            c = tmp_path / f'long_video_chunk{i:03d}.wav'
+            c.write_bytes(b'x' * 1024)
+            chunk_files.append((str(c), float(i * 300)))
+
+        tr, audio = self._patch_chunked_env(monkeypatch, tmp_path, chunk_files)
+
+        # 第一轮：前两片成功，第三片失败 → 任务失败，但前两片检查点已落盘
+        first_calls = []
+        model1 = self._fake_model(first_calls, segments_per_chunk=3, fail_on=2)
+        monkeypatch.setattr(tr, '_get_whisper_model', lambda *a, **kw: model1)
+        with pytest.raises(RuntimeError, match='chunk 2 boom'):
+            tr._transcribe_chunked(str(audio), 'base', '', False, 'zh', None)
+
+        cps = sorted(tmp_path.glob('long_video_chunk*.transcript.json'))
+        assert len(cps) == 2                      # 失败时已完成片有检查点
+        assert len(first_calls) == 3              # 第三片有尝试但未成功（无检查点）
+
+        # 第二轮（恢复）：只重跑第三片，合并结果完整，检查点清理干净
+        second_calls = []
+        model2 = self._fake_model(second_calls, segments_per_chunk=3)
+        monkeypatch.setattr(tr, '_get_whisper_model', lambda *a, **kw: model2)
+        srt_path, txt_path, total = tr._transcribe_chunked(str(audio), 'base', '', False, 'zh', None)
+
+        assert len(second_calls) == 1             # 只补跑了缺失片
+        assert 'chunk002' in second_calls[0]
+        assert total == 9                         # 3 片 × 3 段，序号连续不重不漏
+        assert not list(tmp_path.glob('long_video_chunk*.transcript.json'))
+        # 合并 SRT 覆盖全部片的全部段，且时间戳带偏移
+        srt_text = Path(srt_path).read_text(encoding='utf-8')
+        assert '第0片第0句' in srt_text and '第2片第2句' in srt_text
+        txt_text = Path(txt_path).read_text(encoding='utf-8')
+        assert '[10:00' in txt_text               # 600s 偏移进入第 3 片
+
+    def test_bypass_cache_ignores_checkpoints_but_writes(self, monkeypatch, tmp_path):
+        import services.transcriber as tr
+
+        chunk_files = []
+        for i in range(2):
+            c = tmp_path / f'long_video_chunk{i:03d}.wav'
+            c.write_bytes(b'x' * 1024)
+            chunk_files.append((str(c), float(i * 300)))
+        # 预置全部检查点
+        for path, offset in chunk_files:
+            tr._store_chunk_checkpoint(path, offset, [{'start': 0.0, 'end': 2.0, 'text': '旧结果'}])
+
+        tr, audio = self._patch_chunked_env(monkeypatch, tmp_path, chunk_files)
+        calls = []
+        model = self._fake_model(calls, segments_per_chunk=1)
+        monkeypatch.setattr(tr, '_get_whisper_model', lambda *a, **kw: model)
+        srt_path, _txt, total = tr._transcribe_chunked(
+            str(audio), 'base', '', False, 'zh', None, bypass_cache=True)
+
+        assert len(calls) == 2                    # 全部重跑，不读检查点
+        assert total == 2
+        assert '旧结果' not in Path(srt_path).read_text(encoding='utf-8')
+        assert not list(tmp_path.glob('long_video_chunk*.transcript.json'))  # 完成后照常清理
+
+    def test_checkpoint_offset_mismatch_is_ignored(self, monkeypatch, tmp_path):
+        import services.transcriber as tr
+
+        c = tmp_path / 'long_video_chunk001.wav'
+        c.write_bytes(b'x' * 1024)
+        tr._store_chunk_checkpoint(str(c), 300.0, [{'start': 0.0, 'end': 2.0, 'text': '正常结果'}])
+
+        assert tr._load_chunk_checkpoint(str(c), 999.0) is None
+        assert tr._load_chunk_checkpoint(str(c), 300.0) is not None
+        assert tr._load_chunk_checkpoint(str(c), 300.4) is not None   # ±0.5s 容差内有效
+
+    def test_corrupt_checkpoint_is_ignored(self, monkeypatch, tmp_path):
+        import services.transcriber as tr
+
+        c = tmp_path / 'long_video_chunk001.wav'
+        c.write_bytes(b'x' * 1024)
+        tr._chunk_checkpoint_path(str(c)).write_text('{broken json', encoding='utf-8')
+        assert tr._load_chunk_checkpoint(str(c), 300.0) is None
+
+    def test_split_reuses_existing_chunk_files(self, monkeypatch, tmp_path):
+        """重试重切时，已存在的有效分片 WAV 不再过 ffmpeg。"""
+        import services.transcriber as tr
+
+        audio = tmp_path / 'long_video.m4a'
+        audio.write_bytes(b'audio')
+        existing = tmp_path / 'long_video_chunk000.wav'
+        existing.write_bytes(b'x' * 4096)
+
+        calls = []
+
+        def fake_run(cmd, capture_output, check, timeout):
+            calls.append(cmd)
+            out = Path(cmd[-1])
+            out.write_bytes(b'new-chunk')
+
+        monkeypatch.setattr(tr, '_get_audio_duration_seconds', lambda p: 700.0)
+        monkeypatch.setattr(tr, 'subprocess', type('S', (), {
+            'run': staticmethod(fake_run), 'TimeoutExpired': Exception})())
+        chunks = tr._split_audio_chunks(str(audio), 300)
+
+        assert len(calls) == 2                    # chunk001/002 需要重切，chunk000 复用
+        assert chunks[0][0] == str(existing)      # chunk000 复用旧文件（未被覆盖）
+        assert Path(chunks[1][0]).read_bytes() == b'new-chunk'

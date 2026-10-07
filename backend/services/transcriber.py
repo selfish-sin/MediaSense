@@ -3,6 +3,7 @@ YouTube Tool V2 - Whisper 转录服务
 使用 faster-whisper（CTranslate2加速），本地模型优先，自动降级
 """
 import asyncio
+import json
 import logging
 import os
 import re
@@ -434,14 +435,17 @@ def _split_audio_chunks(audio_path: str, chunk_seconds: int = 300) -> list:
         actual_t = min(chunk_seconds, chunk_left)
         chunk_left -= actual_t
         chunk_path = base_dir / f"{stem}_chunk{i:03d}.wav"
-        cmd = [
-            ffmpeg, '-y', '-v', 'quiet',
-            '-i', audio_path,
-            '-ss', str(start_sec), '-t', str(actual_t),
-            '-acodec', 'pcm_s16le',
-            str(chunk_path),
-        ]
-        subprocess.run(cmd, capture_output=True, check=False, timeout=120)
+        # ★ 断点续传：上次运行遗留的有效分片直接复用，省一次 ffmpeg 重切
+        # （同一音频文件重试时切分结果确定不变；失败恢复场景常见）
+        if not (chunk_path.exists() and chunk_path.stat().st_size > 0):
+            cmd = [
+                ffmpeg, '-y', '-v', 'quiet',
+                '-i', audio_path,
+                '-ss', str(start_sec), '-t', str(actual_t),
+                '-acodec', 'pcm_s16le',
+                str(chunk_path),
+            ]
+            subprocess.run(cmd, capture_output=True, check=False, timeout=120)
         if chunk_path.exists() and chunk_path.stat().st_size > 0:
             chunks.append((str(chunk_path), float(start_sec)))
             logger.info(f'音频分片 [{i}] 偏移 {start_sec:.0f}s → {chunk_path.name} ({chunk_path.stat().st_size} bytes)')
@@ -449,6 +453,67 @@ def _split_audio_chunks(audio_path: str, chunk_seconds: int = 300) -> list:
         logger.warning('音频分片全部失败，回退单次转录')
         return [(audio_path, 0.0)]
     return chunks
+
+
+# ============ 分片检查点（长音频断点恢复，2026-10-07） ============
+#
+# 每片转录完成立即落盘 {stem}_chunkNNN.transcript.json（offset + segments），
+# 中途失败/取消后重试时逐片复用，只重跑缺失片。全部完成后随合并结果一起清理。
+# 检查点不是 ASR v2 缓存：它属于崩溃恢复，键绑定切片 offset 而非模型身份——
+# 但 bypass_cache=true 时同样不读（用户要全新识别，不能把旧结果混进来）。
+
+def _chunk_checkpoint_path(chunk_path: str) -> Path:
+    return Path(str(chunk_path) + '.transcript.json')
+
+
+def _store_chunk_checkpoint(chunk_path: str, offset: float, segments: list) -> None:
+    """把已完成分片的识别结果写入检查点（失败只告警，不影响转录主流程）。"""
+    payload = {
+        'version': 1,
+        'audio': Path(chunk_path).name,
+        'offset': offset,
+        'segments': segments,
+    }
+    try:
+        _chunk_checkpoint_path(chunk_path).write_text(
+            json.dumps(payload, ensure_ascii=False), encoding='utf-8')
+    except Exception as e:
+        logger.warning(f'分片检查点写入失败（不影响转录）: {chunk_path} - {e}')
+
+
+def _load_chunk_checkpoint(chunk_path: str, offset: float) -> Optional[list]:
+    """读取有效检查点；offset 不一致或内容残缺按未命中处理（防错位复用）。"""
+    cp = _chunk_checkpoint_path(chunk_path)
+    if not cp.exists():
+        return None
+    try:
+        payload = json.loads(cp.read_text(encoding='utf-8'))
+        segments = payload.get('segments')
+        if not isinstance(segments, list):
+            return None
+        if abs(float(payload.get('offset', -1.0)) - float(offset)) > 0.5:
+            logger.warning(f'分片检查点 offset 不匹配，忽略: {cp.name}')
+            return None
+        for seg in segments:
+            if not isinstance(seg, dict) or 'start' not in seg or 'end' not in seg or 'text' not in seg:
+                return None
+        return segments
+    except Exception as e:
+        logger.warning(f'分片检查点读取失败，忽略: {cp.name} - {e}')
+        return None
+
+
+def _cleanup_chunk_checkpoints(audio_path: str) -> None:
+    """合并结果写盘后清理同目录下全部相关检查点（音频可能被重命名过，按前缀匹配）。"""
+    stem = Path(audio_path).stem
+    try:
+        for cp in Path(audio_path).parent.glob(f'{stem}_chunk*.transcript.json'):
+            try:
+                cp.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def _transcribe_chunked(
@@ -460,9 +525,12 @@ def _transcribe_chunked(
     progress_callback,
     cancel_check=None,
     device: str = 'auto',
+    bypass_cache: bool = False,
 ) -> Tuple[str, str, int]:
     """长音频分片转录：切分 → 逐段转录（模型只加载一次）→ 时间戳合并
 
+    每片完成后写入检查点（`_store_chunk_checkpoint`）：失败/取消后重试只重跑
+    缺失片；bypass_cache=true 时不读检查点（全新识别语义优先）但照常写。
     返回：(srt_path, txt_path, total_segments)
     """
     CHUNK_SECONDS = 300  # 每段 5 分钟
@@ -537,34 +605,53 @@ def _transcribe_chunked(
         if cancel_check and cancel_check():
             raise TranscriptionCancelledError('用户取消，转录中止')
         chunk_base_pct = int(10 + ci / total_chunks * 85)
-        if progress_callback:
-            elapsed0 = time.time() - transcribe_start
-            progress_callback(
-                chunk_base_pct,
-                f'分片转录 {ci+1}/{total_chunks} | 偏移 {_format_mmss(offset)} | '
-                f'设备 {device} | 已用 {_format_duration(elapsed0)} | 开始本片...'
-            )
-        logger.info(f'转录分段 [{ci+1}/{total_chunks}] 偏移 {offset:.0f}s')
 
-        try:
-            segs, info = model.transcribe(chunk_path, language=language, beam_size=5, vad_filter=True)
-            # ★ 物化生成器：faster-whisper 是惰性编码，CUDA 运行时缺失类错误
-            # （如 cublas64_12.dll 找不到）在迭代时才抛出；必须把迭代收进 try
-            # 才能触发 GPU→CPU 降级，否则分片任务会整段失败。
-            chunk_segments = list(segs)
-        except RuntimeError as e:
-            if use_cuda and _is_cuda_runtime_missing(e):
-                logger.warning('GPU 推理失败，降级 CPU')
-                device = 'cpu'
-                compute_type = 'int8'
-                model = _get_whisper_model(
-                    model_path, device, compute_type,
-                    local_only=local_only, cpu_threads=4, num_workers=1,
+        # ── 分片检查点：已完成的片直接复用（崩溃/失败恢复的核心） ──
+        cached_segments = None if bypass_cache else _load_chunk_checkpoint(chunk_path, offset)
+        if cached_segments is not None:
+            chunk_segments = cached_segments
+            if progress_callback:
+                progress_callback(
+                    chunk_base_pct,
+                    f'♻ 复用已完成分片 {ci+1}/{total_chunks}（断点恢复），跳过识别'
                 )
+            logger.info(f'分片 [{ci+1}/{total_chunks}] 命中检查点，复用 {len(chunk_segments)} 段')
+        else:
+            if progress_callback:
+                elapsed0 = time.time() - transcribe_start
+                progress_callback(
+                    chunk_base_pct,
+                    f'分片转录 {ci+1}/{total_chunks} | 偏移 {_format_mmss(offset)} | '
+                    f'设备 {device} | 已用 {_format_duration(elapsed0)} | 开始本片...'
+                )
+            logger.info(f'转录分段 [{ci+1}/{total_chunks}] 偏移 {offset:.0f}s')
+
+            try:
                 segs, info = model.transcribe(chunk_path, language=language, beam_size=5, vad_filter=True)
-                chunk_segments = list(segs)
-            else:
-                raise
+                # ★ 物化生成器：faster-whisper 是惰性编码，CUDA 运行时缺失类错误
+                # （如 cublas64_12.dll 找不到）在迭代时才抛出；必须把迭代收进 try
+                # 才能触发 GPU→CPU 降级，否则分片任务会整段失败。
+                raw_segments = list(segs)
+            except RuntimeError as e:
+                if use_cuda and _is_cuda_runtime_missing(e):
+                    logger.warning('GPU 推理失败，降级 CPU')
+                    device = 'cpu'
+                    compute_type = 'int8'
+                    model = _get_whisper_model(
+                        model_path, device, compute_type,
+                        local_only=local_only, cpu_threads=4, num_workers=1,
+                    )
+                    segs, info = model.transcribe(chunk_path, language=language, beam_size=5, vad_filter=True)
+                    raw_segments = list(segs)
+                else:
+                    raise
+
+            # 统一为纯 dict（检查点可序列化；复用路径与实时路径同一消费形态）
+            chunk_segments = [
+                {'start': seg.start, 'end': seg.end, 'text': seg.text}
+                for seg in raw_segments
+            ]
+            _store_chunk_checkpoint(chunk_path, offset, chunk_segments)
 
         current_speaker = 0
         last_seg_end = 0
@@ -572,8 +659,9 @@ def _transcribe_chunked(
         for seg in chunk_segments:
             if cancel_check and cancel_check():
                 raise TranscriptionCancelledError('用户取消，转录中止')
-            seg_start = seg.start + offset
-            seg_end_val = seg.end + offset
+            seg_start = seg['start'] + offset
+            seg_end_val = seg['end'] + offset
+            text = seg['text']
             segment_idx += 1
 
             speaker_label = ""
@@ -587,10 +675,10 @@ def _transcribe_chunked(
                 last_seg_end = seg_end_val
 
             all_srt_entries.append(
-                f"{segment_idx}\n{_format_srt_time(seg_start)} --> {_format_srt_time(seg_end_val)}\n{seg.text}\n"
+                f"{segment_idx}\n{_format_srt_time(seg_start)} --> {_format_srt_time(seg_end_val)}\n{text}\n"
             )
             all_txt_lines.append(
-                f"[{_format_mmss(seg_start)} - {_format_mmss(seg_end_val)}] {seg.text}{speaker_label}\n"
+                f"[{_format_mmss(seg_start)} - {_format_mmss(seg_end_val)}] {text}{speaker_label}\n"
             )
 
             # 片内实时进度（足量信息：进度/位置/速度/ETA）
@@ -634,6 +722,8 @@ def _transcribe_chunked(
         f.write('\n'.join(all_srt_entries))
     with open(txt_path, 'w', encoding='utf-8') as f:
         f.writelines(all_txt_lines)
+    # 合并结果落盘即终态，检查点使命完成（复用完整转录文件的断点续传接手）
+    _cleanup_chunk_checkpoints(audio_path)
 
     total = segment_idx
     elapsed = time.time() - transcribe_start
@@ -736,6 +826,7 @@ def _transcribe_by_engine(
     progress_callback,
     cancel_check,
     device: str,
+    bypass_cache: bool = False,
 ) -> Tuple[str, str, int]:
     """单引擎尝试（不处理回退）。未知引擎一律按 cloud。"""
     if engine in _LOCAL_ONNX_ENGINES:
@@ -758,7 +849,7 @@ def _transcribe_by_engine(
                 progress_callback(1, f'检测到长音频（{_format_duration(duration)}），启用分片转录（每段5分钟）...')
             return _transcribe_chunked(
                 audio_path, model_size, platform, speaker_diarization, language, progress_callback,
-                cancel_check=cancel_check, device=device,
+                cancel_check=cancel_check, device=device, bypass_cache=bypass_cache,
             )
         return _transcribe_sync_single(
             audio_path, model_size, platform, speaker_diarization, language, progress_callback,
@@ -794,6 +885,7 @@ def _transcribe_sync(
     device: str = 'auto',
     engine: str = 'cloud_free',
     execution_state: Optional[dict] = None,
+    bypass_cache: bool = False,
 ) -> Tuple[str, str, int]:
     """同步转录入口（引擎路由递归回退 + Whisper 长音频分片）
 
@@ -812,7 +904,7 @@ def _transcribe_sync(
                 model_size=model_size, platform=platform,
                 speaker_diarization=speaker_diarization, language=language,
                 progress_callback=progress_callback, cancel_check=cancel_check,
-                device=device,
+                device=device, bypass_cache=bypass_cache,
             )
             if execution_state is not None:
                 execution_state['engine'] = eng
@@ -1167,6 +1259,7 @@ async def transcribe_audio(
             device=device,
             engine=engine,
             execution_state=execution_state,
+            bypass_cache=bypass_cache,
         )
     finally:
         # 通知 reader 排空后退出；超时则 cancel 兜底
