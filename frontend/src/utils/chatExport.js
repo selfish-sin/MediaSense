@@ -30,6 +30,36 @@ export function formatChatTime(raw) {
   return d ? TIME_FMT.format(d) : ''
 }
 
+// ===== 联网搜索三态与状态文案（与后端 search_mode 契约对齐：off/strict/broad） =====
+
+/** 联网模式选项（ChatPanel 选择器与状态文案共用一份取值） */
+export const SEARCH_MODES = [
+  { value: 'off', label: '关闭' },
+  { value: 'strict', label: '严格依据材料' },
+  { value: 'broad', label: '广泛收集' },
+]
+
+/** 搜索后端显示名（provider key 来自 SSE search 事件） */
+export function searchProviderName(provider) {
+  return { ollama: 'Ollama', tavily: 'Tavily', firecrawl: 'Firecrawl', ddgs: 'DuckDuckGo' }[provider] || '联网'
+}
+
+/**
+ * 联网检索状态气泡文案。
+ * @param {null|{status:'searching'|'ok'|'failed', mode?:string, provider?:string, count?:number, message?:string}} state
+ */
+export function searchStateLabel(state) {
+  if (!state) return ''
+  if (state.status === 'searching') {
+    return state.mode === 'broad' ? '正在广泛检索资料…' : '正在联网检索…'
+  }
+  if (state.status === 'ok') {
+    const verb = state.mode === 'broad' ? '已广泛检索' : '已联网检索'
+    return `${verb} · ${searchProviderName(state.provider)} · ${state.count} 条来源`
+  }
+  return `联网检索失败：${state.message}（已改用模型自身知识回答）`
+}
+
 function sourceLine(source, index) {
   const title = source?.title || source?.url || '来源'
   const url = source?.url ? ` — ${source.url}` : ''

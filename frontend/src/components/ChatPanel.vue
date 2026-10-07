@@ -6,9 +6,12 @@
           <el-icon style="margin-right: 4px; vertical-align: -2px;"><MessageCircle /></el-icon>追问
         </span>
         <div class="chat-header-tools">
-          <el-tooltip content="开启后追问先联网搜索，结果带来源引用" placement="top">
+          <el-tooltip content="严格：回答严格依据视频材料与检索结果，找不到就明说；广泛：围绕问题广泛收集资料作答，视频材料仅作参考" placement="top">
             <span class="search-switch">
-              <el-switch v-model="enableSearch" size="small" active-text="联网" inline-prompt />
+              <span class="search-mode-label">联网</span>
+              <el-select v-model="searchMode" size="small" class="search-mode-select" :disabled="streaming">
+                <el-option v-for="m in SEARCH_MODES" :key="m.value" :value="m.value" :label="m.label" />
+              </el-select>
             </span>
           </el-tooltip>
           <el-checkbox v-model="showThinking" value="show-thinking" size="small" class="think-toggle">显示思考过程</el-checkbox>
@@ -221,7 +224,7 @@ import { MessageCircle, Plus, Pencil, Trash2, ArrowDown, Sparkles, Link, Search,
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatApi } from '../utils/api'
 import { copyText } from '../utils/clipboard'
-import { buildAiText, buildConversationMarkdown, formatChatTime } from '../utils/chatExport'
+import { buildAiText, buildConversationMarkdown, formatChatTime, SEARCH_MODES, searchStateLabel } from '../utils/chatExport'
 import { isDialogCancel } from '../utils/errorNotice'
 import { useMarkdownListCache } from '../composables/useMarkdownRender'
 import { useModelStore } from '../stores/modelStore'
@@ -241,7 +244,8 @@ const { htmlOf } = useMarkdownListCache(
 )
 const input = ref('')
 const streaming = ref(false)
-const enableSearch = ref(false)
+// 联网三态：off 关闭 / strict 严格依据材料 / broad 广泛收集（见 utils/chatExport SEARCH_MODES）
+const searchMode = ref('off')
 const showThinking = ref(false)
 const selectedModel = ref('')
 const scrollRef = ref(null)
@@ -464,7 +468,7 @@ async function onSend(overrideContent) {
   chatApi.streamChat(
     props.jobId,
     sessionId,
-    { content, model: selectedModel.value, enableSearch: enableSearch.value },
+    { content, model: selectedModel.value, searchMode: searchMode.value },
     {
       signal: abortCtrl.signal,
       onEvent: (ev) => {
@@ -523,26 +527,20 @@ function onStop() {
 function setSearchState(assistant, ev) {
   let state
   if (ev.status === 'ok') {
-    state = { status: 'ok', provider: ev.provider || '', count: ev.count || 0 }
+    state = { status: 'ok', provider: ev.provider || '', count: ev.count || 0, mode: ev.mode || 'strict' }
   } else if (ev.status === 'failed') {
-    state = { status: 'failed', message: ev.message || '未知原因' }
+    state = { status: 'failed', message: ev.message || '未知原因', mode: ev.mode || '' }
   } else {
-    state = { status: 'searching' }
+    state = { status: 'searching', mode: ev.mode || 'strict' }
   }
   const live = messages.value.find((m) => m.id === assistant.id)
   if (live) live.search = state
   else assistant.search = state
 }
 
-// 联网检索状态文案
+// 联网检索状态文案：纯函数在 utils/chatExport（searchStateLabel），此处沿用旧名供模板调用
 function searchLabel(state) {
-  if (!state) return ''
-  if (state.status === 'searching') return '正在联网检索…'
-  if (state.status === 'ok') {
-    const who = state.provider === 'zhipu' ? '智谱' : state.provider === 'ddgs' ? 'DuckDuckGo' : '联网'
-    return `已联网检索 · ${who} · ${state.count} 条来源`
-  }
-  return `联网检索失败：${state.message}（已改用模型自身知识回答）`
+  return searchStateLabel(state)
 }
 
 // ===== 复制（格式化见 utils/chatExport.js 纯函数；复制反馈走 utils/clipboard 单点） =====
@@ -678,6 +676,18 @@ watch(
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+.search-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.search-mode-label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.search-mode-select {
+  width: 118px;
 }
 .think-toggle {
   margin-right: 4px;

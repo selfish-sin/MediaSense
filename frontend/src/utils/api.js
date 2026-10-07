@@ -245,12 +245,13 @@ export const chatApi = {
   deleteFrom: (jobId, msgId) => api.delete(`/jobs/${jobId}/chat/from/${msgId}`),
   // SSE 流式追问：返回 Promise；通过 onEvent/onEnd/onError 回调驱动 UI
   // handlers: { signal, onEvent(ev), onEnd(aborted?), onError(err) }
-  streamChat: (jobId, sessionId, { content, model, enableSearch }, handlers) => {
+  // searchMode: 'off' | 'strict'（严格依据材料） | 'broad'（广泛收集），见 utils/chatExport SEARCH_MODES
+  streamChat: (jobId, sessionId, { content, model, searchMode }, handlers) => {
     const { signal, onEvent, onEnd, onError } = handlers
     return fetch(`/api/jobs/${jobId}/chat/sessions/${sessionId}/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, model: model || undefined, enable_search: !!enableSearch }),
+      body: JSON.stringify({ content, model: model || undefined, search_mode: searchMode || 'off' }),
       signal,
     }).then(async (resp) => {
       if (!resp.ok) {

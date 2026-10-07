@@ -4,6 +4,9 @@ import {
   formatChatTime,
   buildAiText,
   buildConversationMarkdown,
+  SEARCH_MODES,
+  searchProviderName,
+  searchStateLabel,
 } from '../utils/chatExport'
 
 describe('parseChatTime', () => {
@@ -86,5 +89,37 @@ describe('buildConversationMarkdown', () => {
       buildConversationMarkdown(messages).indexOf('回答一'),
     )
     expect(buildConversationMarkdown([], '空')).toContain('# 空')
+  })
+})
+
+describe('searchStateLabel（联网三态文案）', () => {
+  it('SEARCH_MODES 与后端 search_mode 契约对齐', () => {
+    expect(SEARCH_MODES.map((m) => m.value)).toEqual(['off', 'strict', 'broad'])
+  })
+
+  it('provider 显示名覆盖四个引擎，未知回落「联网」', () => {
+    expect(searchProviderName('ollama')).toBe('Ollama')
+    expect(searchProviderName('tavily')).toBe('Tavily')
+    expect(searchProviderName('firecrawl')).toBe('Firecrawl')
+    expect(searchProviderName('ddgs')).toBe('DuckDuckGo')
+    expect(searchProviderName('')).toBe('联网')
+  })
+
+  it('searching/ok 文案区分严格与广泛模式', () => {
+    expect(searchStateLabel({ status: 'searching', mode: 'strict' })).toContain('正在联网检索')
+    expect(searchStateLabel({ status: 'searching', mode: 'broad' })).toContain('正在广泛检索')
+    expect(searchStateLabel({ status: 'ok', provider: 'ollama', count: 5, mode: 'strict' })).toBe(
+      '已联网检索 · Ollama · 5 条来源',
+    )
+    expect(searchStateLabel({ status: 'ok', provider: 'ollama', count: 9, mode: 'broad' })).toBe(
+      '已广泛检索 · Ollama · 9 条来源',
+    )
+  })
+
+  it('failed 文案透出原因并说明降级', () => {
+    expect(searchStateLabel({ status: 'failed', message: '未配置 Ollama 搜索 Key' })).toContain(
+      '联网检索失败：未配置 Ollama 搜索 Key（已改用模型自身知识回答）',
+    )
+    expect(searchStateLabel(null)).toBe('')
   })
 })
