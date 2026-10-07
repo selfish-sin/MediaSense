@@ -188,6 +188,17 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
+    # ★ 重新生成保留历史版本：variant_group=同轮回答的变体组 id（''=存量独立行），
+    #   is_active=组内生效版本（后续追问上下文只引用生效版本）
+    try:
+        cursor.execute("ALTER TABLE job_chats ADD COLUMN variant_group TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE job_chats ADD COLUMN is_active INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
+
     # ★ 旧数据迁移：为每个有消息但无会话的任务创建默认会话，并把消息归属进去
     try:
         conn.execute("""

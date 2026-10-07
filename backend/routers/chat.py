@@ -68,6 +68,10 @@ def _gen_session_id():
     return str(uuid.uuid4())[:12]
 
 
+def _gen_variant_group():
+    return str(uuid.uuid4())[:12]
+
+
 def _ensure_session(job_id, session_id):
     """确保会话存在（前端传来的 session_id 若不存在则创建默认标题会话）"""
     conn = get_connection()
@@ -86,16 +90,18 @@ def _ensure_session(job_id, session_id):
         conn.close()
 
 
-def _insert_chat(job_id, session_id, role, content, thinking=None, sources=None, token_usage=None):
+def _insert_chat(job_id, session_id, role, content, thinking=None, sources=None, token_usage=None,
+                 variant_group="", is_active=1):
     conn = get_connection()
     try:
         cur = conn.execute(
-            "INSERT INTO job_chats (job_id, session_id, role, content, thinking, sources, token_usage) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO job_chats (job_id, session_id, role, content, thinking, sources, token_usage, "
+            "variant_group, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 job_id, session_id, role, content, thinking,
                 json.dumps(sources, ensure_ascii=False) if sources is not None else None,
                 json.dumps(token_usage or {}, ensure_ascii=False),
+                variant_group or "", 1 if is_active else 0,
             ),
         )
         conn.commit()
@@ -104,11 +110,54 @@ def _insert_chat(job_id, session_id, role, content, thinking=None, sources=None,
         conn.close()
 
 
-def _get_session_history(job_id, session_id, limit=30):
+def _variant_rows(job_id, session_id, group):
+    """组内全部变体（id 升序）；空组返回空列表"""
+    if not group:
+        return []
     conn = get_connection()
     try:
         rows = conn.execute(
-            "SELECT role, content FROM job_chats WHERE job_id = ? AND session_id = ? ORDER BY id DESC LIMIT ?",
+            "SELECT id, role, is_active, created_at, token_usage FROM job_chats "
+            "WHERE job_id = ? AND session_id = ? AND variant_group = ? AND role = 'assistant' ORDER BY id ASC",
+            (job_id, session_id, group),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def _activate_variant(job_id, session_id, group, msg_id):
+    """组内 is_active 互斥切换；msg_id 不在组内时返回 None"""
+    conn = get_connection()
+    try:
+        member = conn.execute(
+            "SELECT id FROM job_chats WHERE job_id = ? AND session_id = ? AND variant_group = ? AND id = ?",
+            (job_id, session_id, group, msg_id),
+        ).fetchone()
+        if not member:
+            return False
+        conn.execute(
+            "UPDATE job_chats SET is_active = CASE WHEN id = ? THEN 1 ELSE 0 END "
+            "WHERE job_id = ? AND session_id = ? AND variant_group = ?",
+            (msg_id, job_id, session_id, group),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def _get_session_history(job_id, session_id, limit=30):
+    """模型上下文用：排除非激活变体（后续提问只引用生效版本）。
+
+    is_active 兜底：存量行/用户行默认 1；条件写成
+    `(role = 'user' OR is_active = 1)`——用户消息恒参与，assistant 只取生效版本。
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT role, content FROM job_chats WHERE job_id = ? AND session_id = ? "
+            "AND (role = 'user' OR is_active = 1) ORDER BY id DESC LIMIT ?",
             (job_id, session_id, limit),
         ).fetchall()
         return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
@@ -381,19 +430,32 @@ def clear_session_messages(job_id: str, session_id: str):
 
 @router.get("/{job_id}/chat/sessions/{session_id}/history")
 def get_session_history(job_id: str, session_id: str):
+    """会话历史（前端渲染用）：返回**全部行**（含非激活变体），
+    assistant 消息附 variant_group / is_active / variants 组摘要，由前端按组选显。"""
     conn = get_connection()
     try:
         rows = conn.execute(
-            "SELECT id, role, content, thinking, sources, token_usage, created_at "
+            "SELECT id, role, content, thinking, sources, token_usage, created_at, variant_group, is_active "
             "FROM job_chats WHERE job_id = ? AND session_id = ? ORDER BY id ASC",
             (job_id, session_id),
         ).fetchall()
+        # 组摘要缓存：group -> [{id, created_at, token_usage}]
+        variant_index = {}
+        for r in rows:
+            g = r["variant_group"] or ""
+            if r["role"] == "assistant" and g:
+                variant_index.setdefault(g, []).append({
+                    "id": r["id"],
+                    "created_at": str(r["created_at"]),
+                    "token_usage": _parse_json(r["token_usage"], {}),
+                })
         messages = []
         for r in rows:
             try:
                 sources = _parse_json(r["sources"], [])
             except Exception:
                 sources = []
+            group = r["variant_group"] or ""
             messages.append({
                 "id": r["id"],
                 "role": r["role"],
@@ -402,10 +464,36 @@ def get_session_history(job_id: str, session_id: str):
                 "sources": sources,
                 "token_usage": _parse_json(r["token_usage"], {}),
                 "created_at": str(r["created_at"]),
+                "variant_group": group,
+                "is_active": bool(r["is_active"] if r["is_active"] is not None else 1),
+                "variants": variant_index.get(group, []) if (r["role"] == "assistant" and group) else [],
             })
         return {"job_id": job_id, "session_id": session_id, "messages": messages}
     finally:
         conn.close()
+
+
+@router.post("/{job_id}/chat/variants/{msg_id}/activate")
+def activate_variant(job_id: str, msg_id: int):
+    """切换变体组内生效版本（组归属经消息行反查，前端不用传 group）"""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT session_id, variant_group FROM job_chats WHERE job_id = ? AND id = ? AND role = 'assistant'",
+            (job_id, msg_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return JSONResponse(status_code=404, content={"detail": "消息不存在"})
+    group = row["variant_group"] or ""
+    if not group:
+        # 存量单变体行：无可切换对象，幂等成功
+        return {"id": msg_id, "variant_count": 1}
+    ok = _activate_variant(job_id, row["session_id"], group, msg_id)
+    if not ok:
+        return JSONResponse(status_code=404, content={"detail": "消息不存在"})
+    return {"id": msg_id, "variant_count": len(_variant_rows(job_id, row["session_id"], group))}
 
 
 @router.get("/{job_id}/chat/history")
@@ -497,6 +585,8 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
         user_id = None
         in_tok = out_tok = 0
         disconnected = False
+        variant_group = ""
+        variant_count = 1
 
         try:
             # 先取历史再插入新问题——否则历史里已含本条问题，
@@ -506,6 +596,46 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
             if not msg.regenerate:
                 user_id = _insert_chat(job_id, session_id, "user", question)
                 _maybe_rename_session(job_id, session_id, question)
+            else:
+                # 重新生成 = 追加新变体：定位最后一条 user 行之后的当前生效回答，
+                # 归入其 variant_group（无组则从本代起新建组），组内旧版本全部转为非激活
+                conn = get_connection()
+                try:
+                    last_user = conn.execute(
+                        "SELECT id, content FROM job_chats "
+                        "WHERE job_id = ? AND session_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1",
+                        (job_id, session_id),
+                    ).fetchone()
+                    prev = None
+                    if last_user:
+                        prev = conn.execute(
+                            "SELECT id, variant_group FROM job_chats "
+                            "WHERE job_id = ? AND session_id = ? AND role = 'assistant' AND id > ? "
+                            "ORDER BY id ASC LIMIT 1",
+                            (job_id, session_id, last_user["id"]),
+                        ).fetchone()
+                finally:
+                    conn.close()
+                if prev is None:
+                    yield _sse({"type": "error", "message": "没有可重新生成的回答"})
+                    return
+                variant_group = prev["variant_group"] or _gen_variant_group()
+                conn = get_connection()
+                try:
+                    # 存量独立回答（无组）先认领进组，否则旧版本仍 is_active=1 继续进上下文
+                    if not prev["variant_group"]:
+                        conn.execute(
+                            "UPDATE job_chats SET variant_group = ? WHERE id = ?",
+                            (variant_group, prev["id"]),
+                        )
+                    conn.execute(
+                        "UPDATE job_chats SET is_active = 0 "
+                        "WHERE job_id = ? AND session_id = ? AND variant_group = ? AND role = 'assistant'",
+                        (job_id, session_id, variant_group),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
 
             search_mode = _resolve_search_mode(msg)
             search_text = ""
@@ -608,7 +738,11 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
                 thinking="".join(thinking_text) or None,
                 sources=sources,
                 token_usage={"input": in_tok, "output": out_tok},
+                variant_group=variant_group,
+                is_active=1,
             )
+            if variant_group:
+                variant_count = len(_variant_rows(job_id, session_id, variant_group))
             if not disconnected:
                 yield _sse({"type": "sources", "sources": sources})
                 yield _sse({
@@ -617,6 +751,8 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
                     "user_id": user_id,
                     "assistant_id": assistant_id,
                     "token_usage": {"input": in_tok, "output": out_tok},
+                    "variant_group": variant_group,
+                    "variant_count": variant_count,
                 })
         except Exception as e:
             logger.exception("追问流式生成异常")
@@ -626,9 +762,13 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
                     thinking="".join(thinking_text) or None,
                     sources=sources,
                     token_usage={"input": in_tok, "output": out_tok},
+                    variant_group=variant_group,
+                    is_active=1,
                 )
             except Exception:
                 assistant_id = None
+            if variant_group and assistant_id:
+                variant_count = len(_variant_rows(job_id, session_id, variant_group))
             if not await request.is_disconnected():
                 yield _sse({"type": "sources", "sources": sources})
                 yield _sse({"type": "error", "message": str(e)[:300]})
@@ -638,6 +778,8 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
                     "user_id": user_id,
                     "assistant_id": assistant_id,
                     "token_usage": {"input": in_tok, "output": out_tok},
+                    "variant_group": variant_group,
+                    "variant_count": variant_count,
                 })
 
     return StreamingResponse(
@@ -656,6 +798,56 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
 
 @router.delete("/{job_id}/chat/{msg_id}")
 def delete_chat_message(job_id: str, msg_id: int):
+    """单条删除：assistant 且同组有其他变体 → 只删该变体，删的是生效版本则由组内最新接管；
+    组删空 → 连同所属 user 行删除（防孤儿提问）。user 行 → 等同整轮删除。"""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT role, session_id, variant_group FROM job_chats WHERE job_id = ? AND id = ?",
+            (job_id, msg_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return {"message": "已删除该消息"}
+    session_id = row["session_id"]
+    group = row["variant_group"] or ""
+    if row["role"] == "assistant" and session_id and group:
+        conn = get_connection()
+        try:
+            conn.execute(
+                "DELETE FROM job_chats WHERE id = ? AND job_id = ?", (msg_id, job_id))
+            remaining = conn.execute(
+                "SELECT id FROM job_chats WHERE job_id = ? AND session_id = ? AND variant_group = ? "
+                "AND role = 'assistant' ORDER BY id DESC",
+                (job_id, session_id, group),
+            ).fetchall()
+            if remaining:
+                # 删的是生效版本 → 组内最新接管；否则保持原激活行不动
+                still_active = conn.execute(
+                    "SELECT id FROM job_chats WHERE job_id = ? AND session_id = ? AND variant_group = ? AND is_active = 1",
+                    (job_id, session_id, group),
+                ).fetchone()
+                if not still_active:
+                    conn.execute(
+                        "UPDATE job_chats SET is_active = 1 WHERE id = ?", (remaining[0]["id"],))
+            else:
+                # 组空：删所属 user 行（组已无行，以其被删变体的最小 id 为上界找最后一条 user）
+                conn.execute(
+                    "DELETE FROM job_chats WHERE id = ("
+                    "  SELECT MAX(id) FROM job_chats"
+                    "  WHERE job_id = ? AND session_id = ? AND role = 'user' AND id < ?"
+                    ")",
+                    (job_id, session_id, msg_id),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return {"message": "已删除该回答版本"}
+    if row["role"] == "user" and session_id:
+        # user 行 = 整轮：它及之后全部（含该轮的整个变体组）
+        _delete_chat_from(job_id, msg_id)
+        return {"message": "已删除该消息及其后续"}
     _delete_chat_message(job_id, msg_id)
     return {"message": "已删除该消息"}
 

@@ -1218,6 +1218,166 @@ class TestChatRouter:
         assert resp.status_code == 422
 
 
+# ── 重新生成与历史回复版本（variant_group/is_active） ──
+class TestChatVariants:
+    """重新生成保留历史版本：分组落库、activate 切换、上下文过滤、删除语义。"""
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, client):
+        """一组两版回答 + 后续一轮提问（模拟重新生成一次后的会话）。
+        ★ 每测唯一 job/session：DB 是会话级共享的，同 id 会跨测试串数据。"""
+        import uuid
+        from routers.chat import _insert_chat, _gen_variant_group, _ensure_session
+        from db.database import get_connection
+        self.JID = "jv-" + uuid.uuid4().hex[:8]
+        self.SID = "sv-" + uuid.uuid4().hex[:8]
+        # chat_sessions/job_chats 对 jobs 有外键：补一条最小任务行
+        conn = get_connection()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO jobs (id, title, status, result_text) VALUES (?, '变体测试', 'completed', '结果')",
+                (self.JID,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        _ensure_session(self.JID, self.SID)
+        self.group = _gen_variant_group()
+        self.u1 = _insert_chat(self.JID, self.SID, "user", "问题一")
+        self.a1 = _insert_chat(self.JID, self.SID, "assistant", "答案一v1", variant_group=self.group)
+        self.a2 = _insert_chat(self.JID, self.SID, "assistant", "答案一v2", variant_group=self.group)
+        from routers.chat import _activate_variant
+        _activate_variant(self.JID, self.SID, self.group, self.a2)  # 生效 = v2
+        self.u2 = _insert_chat(self.JID, self.SID, "user", "问题二")
+        self.a3 = _insert_chat(self.JID, self.SID, "assistant", "答案二")  # 独立单变体
+
+    def test_history_exposes_variant_metadata(self, client):
+        resp = client.get(f"/api/jobs/{self.JID}/chat/sessions/{self.SID}/history")
+        assert resp.status_code == 200
+        msgs = resp.json()["messages"]
+        a1 = next(m for m in msgs if m["id"] == self.a1)
+        a2 = next(m for m in msgs if m["id"] == self.a2)
+        a3 = next(m for m in msgs if m["id"] == self.a3)
+        assert a1["variant_group"] == self.group and a2["variant_group"] == self.group
+        assert a1["is_active"] is False and a2["is_active"] is True
+        assert [v["id"] for v in a2["variants"]] == [self.a1, self.a2]
+        # 存量单变体行：无组无切换器
+        assert a3["variant_group"] == "" and a3["variants"] == []
+
+    def test_context_excludes_inactive_variants(self, client):
+        """★ 回归锚点：模型上下文只含生效版本（v1 不进上下文，否则切换无意义）"""
+        from routers.chat import _get_session_history
+        hist = _get_session_history(self.JID, self.SID)
+        contents = [h["content"] for h in hist]
+        assert "答案一v1" not in contents
+        assert "答案一v2" in contents and "答案二" in contents
+
+    def test_activate_endpoint_switches_and_persists(self, client):
+        resp = client.post(f"/api/jobs/{self.JID}/chat/variants/{self.a1}/activate")
+        assert resp.status_code == 200
+        assert resp.json() == {"id": self.a1, "variant_count": 2}
+        from routers.chat import _get_session_history
+        contents = [h["content"] for h in _get_session_history(self.JID, self.SID)]
+        assert "答案一v1" in contents and "答案一v2" not in contents
+        # 非组内 id → 404
+        assert client.post(f"/api/jobs/{self.JID}/chat/variants/999999/activate").status_code == 404
+
+    def test_regenerate_stream_appends_variant_not_delete(self, client, monkeypatch):
+        """★ 回归锚点：重新生成不再删除旧回答——对最后一轮（独立行 a3）生成变体入组并带计数"""
+        from services.web_search import SearchOutcome
+        from routers.chat import _insert_chat as _real_insert
+        TestChatRouter()._stub_stream(monkeypatch, SearchOutcome())  # httpx 短路 → 走异常兜底插入
+        # _stub_stream 把 _insert_chat 换成了固定返回 1 的桩；本用例要验证真实落库，恢复真函数
+        monkeypatch.setattr("routers.chat._insert_chat", _real_insert)
+        resp = client.post(f"/api/jobs/{self.JID}/chat/sessions/{self.SID}/stream",
+                           json={"content": "", "regenerate": True})
+        assert resp.status_code == 200
+        # a3 原是独立行（group=''）→ 重生成时从本代起新建组；组内 = a3 + 新变体 = 2
+        import re as _re
+        m = _re.search(r'"variant_group": "([^"]+)", "variant_count": (\d+)', resp.text)
+        assert m, resp.text
+        new_group, count = m.group(1), int(m.group(2))
+        assert count == 2
+        from routers.chat import _variant_rows
+        rows = _variant_rows(self.JID, self.SID, new_group)
+        assert len(rows) == 2
+        assert rows[-1]["is_active"] == 1 and rows[0]["is_active"] == 0
+        # 旧回答 a3 仍在（不删除），新变体内容 = 异常兜底文案（模型被短路）
+        from db.database import get_connection
+        conn = get_connection()
+        try:
+            content = conn.execute("SELECT content FROM job_chats WHERE id = ?", (rows[-1]["id"],)).fetchone()["content"]
+            a3 = conn.execute("SELECT content FROM job_chats WHERE id = ?", (self.a3,)).fetchone()
+        finally:
+            conn.close()
+        assert content == "(生成出错)"
+        assert a3 is not None and a3["content"] == "答案二"
+
+    def test_regenerate_without_assistant_rejected(self, client, monkeypatch):
+        """没有任何可重生的回答 → 显式 error 事件（不静默）"""
+        from services.web_search import SearchOutcome
+        TestChatRouter()._stub_stream(monkeypatch, SearchOutcome())
+        # content 必填（契约）；正常新提问不受变体分支影响
+        resp = client.post(f"/api/jobs/{self.JID}/chat/sessions/{self.SID}/stream",
+                           json={"content": "新问题"})
+        assert resp.status_code == 200
+        # 空会话重生成 → 无可重生对象
+        import uuid
+        from routers.chat import _ensure_session
+        from db.database import get_connection
+        jid2 = "jv-" + uuid.uuid4().hex[:8]
+        conn = get_connection()
+        try:
+            conn.execute("INSERT OR IGNORE INTO jobs (id, title, status, result_text) VALUES (?, 't', 'completed', 'r')", (jid2,))
+            conn.commit()
+        finally:
+            conn.close()
+        _ensure_session(jid2, "sv2")
+        resp2 = client.post(f"/api/jobs/{jid2}/chat/sessions/sv2/stream",
+                            json={"content": "", "regenerate": True})
+        assert '"没有可重新生成的回答"' in resp2.text
+
+    def test_delete_active_variant_hands_over_to_latest(self, client):
+        """删生效版本 → 组内最新接管激活；旧版本保留"""
+        resp = client.delete(f"/api/jobs/{self.JID}/chat/{self.a2}")
+        assert resp.status_code == 200
+        from db.database import get_connection
+        conn = get_connection()
+        try:
+            a1 = conn.execute("SELECT is_active FROM job_chats WHERE id = ?", (self.a1,)).fetchone()
+            u2 = conn.execute("SELECT id FROM job_chats WHERE id = ?", (self.u2,)).fetchone()
+        finally:
+            conn.close()
+        assert a1["is_active"] == 1      # 接管
+        assert u2 is not None            # 后续轮次不受影响
+
+    def test_delete_last_variant_removes_orphan_question(self, client):
+        """组删空 → 连带删除所属提问行（防孤儿）"""
+        client.delete(f"/api/jobs/{self.JID}/chat/{self.a2}")
+        client.delete(f"/api/jobs/{self.JID}/chat/{self.a1}")
+        from db.database import get_connection
+        conn = get_connection()
+        try:
+            u1 = conn.execute("SELECT id FROM job_chats WHERE id = ?", (self.u1,)).fetchone()
+        finally:
+            conn.close()
+        assert u1 is None
+
+    def test_delete_user_message_deletes_whole_group(self, client):
+        """删 user 行 = 整轮：全组变体 + 后续全删（编辑回填沿用此语义）"""
+        client.delete(f"/api/jobs/{self.JID}/chat/{self.u1}")
+        from db.database import get_connection
+        conn = get_connection()
+        try:
+            left = conn.execute(
+                "SELECT id FROM job_chats WHERE job_id = ? AND id IN (?, ?, ?)",
+                (self.JID, self.a1, self.a2, self.u1),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert left == []
+
+
 # ── ASR 状态 ──
 class TestAsrStatusRouter:
     @pytest.fixture(autouse=True)
