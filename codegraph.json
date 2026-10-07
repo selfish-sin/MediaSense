@@ -1,0 +1,6 @@
+{
+  "exclude": [
+    "backend/static/",
+    ".trellis/tasks/archive/"
+  ]
+}

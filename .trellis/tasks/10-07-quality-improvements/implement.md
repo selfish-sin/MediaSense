@@ -9,6 +9,10 @@
   启动迁移已完成：lifespan 保留 init_db → 中断任务标记失败 → 过期转换文件清理。
   真实 socket_app ASGI 入口验证恢复状态、任务/队列/OpenAPI；30 定向测试通过，无告警。
 - [ ] 过时任务/索引/规范：核对证据、归档、文档回写，commit。
+  两个历史 planning 任务已补 result 并按 Trellis 归档，active 指针未改。
+  CodeGraph 官方随包 README 确认 root codegraph.json.exclude 支持已提交目录；
+  排除 backend/static/ 与 .trellis/tasks/archive/ 后重建：节点 9574→5132，DB 44.27→15.41 MB。
+  transcription_key 和 _transcription_cache_key 已能定位，归档研究脚本不再入图；模糊查询仍需核对路径。
 - [ ] 本地 API 冒烟与最终工作树检查；本轮不 push。
 
 CodeGraph：启动状态 up to date，但 explore ai_cache.py / 精确函数返回无关符号并包含 static/archive，
