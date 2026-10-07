@@ -3580,18 +3580,6 @@
             "description": "最大结果数"
           },
           {
-            "name": "engine",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "description": "搜索引擎: std | pro | sogou | quark",
-              "default": "pro",
-              "title": "Engine"
-            },
-            "description": "搜索引擎: std | pro | sogou | quark"
-          },
-          {
             "name": "format",
             "in": "query",
             "required": false,
@@ -3959,6 +3947,22 @@
             "type": "boolean",
             "title": "Enable Search",
             "default": false
+          },
+          "search_mode": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "strict",
+                  "broad",
+                  "off"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Search Mode"
           },
           "regenerate": {
             "type": "boolean",

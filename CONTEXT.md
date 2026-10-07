@@ -38,7 +38,7 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `.trellis/spec/backend/transcription-chain.md` | **识别链全链路权威文档**：输入四策略/字幕优先防错位/引擎回退链/三引擎内部/分片补录/横评结论/参数速查/坑点汇总 | 改转录链任何环节前必读 |
 | `.trellis/spec/backend/ai-call-cache.md` | AI/ASR v2 调用与缓存边界：忽略缓存仅跳过读、成功仍写回；传不传 state 都守住正文后不重试；缓存建连失败告警降级 | 改 AI 调用、流式重试或缓存容错或转录模型身份时 |
 | `docs/quality-audit-2026-10-07.md` | 已完成质量改进/验收证据、效果说明及后续只读发现（强制重试备份保护待修） | 排查缓存、强制重试，或安排下一轮质量改进时 |
-| `backend/services/web_search.py` | **联网检索唯一实现**（追问 + 深度研究共用）：智谱独立 Web Search API（`POST /api/paas/v4/web_search`，非 chat+tools 老姿势）优先 → DDGS 免 Key 兜底；`resolve_zhipu_key()` 三级兜底（env→config→DB bigmodel 模型）、`resolve_search_proxy()`（ddgs 不读 HTTP_PROXY 必须显式传）、`web_search_collect()` 返回 `SearchOutcome`（sources/text/provider/error，失败不静默） | 改联网搜索、追问引用来源、深度研究检索时 |
+| `backend/services/web_search.py` | **联网检索唯一实现**（追问 + 深度研究共用）：引擎链 **Ollama（免费主路径，`POST {base}/api/web_search`）→ Tavily → Firecrawl（后两级配 Key 才参与，未配自动跳过）→ DDGS 免 Key 兜底**（智谱已于 2026-10-07 整体移除：账号欠费）；Key 两级兜底 env→config.py（`OLLAMA_SEARCH_API_KEY`/`TAVILY_API_KEY`/`FIRECRAWL_API_KEY`，ollama 申请入口 ollama.com/settings/keys）；`snippet_limit` 参数化（strict 500 / broad 900）；`resolve_search_proxy()`（ddgs 不读 HTTP_PROXY 必须显式传；ollama 的 httpx 亦显式传）；`web_search_collect()` 返回 `SearchOutcome`（sources/text/provider/error，失败不静默）；`fmt_sources()` 编号渲染供 chat 广泛模式合并后复用 | 改联网搜索、追问引用来源、深度研究检索时 |
 | `backend/services/ai_cache.py` | AI/ASR 缓存读写单点；失败告警降级、忽略缓存仍写回；ASR v2 身份含模型上下文，记录实际整体引擎 | 改缓存键、读写、故障边界时 |
 | `backend/services/` | 分段、摘要、导出、搜索等处理（`prompt_builder.py` 模块化提示词 9 维度含输出语言）。**`ai_processor.py` 是四个 AI 入口（总结/校正/打标签/思维导图）的兜底编排中心**：`_call_ai`（流式，失败返回 `[处理失败: ...]` 哨兵串而非抛异常，内置 AI 结果缓存——命中零 token、`bypass_cache=True` 跳过）、`_call_ai_with_fallback`（流式，**哨兵失败或零正文都换模型**，只在一字未吐时才换）、`run_with_fallback`（非流式，同样零正文换候选）、`is_call_failed`/`_strip_sentinel`（哨兵串判定，`''` 恒 False）、`ai_process`（跨批次记忆 `preferred_model`）、`correct_transcript_with_fallback` | 改 AI 调用、失败契约、缓存语义或换模型边界时 |
 | `backend/services/naming.py` | **文件名唯一实现**：`safe_basename`（只剔 Windows 非法字符，保留《》、，、- 与空格）、`export_basename`（标题→BV/YT id→`job_{id}` 兜底）、`extract_video_id`；导出 4 格式/批量 ZIP/下载素材全走它 | 改导出或下载素材的文件名时（勿再写第二份清洗逻辑） |
@@ -65,8 +65,8 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `frontend/src/utils/effects.js` | 效果层：`DEFAULT_EFFECTS` + `effectVars(effects, mode)` 把氛围参数换算为 CSS 变量——**四层 scrim**（中性黑/白 + 上下渐晕 + 径向暗角 + 整体浓度）、玻璃三件套（blur/saturate/高光描边）、surface 三档、`--app-card-rest`+`--el-card-box-shadow`、`--app-glass-sheen`（dark 卡片高光）、light 材质补偿 +12%；`loadEffects` 兼容旧 `background` 内嵌效果参数 | 改遮罩/暗角/玻璃参数或默认值时 |
 | `frontend/src/utils/skinSchema.js` | 皮肤 JSON 校验与归一化：`normalizeSkin()` 返回 `{ok, skin}` 或 `{ok:false, error}`（**错误原因必须可行动**）+ `REQUIRED_PALETTE_KEYS`（palette 必需色单一事实源）+ `skinToJson()` | 改皮肤导入格式或校验规则时 |
 | `frontend/src/components/BackgroundPanel.vue` | 背景与配色设置面板：皮肤选择（色块预览卡 + 导入/导出）、内置氛围背景 + **动态背景卡**（左上角发光点标记）、**背景图库网格**（缩略图切换 / hover 删除 / `N/24 · XMB` 用量）、上传后**亮度推荐直接展示数值并可一键采用**、提色板、氛围遮罩 5 滑块、卡片材质 2 滑块、背景提示条（`bgNotice` / `storageError`） | 改背景设置面板 UI 时 |
-| `frontend/src/components/ChatPanel.vue` | 追问聊天面板（多会话/流式/SSE search 事件/消息操作栏：复制·编辑·删除·重新生成/时间戳/整对话复制） | 改追问交互、引用来源展示或联网检索状态时 |
-| `frontend/src/utils/chatExport.js` | 追问复制/导出格式化纯函数：`parseChatTime`（SQLite naive 时间戳按 **UTC** 解析）、`buildAiText`（正文 ± 参考来源）、`buildConversationMarkdown`（`### 你` / `### AI` 分节） | 改追问复制内容或时间戳显示时 |
+| `frontend/src/components/ChatPanel.vue` | 追问聊天面板（多会话/流式/SSE search 事件/**联网三态选择器：关闭·严格依据材料·广泛收集（`searchMode` ref）**/消息操作栏：复制·编辑·删除·重新生成/时间戳/整对话复制） | 改追问交互、引用来源展示、联网模式或检索状态时 |
+| `frontend/src/utils/chatExport.js` | 追问复制/导出格式化纯函数：`parseChatTime`（SQLite naive 时间戳按 **UTC** 解析）、`buildAiText`（正文 ± 参考来源）、`buildConversationMarkdown`（`### 你` / `### AI` 分节）、**`SEARCH_MODES`/`searchProviderName`/`searchStateLabel`（联网三态取值与状态气泡文案，与后端 search_mode 契约对齐）** | 改追问复制内容、时间戳显示或联网模式文案时 |
 | `frontend/src/utils/codeCopy.js` | Markdown 代码块「复制」按钮的 **document 全局事件委托**（`data-md-code-copy`），main.js 安装一次 | 改代码块复制，或排查"复制按钮点了没反应"/"某页面复制是死的"时 |
 | `frontend/src/utils/shortcut.js` | 工作台提交快捷键纯函数：`isSubmitShortcut`（Ctrl/Cmd+Enter 判定，含小键盘/keyCode 兜底）、`modifierLabel`/`shortcutHint`（macOS ⌘、其余 Ctrl）；HomeView 绑 window keydown + HomeInputPanel 头部提示共用 | 改/加工作台键盘快捷键时 |
 | `frontend/src/utils/image.js` | 背景图预处理：`prepareBackgroundImage` 产出 **`{blob, thumbUrl, width, height, bytes, compressed}`**（小图≤600KB 原样保留、大图解码走 objectURL 后按最长边 1920 重编码 JPEG 并转 **Blob**；>3MB 再压一轮 1280/q0.72；顺带生成 320px 缩略图）；`blobToDataUrl` 供 IndexedDB 不可用的降级路径 | 改背景上传/压缩策略时 |
@@ -104,6 +104,8 @@ python main.py
 存储清理默认 dry-run；应用删除需要脚本的 `--apply --confirm DELETE`。staged 默认 72 小时、orphan 14 天、export/media 7 天、quarantine 30 天，具体阈值可由环境变量覆盖。不要把数据库、下载媒体、日志、模型或 API key 写入文档/Git。
 
 ## 当前状态
+
+- 追问联网搜索换引擎 + 双模式（2026-10-07，task 10-07-chat-search-engine-and-modes，M1，pytest 1037 / vitest 283 / verify 全绿 + 7001 重启浏览器实测两模式通过）：①搜索引擎链 **Ollama（免费主路径，Key 自 ting-ear 迁入 config.py）→ Tavily → Firecrawl（配 Key 才参与）→ DDGS**，智谱整体移除（用户决定弃用；`ZHIPU_API_KEY` 仅剩 seed_models.py LLM 播种引用）；②追问联网三态 `search_mode`：**关闭 / 严格依据材料（单路检索+材料约束）/ 广泛收集（「问题+视频标题」双路并行、URL 去重 ≤12 条、材料仅作参考放开作答）**，旧 `enable_search` 兼容为 strict；SSE `search` 事件带 `mode`；③`config.example.py` 增三个搜索 Key 占位；OpenAPI 已重导。**坑点**：Firecrawl 免 Key 实测 403 必须配 Key；Ollama 搜索直连/代理均通、单次 ≤10 条、正文长（~3700 字符）；Tavily 额度码是 432（非 402）、Firecrawl 是 402。
 
 - 四项质量改进已落地（2026-10-07，逐单元提交，后端 1024 / 前端 279 测试 + verify 全绿）：①强制重试备份失败/校验不过即中止、不删任何文件（`55480ab`）；②结果页来源展示 `transcript_meta`（jobs 新列 + JobResponse + `TranscriptProvenance.vue`，onAiDone 终态后 `refreshMeta` 补拉）；③长音频分片检查点断点恢复（每片落盘、失败只重跑缺失片，`bypass_cache` 不读）；④真实内容质量评测框架（`eval_quality.py`，真实跑批待用户确认素材/参考文本与调用范围）。**复查修复**：遗留分片 WAV 复用前 ffprobe 校验时长（截断自愈）、断点续传扫描跳过 `*_chunkNNN.wav`、retry 清空旧 `transcript_meta`、检查点清理免疫 glob 特殊字符。**业务改动需重启服务生效，本轮未重启/push。**
 
