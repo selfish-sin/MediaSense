@@ -3124,6 +3124,7 @@
           "chat"
         ],
         "summary": "Get Session History",
+        "description": "会话历史（前端渲染用）：返回**全部行**（含非激活变体），\nassistant 消息附 variant_group / is_active / variants 组摘要，由前端按组选显。",
         "operationId": "get_session_history_api_jobs__job_id__chat_sessions__session_id__history_get",
         "parameters": [
           {
@@ -3142,6 +3143,56 @@
             "schema": {
               "type": "string",
               "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/jobs/{job_id}/chat/variants/{msg_id}/activate": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Activate Variant",
+        "description": "切换变体组内生效版本（组归属经消息行反查，前端不用传 group）",
+        "operationId": "activate_variant_api_jobs__job_id__chat_variants__msg_id__activate_post",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "msg_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Msg Id"
             }
           }
         ],
@@ -3273,6 +3324,7 @@
           "chat"
         ],
         "summary": "Delete Chat Message",
+        "description": "单条删除：assistant 且同组有其他变体 → 只删该变体，删的是生效版本则由组内最新接管；\n组删空 → 连同所属 user 行删除（防孤儿提问）。user 行 → 等同整轮删除。",
         "operationId": "delete_chat_message_api_jobs__job_id__chat__msg_id__delete",
         "parameters": [
           {

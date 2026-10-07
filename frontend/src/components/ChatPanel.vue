@@ -114,6 +114,18 @@
                     <span v-if="msg.token_usage && (msg.token_usage.input || msg.token_usage.output)" class="cp-tokens">
                       {{ tokenLabel(msg.token_usage) }}
                     </span>
+                    <!-- 版本切换器（重新生成保留历史版本） -->
+                    <span v-if="msg.variants && msg.variants.length > 1 && !(msg === activeMsg && streaming)" class="cp-variants">
+                      <button class="cp-var-btn" type="button" title="上一版本"
+                        :disabled="variantIndex(msg) <= 0" @click="switchVariant(msg, -1)">
+                        <el-icon :size="12"><ChevronLeft /></el-icon>
+                      </button>
+                      <span class="cp-var-pos">{{ variantIndex(msg) + 1 }}/{{ msg.variants.length }}</span>
+                      <button class="cp-var-btn" type="button" title="下一版本"
+                        :disabled="variantIndex(msg) >= msg.variants.length - 1" @click="switchVariant(msg, 1)">
+                        <el-icon :size="12"><ChevronRight /></el-icon>
+                      </button>
+                    </span>
                     <div class="cp-msg-actions">
                       <el-dropdown
                         v-if="msg.sources && msg.sources.length"
@@ -137,8 +149,8 @@
                           <el-icon :size="14"><Copy /></el-icon>
                         </button>
                       </el-tooltip>
-                      <el-tooltip content="重新生成" placement="top">
-                        <button class="cp-icon-btn" type="button" :disabled="streaming" @click="onRegenerate(msg)"><el-icon :size="14"><RefreshCw /></el-icon></button>
+                      <el-tooltip content="重新生成：保留当前版本并生成新版本，可切换查看" placement="top">
+                        <button class="cp-icon-btn" type="button" :disabled="streaming || !isLastAssistant(msg)" @click="onRegenerate(msg)"><el-icon :size="14"><RefreshCw /></el-icon></button>
                       </el-tooltip>
                       <el-tooltip content="删除该回答" placement="top">
                         <button class="cp-icon-btn cp-danger" type="button" :disabled="streaming" @click="onDelete(msg)"><el-icon :size="14"><Trash2 /></el-icon></button>
@@ -293,7 +305,8 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import {
   MessageCircle, Plus, Pencil, Trash2, ArrowDown, ArrowUp, Sparkles,
-  Search, Copy, ChevronDown, Globe, Square, MoreVertical, RefreshCw, Download,
+  Search, Copy, ChevronDown, ChevronLeft, ChevronRight, Globe, Square,
+  MoreVertical, RefreshCw, Download,
 } from 'lucide-vue-next'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatApi } from '../utils/api'
@@ -507,21 +520,74 @@ async function loadHistory() {
   }
   try {
     const res = await chatApi.sessionHistory(props.jobId, activeSessionId.value)
-    messages.value = (res.messages || []).map((m) => ({
-      id: m.id,
-      role: m.role,
-      content: m.content || '',
-      thinking: m.thinking || '',
-      sources: m.sources || [],
-      token_usage: m.token_usage || null,
-      created_at: m.created_at || '',
-      search: null,
-    }))
+    const raw = res.messages || []
+    // 变体组：同组 assistant 全量行（含非激活），展示时每组只显示激活版本
+    const groupMap = new Map()
+    for (const m of raw) {
+      if (m.role === 'assistant' && m.variant_group) {
+        if (!groupMap.has(m.variant_group)) groupMap.set(m.variant_group, [])
+        groupMap.get(m.variant_group).push(m)
+      }
+    }
+    messages.value = raw
+      .filter((m) => {
+        // 非激活变体不直接渲染；组内全不激活（双失败边缘）兜底显示最新一条
+        if (m.role !== 'assistant' || !m.variant_group) return true
+        const siblings = groupMap.get(m.variant_group) || []
+        if (m.is_active) return true
+        const anyActive = siblings.some((s) => s.is_active)
+        return !anyActive && siblings[siblings.length - 1]?.id === m.id
+      })
+      .map((m) => ({
+        id: m.id,
+        role: m.role,
+        content: m.content || '',
+        thinking: m.thinking || '',
+        sources: m.sources || [],
+        token_usage: m.token_usage || null,
+        created_at: m.created_at || '',
+        search: null,
+        variant_group: m.variant_group || '',
+        variants: m.role === 'assistant' ? (m.variant_group ? (groupMap.get(m.variant_group) || []) : []) : [],
+      }))
   } catch (e) {
     console.warn('加载追问历史失败', e)
   }
   nearBottom.value = true
   scrollToBottom(true)
+}
+
+// ===== 变体版本切换（重新生成保留历史版本） =====
+function isLastAssistant(msg) {
+  const list = messages.value.filter((m) => m.role === 'assistant')
+  return list.length > 0 && list[list.length - 1].id === msg.id
+}
+
+function variantIndex(msg) {
+  if (!msg.variants || msg.variants.length === 0) return -1
+  const idx = msg.variants.findIndex((v) => v.id === msg.id)
+  return idx >= 0 ? idx : 0
+}
+
+function switchVariant(msg, delta) {
+  const list = msg.variants || []
+  if (!list.length || streaming.value) return
+  const idx = variantIndex(msg)
+  const next = list[(idx + delta + list.length) % list.length]
+  if (!next || next.id === msg.id) return
+  // 本地整套切换（内容/思考/来源/token/时间），持久化异步跟随（失败提示但不阻塞浏览）
+  Object.assign(msg, {
+    id: next.id,
+    content: next.content || '',
+    thinking: next.thinking || '',
+    sources: next.sources || [],
+    token_usage: next.token_usage || null,
+    created_at: next.created_at || '',
+    search: null,
+  })
+  chatApi.activateVariant(props.jobId, next.id).catch((e) => {
+    ElMessage.warning('切换未保存: ' + (e?.message || '未知错误'))
+  })
 }
 
 // 滚动时更新「是否贴近底部」与当前激活消息（用于自动跟随 + 导航轨高亮）
@@ -764,16 +830,96 @@ async function onEdit(msg) {
   }
 }
 
-// 重新生成：删除该条（含）之后，用相同内容重发
+// 重新生成：不再删除旧回答——新回答作为同组新变体原地流式生成，完成后版本计数 +1
 async function onRegenerate(msg) {
-  if (streaming.value) return
-  try {
-    await chatApi.deleteFrom(props.jobId, msg.id)
-    await loadHistory()
-    onSend(msg.content)
-  } catch (e) {
-    ElMessage.error('重新生成失败: ' + (e?.message || '未知错误'))
+  if (streaming.value || !props.jobId || !activeSessionId.value) return
+  // 只支持最后一轮（较早轮的截断语义已弃用）；切到其它版本时以当前展示版本为基准
+  const assistants = messages.value.filter((m) => m.role === 'assistant')
+  const last = assistants[assistants.length - 1]
+  if (!last || last.id !== msg.id) {
+    ElMessage.info('只能对最后一个回答重新生成')
+    return
   }
+
+  const aid = 'tmp-a-' + ++tmpSeq
+  // 当前展示版本快照进 variants（单版本行此前没有 variants 数组）
+  const snapshot = {
+    id: msg.id, content: msg.content, thinking: msg.thinking, sources: msg.sources,
+    token_usage: msg.token_usage, created_at: msg.created_at,
+  }
+  if (!msg.variants || !msg.variants.length) msg.variants = [snapshot]
+  // 原地换装成新变体流式占位（旧版本留在 variants 里可切回）
+  msg.id = aid
+  msg.content = ''
+  msg.thinking = ''
+  msg.sources = []
+  msg.search = null
+  msg.token_usage = null
+  msg.durationMs = null
+  activeMsg.value = msg
+  streaming.value = true
+  nearBottom.value = true
+  scrollToBottom(true)
+
+  abortCtrl = new AbortController()
+  const startedAt = Date.now()
+  chatApi.streamChat(
+    props.jobId,
+    activeSessionId.value,
+    { content: '', searchMode: searchMode.value, regenerate: true },
+    {
+      signal: abortCtrl.signal,
+      onEvent: (ev) => {
+        if (ev.type === 'thinking') {
+          msg.thinking += ev.delta || ''
+        } else if (ev.type === 'content') {
+          msg.content += ev.delta || ''
+        } else if (ev.type === 'search') {
+          setSearchState(msg, ev)
+        } else if (ev.type === 'sources') {
+          msg.sources = ev.sources || []
+        } else if (ev.type === 'done') {
+          if (ev.assistant_id != null) msg.id = ev.assistant_id
+          if (ev.token_usage) msg.token_usage = ev.token_usage
+          // 新变体落位进组（随后即可 ‹› 切换回看旧版本）
+          msg.variants = [
+            ...msg.variants.filter((v) => v.id !== msg.id && v.id !== aid),
+            { id: msg.id, content: msg.content, thinking: msg.thinking, sources: msg.sources,
+              token_usage: msg.token_usage, created_at: new Date().toISOString() },
+          ]
+          markDuration(msg, Date.now() - startedAt)
+        } else if (ev.type === 'error') {
+          msg.content = (msg.content || '') + '\n\n**[错误]** ' + (ev.message || '生成出错')
+        }
+        scrollToBottom()
+      },
+      onEnd: (aborted) => {
+        streaming.value = false
+        activeMsg.value = null
+        abortCtrl = null
+        markDuration(msg, Date.now() - startedAt)
+        scrollToBottom()
+        refreshSessionMeta()
+        if (aborted && !disposed) {
+          // 中断：后端已把半成品落库为新变体，重载以对齐服务端状态
+          clearTimeout(historyTimer)
+          historyTimer = setTimeout(() => {
+            historyTimer = null
+            loadHistory()
+          }, 300)
+        }
+      },
+      onError: (err) => {
+        streaming.value = false
+        activeMsg.value = null
+        abortCtrl = null
+        markDuration(msg, Date.now() - startedAt)
+        msg.content = (msg.content || '') + '\n\n**[错误]** ' + (err?.message || '网络错误')
+        ElMessage.error('重新生成失败: ' + (err?.message || '未知错误'))
+        scrollToBottom()
+      },
+    },
+  )
 }
 
 async function onDelete(msg) {
@@ -1029,6 +1175,44 @@ watch(
 .cp-chip-sm {
   padding: 5px 12px;
   font-size: 12px;
+}
+
+/* 版本切换器 ‹ N/M › */
+.cp-variants {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 2px;
+}
+.cp-var-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--app-text-secondary);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.cp-var-btn:hover:not(:disabled) {
+  background: var(--app-hover-bg);
+  color: var(--app-accent-1);
+  border-color: rgba(var(--app-accent-1-rgb), 0.4);
+}
+.cp-var-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.cp-var-pos {
+  font-size: 11.5px;
+  color: var(--app-text-secondary);
+  min-width: 30px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
 /* 快捷追问（最后一条 AI 回答下方） */

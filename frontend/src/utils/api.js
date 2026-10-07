@@ -239,6 +239,8 @@ export const chatApi = {
   clearSessionMessages: (jobId, sessionId) => api.delete(`/jobs/${jobId}/chat/sessions/${sessionId}/messages`),
   // 某会话的消息历史
   sessionHistory: (jobId, sessionId) => api.get(`/jobs/${jobId}/chat/sessions/${sessionId}/history`),
+  // 切换变体组内生效版本（重生成历史版本）
+  activateVariant: (jobId, msgId) => api.post(`/jobs/${jobId}/chat/variants/${msgId}/activate`),
   // 删除单条（user/assistant）——按 msg_id 全局唯一
   deleteMessage: (jobId, msgId) => api.delete(`/jobs/${jobId}/chat/${msgId}`),
   // 删除从该条（含）之后的所有消息
@@ -246,12 +248,18 @@ export const chatApi = {
   // SSE 流式追问：返回 Promise；通过 onEvent/onEnd/onError 回调驱动 UI
   // handlers: { signal, onEvent(ev), onEnd(aborted?), onError(err) }
   // searchMode: 'off' | 'strict'（严格依据材料） | 'broad'（广泛收集），见 utils/chatExport SEARCH_MODES
-  streamChat: (jobId, sessionId, { content, model, searchMode }, handlers) => {
+  // regenerate: true = 重新生成（不插新提问，回答作为新变体入组）
+  streamChat: (jobId, sessionId, { content, model, searchMode, regenerate }, handlers) => {
     const { signal, onEvent, onEnd, onError } = handlers
     return fetch(`/api/jobs/${jobId}/chat/sessions/${sessionId}/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, model: model || undefined, search_mode: searchMode || 'off' }),
+      body: JSON.stringify({
+        content,
+        model: model || undefined,
+        search_mode: searchMode || 'off',
+        regenerate: !!regenerate,
+      }),
       signal,
     }).then(async (resp) => {
       if (!resp.ok) {
