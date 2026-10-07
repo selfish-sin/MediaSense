@@ -51,8 +51,9 @@ def cache_get(key: str) -> Optional[Dict[str, Any]]:
     if not config.AI_CACHE_ENABLED or not key:
         return None
     from db.database import get_connection
-    conn = get_connection()
+    conn = None
     try:
+        conn = get_connection()
         row = conn.execute(
             "SELECT op, model, content, meta, created_at FROM ai_cache WHERE key = ?", (key,)
         ).fetchone()
@@ -75,7 +76,8 @@ def cache_get(key: str) -> Optional[Dict[str, Any]]:
         logger.warning(f'AI 缓存读取失败（不影响主流程）: {e}')
         return None
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def cache_put(key: str, op: str, model: str, content: str, meta: Optional[dict] = None) -> bool:
@@ -89,8 +91,9 @@ def cache_put(key: str, op: str, model: str, content: str, meta: Optional[dict] 
         logger.warning(f'AI 缓存跳过大结果（{len(content)} 字符 > {_MAX_CONTENT_CHARS} 上限）')
         return False
     from db.database import get_connection
-    conn = get_connection()
+    conn = None
     try:
+        conn = get_connection()
         conn.execute(
             "INSERT OR REPLACE INTO ai_cache (key, op, model, content, meta, size, hits, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, 0, datetime('now', 'localtime'))",
@@ -104,7 +107,8 @@ def cache_put(key: str, op: str, model: str, content: str, meta: Optional[dict] 
         logger.warning(f'AI 缓存写入失败（不影响主流程）: {e}')
         return False
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def _prune(conn) -> None:

@@ -37,6 +37,20 @@ class TestMakeKey:
 # ---------------------------------------------------------------- 通用读写
 
 class TestCachePutGet:
+    @pytest.mark.parametrize('action', ['get', 'put'])
+    def test_connection_failure_is_optional(self, cache_on, monkeypatch, caplog, action):
+        import sqlite3
+
+        def unavailable():
+            raise sqlite3.OperationalError('cache database unavailable')
+
+        monkeypatch.setattr('db.database.get_connection', unavailable)
+        if action == 'get':
+            assert ai_cache.cache_get('k') is None
+        else:
+            assert ai_cache.cache_put('k', 'llm', 'm', 'result') is False
+        assert 'cache database unavailable' in caplog.text
+
     def test_roundtrip(self, cache_on):
         key = ai_cache.make_key('t', 'roundtrip')
         assert ai_cache.cache_get(key) is None
