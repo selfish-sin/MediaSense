@@ -11,6 +11,8 @@
   CI 配置已加入并解析验证，本轮未 push，不宣称远程 CI 已执行。
   启动迁移已完成：lifespan 保留 init_db → 中断任务标记失败 → 过期转换文件清理。
   真实 socket_app ASGI 入口验证恢复状态、任务/队列/OpenAPI；30 定向测试通过，无告警。
+  默认示例配置补测发现 8 条云端测试隐式依赖本机免费 provider 配置；修 asr_enabled
+  明确两个假槽位后，默认无密钥配置的完整 978 项通过，无告警，CI 首次安装路径得到覆盖。
 - [ ] 过时任务/索引/规范：核对证据、归档、文档回写，commit。
   两个历史 planning 任务已补 result 并按 Trellis 归档，active 指针未改。
   CodeGraph 官方随包 README 确认 root codegraph.json.exclude 支持已提交目录；

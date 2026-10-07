@@ -32,13 +32,17 @@ from services.transcriber import TranscriptionCancelledError
 
 @pytest.fixture
 def asr_enabled(monkeypatch):
-    """把 config 当作已配置云端 ASR（不依赖真实 config.py 的属性存在）。"""
+    """显式配置两个测试槽位，不依赖本机免费档设置或密钥。请求边界由用例替换。"""
     monkeypatch.setattr('config.ASR_CLOUD_ENABLED', True, raising=False)
     monkeypatch.setattr(
         'config.ASR_CLOUD_ENDPOINT',
         'https://api.siliconflow.cn/v1/audio/transcriptions', raising=False)
     monkeypatch.setattr('config.ASR_CLOUD_API_KEY', 'sk-test-fake-key', raising=False)
     monkeypatch.setattr('config.ASR_CLOUD_MODEL', 'FunAudioLLM/SenseVoiceSmall', raising=False)
+    monkeypatch.setattr('config.ASR_FREE_ENABLED', True, raising=False)
+    monkeypatch.setattr('config.ASR_FREE_ENDPOINT', 'https://asr-test.invalid/v1/audio/transcriptions', raising=False)
+    monkeypatch.setattr('config.ASR_FREE_API_KEY', 'sk-test-free-key', raising=False)
+    monkeypatch.setattr('config.ASR_FREE_MODEL', 'FunAudioLLM/XingChenASR-V3.2-Ultra', raising=False)
 
 
 @pytest.fixture
