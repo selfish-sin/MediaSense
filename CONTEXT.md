@@ -105,6 +105,8 @@ python main.py
 
 ## 当前状态
 
+- 重新生成保留历史版本（2026-10-07，task 10-07-chat-regen-variants，M1，pytest 1045 / vitest 283 / verify 全绿 + 浏览器实测切换/持久化/上下文）：**重生成不再删旧回答**。`job_chats` 加 `variant_group`/`is_active` 列（try/except ALTER）；重生成=对最后一轮生效回答归组追加新变体（存量独立行先认领进组再整体转非激活——**坑点：不认领会留两个 active 版**）；SSE done 带 `variant_group`/`variant_count`；`POST /api/jobs/{id}/chat/variants/{msg_id}/activate` 切换生效版本；模型上下文 `_get_session_history` 只取 `(role='user' OR is_active=1)`；history 返回全行+组摘要，前端每组只显示激活版本、meta 行 ‹ N/M › 切换（本地整套换显+activate 持久化）；单删 assistant=只删该变体（删生效版本组内最新接管、组空连带删提问行），user 行=整轮。UI 亦有重生成五项常用功能（快捷追问 chips/导出.md/会话过滤/耗时/Esc 中断）同行生效。服务已重启、OpenAPI 79 端点已重导。
+
 - 追问面板 UI 重设计（2026-10-07，task 10-07-chat-panel-ui-redesign，M0，verify 全绿 + 明暗双主题浏览器实测，`777000e`）：按豆包/DeepSeek 桌面端风格重做——三层工具栏收敛为单行头部 + Composer 底栏；用户消息弱色气泡/AI 平铺+头像列；引用来源改两列卡片栅格（可折叠）；空态建议 chips；流式光标/跳到最新；全 `--app-*` token 化。功能零删减（多会话/编辑回填/重新生成/复制带来源/token 统计/导航轨全保留），另补清空与整轮删除的二次确认。新坑点两条已记入文件索引行（dropdown×tooltip 嵌套拦点击、历史消息 search 恒 null）。
 
 - 追问联网搜索换引擎 + 双模式（2026-10-07，task 10-07-chat-search-engine-and-modes，M1，pytest 1037 / vitest 283 / verify 全绿 + 7001 重启浏览器实测两模式通过）：①搜索引擎链 **Ollama（免费主路径，Key 自 ting-ear 迁入 config.py）→ Tavily → Firecrawl（配 Key 才参与）→ DDGS**，智谱整体移除（用户决定弃用；`ZHIPU_API_KEY` 仅剩 seed_models.py LLM 播种引用）；②追问联网三态 `search_mode`：**关闭 / 严格依据材料（单路检索+材料约束）/ 广泛收集（「问题+视频标题」双路并行、URL 去重 ≤12 条、材料仅作参考放开作答）**，旧 `enable_search` 兼容为 strict；SSE `search` 事件带 `mode`；③`config.example.py` 增三个搜索 Key 占位；OpenAPI 已重导。**坑点**：Firecrawl 免 Key 实测 403 必须配 Key；Ollama 搜索直连/代理均通、单次 ≤10 条、正文长（~3700 字符）；Tavily 额度码是 432（非 402）、Firecrawl 是 402。
