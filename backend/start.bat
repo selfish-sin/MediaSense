@@ -8,6 +8,7 @@ echo.
 cd /d "%~dp0"
 
 set PYTHON=python
+if exist "%~dp0venv\Scripts\python.exe" set PYTHON="%~dp0venv\Scripts\python.exe"
 
 echo [1] 检查 Python...
 %PYTHON% --version >nul 2>&1
@@ -19,14 +20,21 @@ if errorlevel 1 (
 %PYTHON% --version
 
 echo [2] Checking dependencies...
-%PYTHON% -c "import fastapi,uvicorn,socketio,pydantic,httpx,multipart,aiofiles,yt_dlp,faster_whisper,ctranslate2,docx,bilibili_api,PIL,requests,fpdf,websockets,sherpa_onnx,ddgs" >nul 2>&1
+%PYTHON% -c "import fastapi,uvicorn,socketio,pydantic,httpx,multipart,aiofiles,yt_dlp,faster_whisper,ctranslate2,docx,cryptography,PIL,requests,fpdf,websockets,sherpa_onnx,ddgs" >nul 2>&1
 if errorlevel 1 (
     echo   [!] Missing dependencies detected, auto installing requirements.txt ...
     %PYTHON% -m pip install -r requirements.txt
-    %PYTHON% -c "import fastapi,uvicorn,socketio,pydantic,httpx,multipart,aiofiles,yt_dlp,faster_whisper,ctranslate2,docx,bilibili_api,PIL,requests,fpdf,websockets,sherpa_onnx,ddgs" >nul 2>&1
     if errorlevel 1 (
-        echo   [x] Some dependencies still missing, service may be degraded!
+        echo   [x] Dependency installation failed. Check the error above before starting.
+        pause
+        exit /b 1
+    )
+    %PYTHON% -c "import fastapi,uvicorn,socketio,pydantic,httpx,multipart,aiofiles,yt_dlp,faster_whisper,ctranslate2,docx,cryptography,PIL,requests,fpdf,websockets,sherpa_onnx,ddgs" >nul 2>&1
+    if errorlevel 1 (
+        echo   [x] Some dependencies still missing. Startup stopped.
         echo       Manual fix: %PYTHON% -m pip install -r requirements.txt
+        pause
+        exit /b 1
     ) else (
         echo   [ok] Dependencies repaired
     )

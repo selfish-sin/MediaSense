@@ -1,0 +1,25 @@
+# Windows / Python 3.13 运行依赖意图；锁定结果见 requirements.txt
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+python-socketio>=5.11.0
+pydantic>=2.10.0
+httpx>=0.28.0
+python-multipart>=0.0.18
+aiofiles>=24.1.0
+yt-dlp>=2024.12.0
+faster-whisper>=1.1.0
+ctranslate2>=4.0.0
+# 本地 FireRedASR 引擎（ONNX int8，CPU 推理，不依赖 torch）
+sherpa-onnx>=1.13.8
+python-docx>=1.1.0
+# 抖音签名直接依赖，不能依赖退役 B站库间接带入
+cryptography>=43.0.0
+pillow>=10.4.0
+requests>=2.31.0
+fpdf2>=2.7.9
+# 联网检索免 Key 兜底（智谱 Web Search API 不可用/未配 Key 时使用）
+ddgs>=9.0.0
+
+# 可选 GPU 加速（CUDA 12 环境按需手动安装，CPU 环境无需安装）
+# nvidia-cublas-cu12
+# nvidia-cudnn-cu12

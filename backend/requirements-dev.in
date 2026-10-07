@@ -1,0 +1,9 @@
+# 开发锁必须沿用运行锁版本；pip-tools 用于可复现再生成
+-r requirements.in
+-c requirements.txt
+pytest>=8.4.0
+pytest-asyncio>=1.0.0
+ruff>=0.16.10
+pip-tools>=7.6.2
+# Starlette 1.x TestClient 使用新版客户端；业务 HTTP 仍使用 httpx
+httpx2>=2.13.1

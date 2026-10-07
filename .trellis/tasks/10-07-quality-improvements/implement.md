@@ -5,7 +5,10 @@
 - [x] Python 静态门禁/测试告警：132 项基线清理；全量 E/F/W（E501 除外）接入 verify。
   无效目标拒绝执行；超时替身 close 协程；RuntimeWarning/未回收异常作失败。
   ruff 全绿，977 backend passed，仅剩 2 条启动事件弃用警告（下一单元处理）。
-- [ ] 依赖锁/启动兼容/CI：干净安装与依赖检查，全量 verify，commit。
+- [x] 依赖锁/启动兼容/CI：67 运行 / 80 开发包，Python 3.13.14 Windows 干净安装，
+  pip check、版本匹配与所有启动导入通过；隔离环境 978 passed，无告警。
+  完整 verify：ruff、978 backend、269 frontend（22 文件）、eslint/build 均通过。
+  CI 配置已加入并解析验证，本轮未 push，不宣称远程 CI 已执行。
   启动迁移已完成：lifespan 保留 init_db → 中断任务标记失败 → 过期转换文件清理。
   真实 socket_app ASGI 入口验证恢复状态、任务/队列/OpenAPI；30 定向测试通过，无告警。
 - [ ] 过时任务/索引/规范：核对证据、归档、文档回写，commit。
