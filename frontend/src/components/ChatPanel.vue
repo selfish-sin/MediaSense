@@ -83,7 +83,7 @@
               :key="msg.id"
               :data-mid="msg.id"
               class="chat-row"
-              :class="[msg.role === 'user' ? 'row-user' : 'row-ai', { 'row-active': msg.id === activeMsgId }]"
+              :class="[msg.role === 'user' ? 'row-user' : 'row-ai', { 'row-active': String(msg.id) === String(activeMsgId) }]"
             >
               <!-- 用户消息：弱色右对齐气泡，操作 hover 显形 -->
               <div v-if="msg.role === 'user'" class="cp-user">
@@ -214,7 +214,7 @@
             v-for="(item, i) in railItems"
             :key="item.id"
             class="rail-tick"
-            :class="{ 'rail-tick-user': item.role === 'user', 'rail-tick-active': item.id === activeMsgId }"
+            :class="{ 'rail-tick-user': item.role === 'user', 'rail-tick-active': String(item.id) === String(activeMsgId) }"
             :style="{ top: railTop(i) }"
             :title="railTooltip(item)"
             @click="scrollToMsg(item.id)"
