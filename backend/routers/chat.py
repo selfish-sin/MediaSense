@@ -4,8 +4,11 @@ YouTube Tool V2 - 追问聊天路由（SSE 流式）
 特性：
   - 多会话：每个视频可有多个独立对话线程（chat_sessions），每条复用该视频原文/AI结果作上下文
   - SSE 流式输出（token 级），并捕获思考过程（reasoning_content / thinking）
-  - 联网搜索：`services/web_search` 单点（智谱独立 Web Search API 优先，DuckDuckGo 免 Key 兜底）；
+  - 联网搜索：`services/web_search` 单点（Ollama → Tavily → Firecrawl → DuckDuckGo 逐级回退）；
     结构化引用源返回前端，检索失败原因经 SSE `search` 事件显式透出（不静默）
+  - 联网双模式（search_mode）：
+      strict 严格依据材料——单次检索问题本身，回答严格基于转录原文+AI结果+检索资料并编号引用
+      broad  广泛收集——并行两路检索（问题本身 + 视频标题+问题）合并去重，回答围绕问题放开材料约束
   - 编辑 / 重生成 / 中断残回答 均落库
 """
 import asyncio
@@ -13,7 +16,7 @@ import json
 import logging
 import uuid
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Literal
 
 import httpx
 from fastapi import APIRouter, Request
@@ -23,7 +26,7 @@ from pydantic import BaseModel
 from db.database import get_connection
 from db.job_repo import get_job
 from db.model_repo import get_model_by_key
-from services.web_search import web_search_collect
+from services.web_search import web_search_collect, fmt_sources, SearchOutcome
 from services.httpx_errors import describe_http_response
 from config import DEFAULT_MODEL
 
@@ -35,11 +38,18 @@ HTTPX_TIMEOUT = httpx.Timeout(180.0, connect=15.0)
 DEFAULT_SESSION_TITLE = "新对话"
 SESSION_TITLE_MAX = 24
 
+# 广泛模式检索编排：问题本身 + 视频标题组合，两路并行
+BROAD_PER_QUERY_RESULTS = 6
+BROAD_MAX_SOURCES = 12
+BROAD_QUERY_MAX = 120
+
 
 class ChatMessage(BaseModel):
     content: str
     model: Optional[str] = None
     enable_search: bool = False
+    # 联网模式：strict=严格依据材料 / broad=广泛收集；None 时回退 enable_search（向后兼容）
+    search_mode: Optional[Literal["strict", "broad", "off"]] = None
     regenerate: bool = False
     user_message_id: Optional[int] = None
 
@@ -190,7 +200,66 @@ def _truncate(text, max_len, tail=0):
     return text[:max_len] + "\n\n...(内容较长，已截断)..."
 
 
-def _build_messages(original_ctx, result_ctx, history, question, search_text, regenerate):
+def _resolve_search_mode(msg: "ChatMessage") -> str:
+    """search_mode 显式给出时优先；否则回退旧布尔开关（True→strict，向后兼容）"""
+    if msg.search_mode is not None:
+        return msg.search_mode
+    return "strict" if msg.enable_search else "off"
+
+
+async def _run_search(mode: str, question: str, job_title: str = "") -> SearchOutcome:
+    """按模式编排联网检索。
+
+    strict：单次检索问题本身（与 2026-09-16 引入联网时的行为一致）。
+    broad：问题本身 + 「视频标题+问题」组合两路并行，合并去重（≤12 条），
+           单路失败不拖整体，两路全失败时错误原因合并透出。
+    """
+    if mode != "broad":
+        return await web_search_collect(question, snippet_limit=500)
+
+    queries = [question]
+    title = (job_title or "").strip()
+    combo = f"{title} {question}".strip()[:BROAD_QUERY_MAX]
+    if title and combo != question:
+        queries.append(combo)
+
+    outcomes = await asyncio.gather(
+        *(web_search_collect(q, max_results=BROAD_PER_QUERY_RESULTS, snippet_limit=900)
+          for q in queries),
+        return_exceptions=True,
+    )
+
+    sources: List[Dict[str, str]] = []
+    provider = ""
+    errors: List[str] = []
+    seen_urls = set()
+    for o in outcomes:
+        if isinstance(o, Exception):
+            errors.append(str(o)[:200])
+            continue
+        if o.ok:
+            provider = provider or o.provider
+            for s in o.sources:
+                url = (s.get("url") or "").rstrip("/")
+                if url and url in seen_urls:
+                    continue
+                if url:
+                    seen_urls.add(url)
+                sources.append(s)
+        else:
+            errors.append(o.error)
+
+    if not sources:
+        return SearchOutcome(error="；".join(e for e in errors if e) or "联网检索失败")
+    if len(sources) > BROAD_MAX_SOURCES:
+        sources = sources[:BROAD_MAX_SOURCES]
+    if errors:
+        logger.warning(f"[chat] 广泛检索部分失败: {'；'.join(errors)[:300]}")
+    return SearchOutcome(sources=sources, text=fmt_sources(sources), provider=provider)
+
+
+def _build_messages(original_ctx, result_ctx, history, question, search_text, regenerate,
+                    search_mode="off"):
     ctx = [
         "视频转录原文（节选）：\n" + (original_ctx or "(无)"),
         "\n已有 AI 分析结果：\n" + (result_ctx or "(无)"),
@@ -198,16 +267,32 @@ def _build_messages(original_ctx, result_ctx, history, question, search_text, re
     if search_text:
         ctx.append("\n联网搜索资料：\n" + search_text)
 
-    system = (
-        "你是专业的视频内容分析助手。用户会针对一段视频的转录原文与已有的AI分析结果进行追问。"
-        "请结合下方背景资料，用清晰、准确、结构化的中文回答，合理使用 Markdown（标题、列表、加粗、表格等）。"
-        "不要编造背景资料中不存在的信息；若资料中找不到答案，请明确说明。"
-    )
-    if search_text:
-        system += (
-            "你已获得联网搜索资料。请在回答正文中用 [1]、[2] 等编号标注引用来源，"
-            "并在回答末尾以『## 参考来源』列出对应链接。"
+    if search_mode == "broad":
+        # 广泛模式：材料仅作背景参考，围绕问题放开作答（检索资料仍须编号引用）
+        system = (
+            "你是专业的视频内容研究助手。用户会基于一段视频的主题提出问题进行深入追问。"
+            "请围绕用户的问题广泛、深入、多角度地作答：下方的视频转录原文与已有 AI 分析结果"
+            "仅作背景参考，不是约束；优先综合联网检索资料与你自身的知识展开，信息要充分。"
+            "用清晰、准确、结构化的中文回答，合理使用 Markdown（标题、列表、加粗、表格等）。"
         )
+        if search_text:
+            system += (
+                "你已获得联网搜索资料。请在回答正文中用 [1]、[2] 等编号标注引用来源，"
+                "并在回答末尾以『## 参考来源』列出对应链接；不要编造资料中不存在的信息。"
+            )
+        else:
+            system += "本次没有联网检索资料，请基于你自身的知识回答，涉及不确定的信息请如实说明。"
+    else:
+        system = (
+            "你是专业的视频内容分析助手。用户会针对一段视频的转录原文与已有的AI分析结果进行追问。"
+            "请结合下方背景资料，用清晰、准确、结构化的中文回答，合理使用 Markdown（标题、列表、加粗、表格等）。"
+            "不要编造背景资料中不存在的信息；若资料中找不到答案，请明确说明。"
+        )
+        if search_text:
+            system += (
+                "你已获得联网搜索资料。请在回答正文中用 [1]、[2] 等编号标注引用来源，"
+                "并在回答末尾以『## 参考来源』列出对应链接。"
+            )
 
     messages = [{"role": "system", "content": system + "\n\n# 背景资料\n" + "\n".join(ctx)}]
     for h in history:
@@ -422,35 +507,49 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
                 user_id = _insert_chat(job_id, session_id, "user", question)
                 _maybe_rename_session(job_id, session_id, question)
 
+            search_mode = _resolve_search_mode(msg)
             search_text = ""
-            if msg.enable_search:
-                # 联网检索：结果与失败原因都推给前端（此前失败静默返回空 → 开关形同虚设）
-                yield _sse({"type": "search", "status": "searching"})
-                try:
-                    outcome = await web_search_collect(question)
-                except Exception as e:
-                    # web_search_collect 内部已兜异常，这里只防它自身出 bug：也要可见，不吞
-                    logger.exception("联网搜索异常")
-                    yield _sse({"type": "search", "status": "failed", "message": str(e)[:300]})
+            if search_mode != "off":
+                # 重生成时提问可能为空 → 回退用最近一条用户消息作检索词（无检索词则如实报失败）
+                search_query = question
+                if not search_query and msg.regenerate:
+                    search_query = next(
+                        (h["content"] for h in reversed(history) if h.get("role") == "user"), "")
+                if not search_query:
+                    logger.warning("联网搜索跳过：无可检索的问题内容")
+                    yield _sse({"type": "search", "status": "failed", "mode": search_mode,
+                                "message": "没有可用于检索的问题内容"})
                 else:
-                    sources = outcome.sources
-                    search_text = outcome.text
-                    if outcome.ok:
-                        logger.info(
-                            f"追问联网搜索命中 {len(sources)} 条来源（{outcome.provider}）"
-                        )
-                        yield _sse({
-                            "type": "search", "status": "ok",
-                            "provider": outcome.provider, "count": len(sources),
-                        })
+                    # 联网检索：结果与失败原因都推给前端（此前失败静默返回空 → 开关形同虚设）
+                    yield _sse({"type": "search", "status": "searching", "mode": search_mode})
+                    try:
+                        outcome = await _run_search(search_mode, search_query, job.get("title", ""))
+                    except Exception as e:
+                        # _run_search 内部已兜异常，这里只防它自身出 bug：也要可见，不吞
+                        logger.exception("联网搜索异常")
+                        yield _sse({"type": "search", "status": "failed", "mode": search_mode,
+                                    "message": str(e)[:300]})
                     else:
-                        logger.warning(f"追问联网搜索不可用: {outcome.error}")
-                        yield _sse({
-                            "type": "search", "status": "failed", "message": outcome.error,
-                        })
+                        sources = outcome.sources
+                        search_text = outcome.text
+                        if outcome.ok:
+                            logger.info(
+                                f"追问联网搜索命中 {len(sources)} 条来源（{outcome.provider}，{search_mode}）"
+                            )
+                            yield _sse({
+                                "type": "search", "status": "ok", "mode": search_mode,
+                                "provider": outcome.provider, "count": len(sources),
+                            })
+                        else:
+                            logger.warning(f"追问联网搜索不可用: {outcome.error}")
+                            yield _sse({
+                                "type": "search", "status": "failed", "mode": search_mode,
+                                "message": outcome.error,
+                            })
 
             messages = _build_messages(
-                original_ctx, result_ctx, history, question, search_text, msg.regenerate
+                original_ctx, result_ctx, history, question, search_text, msg.regenerate,
+                search_mode=search_mode,
             )
 
             payload = {

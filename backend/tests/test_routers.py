@@ -9,6 +9,8 @@ from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import routers.chat as routers_chat
+
 
 @pytest.fixture
 def app():
@@ -1076,38 +1078,144 @@ class TestChatRouter:
         from services.web_search import SearchOutcome
 
         self._stub_stream(monkeypatch, SearchOutcome(
-            error="未配置智谱 API Key（…）；DuckDuckGo 兜底不可用（未安装 ddgs 包）"))
+            error="未配置 Ollama 搜索 Key（…）；DuckDuckGo 兜底不可用（未安装 ddgs 包）"))
         resp = client.post("/api/jobs/j1/chat/sessions/s1/stream",
                            json={"content": "问题", "enable_search": True})
 
         assert resp.status_code == 200
         assert '"type": "search", "status": "searching"' in resp.text
         assert '"type": "search", "status": "failed"' in resp.text
-        assert "未配置智谱 API Key" in resp.text
+        assert "未配置 Ollama 搜索 Key" in resp.text
 
     def test_chat_stream_reports_search_hits(self, client, monkeypatch):
         from services.web_search import SearchOutcome
 
         self._stub_stream(monkeypatch, SearchOutcome(
             sources=[{"title": "A", "url": "https://a.com", "snippet": "s"}],
-            text="[1] A", provider="zhipu"))
+            text="[1] A", provider="ollama"))
         resp = client.post("/api/jobs/j1/chat/sessions/s1/stream",
                            json={"content": "问题", "enable_search": True})
 
         assert resp.status_code == 200
         assert '"status": "ok"' in resp.text
-        assert '"provider": "zhipu"' in resp.text
+        assert '"provider": "ollama"' in resp.text
         assert '"count": 1' in resp.text
 
     def test_chat_stream_without_search_emits_no_search_event(self, client, monkeypatch):
         from services.web_search import SearchOutcome
 
-        self._stub_stream(monkeypatch, SearchOutcome(provider="zhipu"))
+        self._stub_stream(monkeypatch, SearchOutcome(provider="ollama"))
         resp = client.post("/api/jobs/j1/chat/sessions/s1/stream",
                            json={"content": "问题", "enable_search": False})
 
         assert resp.status_code == 200
         assert '"type": "search"' not in resp.text
+
+    def test_chat_stream_legacy_enable_search_maps_to_strict_mode(self, client, monkeypatch):
+        """向后兼容：旧客户端只发 enable_search=True → 生效模式 strict 且事件带 mode"""
+        from services.web_search import SearchOutcome
+
+        self._stub_stream(monkeypatch, SearchOutcome(
+            sources=[{"title": "A", "url": "https://a.com", "snippet": "s"}],
+            text="[1] A", provider="ollama"))
+        resp = client.post("/api/jobs/j1/chat/sessions/s1/stream",
+                           json={"content": "问题", "enable_search": True})
+
+        assert '"type": "search", "status": "searching", "mode": "strict"' in resp.text
+
+    def test_chat_stream_broad_mode_emits_mode_field(self, client, monkeypatch):
+        """广泛模式：search_mode=broad → SSE 事件带 mode，且检索走 _run_search 的双路编排"""
+        from services.web_search import SearchOutcome
+
+        seen_queries = []
+
+        async def _fake_collect(query, **kwargs):
+            seen_queries.append(query)
+            return SearchOutcome(
+                sources=[{"title": f"S-{len(seen_queries)}", "url": f"https://s{len(seen_queries)}.com",
+                          "snippet": "s"}],
+                text=f"[{len(seen_queries)}] S", provider="ollama")
+
+        self._stub_stream(monkeypatch, SearchOutcome())  # 占位，会被下面的覆盖
+        monkeypatch.setattr("routers.chat.web_search_collect", _fake_collect)
+        # job 带 title：广泛模式第二路用「标题+问题」组合
+        monkeypatch.setattr("routers.chat.get_job", lambda job_id: {
+            "id": job_id, "status": "completed", "result_text": "已有分析",
+            "files": {}, "model": "m1", "title": "中医讲堂第12讲",
+        })
+
+        resp = client.post("/api/jobs/j1/chat/sessions/s1/stream",
+                           json={"content": "附子的用法", "search_mode": "broad"})
+
+        assert resp.status_code == 200
+        assert '"type": "search", "status": "searching", "mode": "broad"' in resp.text
+        assert '"status": "ok"' in resp.text
+        # 两路检索：问题本身 + 标题组合
+        assert "附子的用法" in seen_queries[0]
+        assert "中医讲堂第12讲" in seen_queries[1] and "附子的用法" in seen_queries[1]
+
+    def test_run_search_broad_merges_and_dedupes(self, monkeypatch):
+        """广泛模式合并逻辑：两路来源按 URL 去重，单路失败不拖整体"""
+        import asyncio
+        from services.web_search import SearchOutcome
+
+        async def _fake_collect(query, **kwargs):
+            if "标题" in query:
+                return SearchOutcome(error="第二路挂了")
+            return SearchOutcome(
+                sources=[{"title": "A", "url": "https://a.com", "snippet": "s"},
+                         {"title": "B", "url": "https://a.com/", "snippet": "s2"}],  # 同 URL（尾斜杠差异）
+                text="x", provider="ollama")
+
+        monkeypatch.setattr("routers.chat.web_search_collect", _fake_collect)
+
+        outcome = asyncio.run(routers_chat._run_search("broad", "问题", "视频标题"))
+
+        assert outcome.ok is True
+        assert outcome.provider == "ollama"
+        assert len(outcome.sources) == 1          # 重复 URL 只留一条
+        assert outcome.sources[0]["title"] == "A"
+
+    def test_run_search_broad_all_failed_carries_reasons(self, monkeypatch):
+        import asyncio
+        from services.web_search import SearchOutcome
+
+        async def _fake_collect(query, **kwargs):
+            return SearchOutcome(error="未配置 Ollama 搜索 Key")
+
+        monkeypatch.setattr("routers.chat.web_search_collect", _fake_collect)
+
+        outcome = asyncio.run(routers_chat._run_search("broad", "问题", ""))
+
+        assert outcome.ok is False
+        assert "未配置 Ollama 搜索 Key" in outcome.error
+
+    def test_build_messages_strict_vs_broad_prompts(self):
+        """严格模式锁材料约束；广泛模式放开约束并保留编号引用要求"""
+        strict = routers_chat._build_messages("原文", "结果", [], "问题", "[1] 来源", False,
+                                              search_mode="strict")
+        broad = routers_chat._build_messages("原文", "结果", [], "问题", "[1] 来源", False,
+                                             search_mode="broad")
+        broad_no_search = routers_chat._build_messages("原文", "结果", [], "问题", "", False,
+                                                       search_mode="broad")
+
+        s_sys = strict[0]["content"]
+        b_sys = broad[0]["content"]
+        assert "不要编造背景资料中不存在的信息" in s_sys
+        assert "仅作背景参考，不是约束" in b_sys
+        assert "广泛、深入" in b_sys
+        assert "[1]、[2]" in b_sys                    # 广泛模式仍要求编号引用
+        assert "自身的知识" in broad_no_search[0]["content"]
+        assert "联网搜索资料" not in broad_no_search[0]["content"]  # 无检索结果时不留空资料块
+
+    def test_search_mode_invalid_value_rejected(self, client, monkeypatch):
+        """search_mode 白名单校验：非法值 422（契约显式，不静默落 off）"""
+        from services.web_search import SearchOutcome
+
+        self._stub_stream(monkeypatch, SearchOutcome())
+        resp = client.post("/api/jobs/j1/chat/sessions/s1/stream",
+                           json={"content": "问题", "search_mode": "wide"})
+        assert resp.status_code == 422
 
 
 # ── ASR 状态 ──

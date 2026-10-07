@@ -384,7 +384,7 @@ async def ddgs_search(query: str, max_results: int = DEFAULT_RESULTS) -> List[Di
 
 # ============ 统一入口 ============
 
-def _fmt_sources(sources: List[Dict[str, str]]) -> str:
+def fmt_sources(sources: List[Dict[str, str]]) -> str:
     """把 sources 渲染成编号文本，便于注入回答模型上下文"""
     lines = []
     for i, s in enumerate(sources, 1):
@@ -420,7 +420,7 @@ async def web_search_collect(
         try:
             results = await ollama_search(query, max_results=max_results, snippet_limit=snippet_limit)
             if results:
-                text = _fmt_sources(results)
+                text = fmt_sources(results)
                 return SearchOutcome(sources=results, text=text, provider="ollama")
             errors.append("Ollama 联网搜索返回 0 条结果")
         except SearchUnavailable as exc:
@@ -440,7 +440,7 @@ async def web_search_collect(
         try:
             results = await tavily_search(query, max_results=max_results, snippet_limit=snippet_limit)
             if results:
-                text = _fmt_sources(results)
+                text = fmt_sources(results)
                 logger.info(f"[web_search] Tavily 返回 {len(results)} 条来源")
                 return SearchOutcome(sources=results, text=text, provider="tavily")
             errors.append("Tavily 返回 0 条结果")
@@ -456,7 +456,7 @@ async def web_search_collect(
         try:
             results = await firecrawl_search(query, max_results=max_results, snippet_limit=snippet_limit)
             if results:
-                text = _fmt_sources(results)
+                text = fmt_sources(results)
                 logger.info(f"[web_search] Firecrawl 返回 {len(results)} 条来源")
                 return SearchOutcome(sources=results, text=text, provider="firecrawl")
             errors.append("Firecrawl 返回 0 条结果")
@@ -472,7 +472,7 @@ async def web_search_collect(
         try:
             results = await ddgs_search(query, max_results=max_results)
             if results:
-                text = _fmt_sources(results)
+                text = fmt_sources(results)
                 logger.info(f"[web_search] DDGS 兜底返回 {len(results)} 条来源")
                 return SearchOutcome(sources=results, text=text, provider="ddgs")
             errors.append("DuckDuckGo 返回 0 条结果")
