@@ -265,6 +265,128 @@ class TestJobsRouter:
         mock_start.assert_not_called()
         mock_clear.assert_not_called()
 
+    def _file_retry_job(self, input_file):
+        return {
+            "id": "j1",
+            "status": "failed",
+            "options": {"input_type": "file"},
+            "input_file": input_file,
+        }
+
+    def test_force_retry_aborts_when_input_backup_fails(self, client, tmp_path):
+        job_dir = tmp_path / "j1"
+        job_dir.mkdir()
+        video = job_dir / "video.mp4"
+        video.write_bytes(b"0" * 1024)
+        (job_dir / "old.srt").write_text("old", encoding="utf-8")
+
+        with patch("routers.jobs.get_job", return_value=self._file_retry_job(str(video))), \
+             patch("routers.jobs.update_job") as mock_update, \
+             patch("routers.jobs.DOWNLOAD_DIR", tmp_path), \
+             patch("routers.jobs.UPLOAD_DIR", tmp_path / "uploads"), \
+             patch("shutil.copy2", side_effect=OSError("disk full")), \
+             patch("main.start_job") as mock_start:
+            resp = client.post("/api/jobs/j1/retry?force=true")
+
+        assert resp.status_code == 500
+        assert "备份失败" in resp.json()["detail"]
+        assert "未删除任何文件" in resp.json()["detail"]
+        # 素材与其余文件原封不动，任务未被重新提交
+        assert video.read_bytes() == b"0" * 1024
+        assert (job_dir / "old.srt").exists()
+        mock_update.assert_not_called()
+        mock_start.assert_not_called()
+
+    def test_force_retry_aborts_when_backup_fails_verification(self, client, tmp_path):
+        job_dir = tmp_path / "j1"
+        job_dir.mkdir()
+        video = job_dir / "video.mp4"
+        video.write_bytes(b"0" * 1024)
+
+        def bad_copy2(src, dst):
+            Path(dst).write_bytes(b"truncated")
+
+        with patch("routers.jobs.get_job", return_value=self._file_retry_job(str(video))), \
+             patch("routers.jobs.update_job") as mock_update, \
+             patch("routers.jobs.DOWNLOAD_DIR", tmp_path), \
+             patch("routers.jobs.UPLOAD_DIR", tmp_path / "uploads"), \
+             patch("shutil.copy2", side_effect=bad_copy2), \
+             patch("main.start_job") as mock_start:
+            resp = client.post("/api/jobs/j1/retry?force=true")
+
+        assert resp.status_code == 500
+        assert "备份校验" in resp.json()["detail"]
+        assert video.read_bytes() == b"0" * 1024
+        mock_update.assert_not_called()
+        mock_start.assert_not_called()
+
+    def test_force_retry_restores_input_from_inside_job_dir(self, client, tmp_path):
+        job_dir = tmp_path / "j1"
+        job_dir.mkdir()
+        video = job_dir / "video.mp4"
+        video.write_bytes(b"media-bytes")
+        (job_dir / "old.srt").write_text("old", encoding="utf-8")
+
+        with patch("routers.jobs.get_job", return_value=self._file_retry_job(str(video))), \
+             patch("routers.jobs.update_job") as mock_update, \
+             patch("routers.jobs.DOWNLOAD_DIR", tmp_path), \
+             patch("routers.jobs.UPLOAD_DIR", tmp_path / "uploads"), \
+             patch("main.start_job") as mock_start, \
+             patch("socket_handlers.clear_cancel_flag"):
+            resp = client.post("/api/jobs/j1/retry?force=true")
+
+        assert resp.status_code == 200
+        # 输入文件恢复到 job_dir 且字节一致，旧产物已清理
+        restored = job_dir / "video.mp4"
+        assert restored.read_bytes() == b"media-bytes"
+        assert not (job_dir / "old.srt").exists()
+        assert mock_update.call_count == 2
+        assert mock_update.call_args_list[0].kwargs["input_file"] == str(restored.resolve())
+        assert mock_update.call_args_list[1].kwargs["options"]["_retry"] is True
+        mock_start.assert_called_once_with("j1")
+
+    def test_force_retry_takes_ownership_of_staged_input(self, client, tmp_path):
+        job_dir = tmp_path / "j1"
+        job_dir.mkdir()
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        staged = uploads_dir / "abcd1234_video.mp4"
+        staged.write_bytes(b"staged-bytes")
+
+        with patch("routers.jobs.get_job", return_value=self._file_retry_job(str(staged))), \
+             patch("routers.jobs.update_job") as mock_update, \
+             patch("routers.jobs.DOWNLOAD_DIR", tmp_path), \
+             patch("routers.jobs.UPLOAD_DIR", uploads_dir), \
+             patch("main.start_job"), \
+             patch("socket_handlers.clear_cancel_flag"):
+            resp = client.post("/api/jobs/j1/retry?force=true")
+
+        assert resp.status_code == 200
+        restored = job_dir / "abcd1234_video.mp4"
+        assert restored.read_bytes() == b"staged-bytes"
+        # 暂存原件按既有复制语义保留在 uploads，由暂存 TTL 清理；input_file 已指向任务目录副本
+        assert staged.read_bytes() == b"staged-bytes"
+        assert not (uploads_dir / "retry_j1_abcd1234_video.mp4").exists()
+        assert mock_update.call_args_list[0].kwargs["input_file"] == str(restored.resolve())
+
+    def test_force_retry_proceeds_when_input_file_missing(self, client, tmp_path):
+        job_dir = tmp_path / "j1"
+        job_dir.mkdir()
+        (job_dir / "old.srt").write_text("old", encoding="utf-8")
+        missing = job_dir / "ghost.mp4"
+
+        with patch("routers.jobs.get_job", return_value=self._file_retry_job(str(missing))), \
+             patch("routers.jobs.update_job") as mock_update, \
+             patch("routers.jobs.DOWNLOAD_DIR", tmp_path), \
+             patch("routers.jobs.UPLOAD_DIR", tmp_path / "uploads"), \
+             patch("main.start_job") as mock_start:
+            resp = client.post("/api/jobs/j1/retry?force=true")
+
+        assert resp.status_code == 200
+        assert not (job_dir / "old.srt").exists()
+        mock_update.assert_called_once()
+        mock_start.assert_called_once_with("j1")
+
     @patch("routers.jobs.delete_jobs_batch", return_value={"deleted_count":2,"deleted":["j1","j2"],"failed":[]})
     def test_batch_delete(self, mock, client):
         resp = client.post("/api/jobs/batch-delete", json={"job_ids":["j1","j2"]})

@@ -486,29 +486,55 @@ async def retry_job(job_id: str, force: bool = Query(False, description="强制�
         job_dir = DOWNLOAD_DIR / job_id
         if job_dir.exists():
             import shutil
-            # ★ 文件任务：备份输入文件，rmtree 后恢复（否则重试必崩）
+            # ★ 文件任务：备份输入文件，rmtree 后恢复（否则重试必崩）。
+            #   输入文件在 job_dir 内时，备份是删除前的唯一副本——备份失败或校验
+            #   不过必须整体中止（不删任何文件、任务状态不变），绝不能"备份失败→照删"
+            #   把用户素材一起删掉。
             input_file_path = job.get('input_file', '')
+            input_name = ''
             backup_path = None
             if input_file_path:
                 src = Path(input_file_path)
-                if src.exists() and src.is_file():
+                if src.exists():
+                    if not src.is_file():
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"输入路径不是常规文件，无法备份，已取消强制重试（未删除任何文件）: {src}",
+                        )
+                    input_name = src.name
                     backup_path = UPLOAD_DIR / f"retry_{job_id}_{src.name}"
                     try:
+                        backup_path.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(str(src), str(backup_path))
-                    except Exception:
-                        backup_path = None
+                    except Exception as e:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=(
+                                f"输入文件备份失败（{e}），已取消强制重试：未删除任何文件。"
+                                f"素材保留在 {src}；可先手动备份该文件再重试，或改用普通重试（断点续传）。"
+                            ),
+                        )
+                    try:
+                        backup_ok = backup_path.is_file() and backup_path.stat().st_size == src.stat().st_size
+                    except OSError:
+                        backup_ok = False
+                    if not backup_ok:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"备份校验未通过，已取消强制重试：未删除任何文件。素材保留在 {src}。",
+                        )
             try:
                 shutil.rmtree(job_dir)
             except Exception as e:
                 logger.warning(f"清理文件失败（重试继续）: {job_dir} - {e}")
             job_dir.mkdir(parents=True, exist_ok=True)
             if backup_path and backup_path.exists():
-                restored = job_dir / backup_path.name.split('_', 2)[-1]
+                restored = job_dir / input_name
                 try:
                     backup_path.rename(restored)
                     update_job(job_id, input_file=str(restored.resolve()))
                 except Exception:
-                    logger.warning(f"恢复输入文件失败: {backup_path}")
+                    logger.warning(f"恢复输入文件失败，备份保留在: {backup_path}")
             cleared.append(f"已清理 {job_dir}")
 
     # 读取原任务参数
