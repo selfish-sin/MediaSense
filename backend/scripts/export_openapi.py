@@ -10,7 +10,7 @@ REPO_ROOT = BACKEND_DIR.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from main import app
+from main import app  # noqa: E402 — CLI 入口先将 backend 加入 sys.path
 
 OUT_PATH = REPO_ROOT / 'contracts' / 'openapi.json'
 

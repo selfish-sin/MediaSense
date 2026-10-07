@@ -5,7 +5,6 @@ import asyncio
 import time
 import pytest
 from types import SimpleNamespace
-from pathlib import Path
 from services.downloader import (
     detect_platform,
     _format_srt_time,

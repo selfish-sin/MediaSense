@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
 
 from services.transcriber import (
-    _model_complete, _select_model, _format_srt_time, _format_mmss,
+    _model_complete, _format_srt_time, _format_mmss,
     _format_duration, _is_cuda_runtime_missing, _get_audio_duration_seconds,
     _resolve_device, _transcribe_sync, _fallback_chain,
     ENGINE_VALUES, engine_label,
@@ -355,7 +355,6 @@ class TestEngineRouting:
         """模型未就绪时回退链跳过 firered：绝不把 1.1GB 下载当兜底副作用。"""
         self._patch_cloud(monkeypatch, configured={'mimo': True, 'xingchen': False},
                           cloud_exc=Exception('503'))
-        import services.local_asr as la
         m = self._patch_firered_ready(monkeypatch, ready=False)
         with patch('services.transcriber._get_audio_duration_seconds', return_value=None), \
              patch('services.transcriber._transcribe_sync_single', return_value=('l.srt', 'l.txt', 1)):

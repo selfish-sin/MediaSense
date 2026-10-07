@@ -1,7 +1,6 @@
 """
 prompts 提示词模板库测试
 """
-import pytest
 from services.prompts import (
     TONE_DESCS, FORMAT_DESCS, PURPOSE_DESCS, WORD_COUNT_DESCS,
     build_prompt_vars, SUMMARY_PROMPTS,

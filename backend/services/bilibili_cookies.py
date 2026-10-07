@@ -6,7 +6,6 @@ bilibili.py 和 downloader.py 共用同一份 cookie 存储
 import json
 import logging
 import time
-from pathlib import Path
 from typing import Dict, Optional, Any
 
 from config import BILIBILI_COOKIE_FILE

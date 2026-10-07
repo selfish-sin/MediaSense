@@ -201,7 +201,7 @@ def test_write_outputs_sentence_level_monotonic(tmp_path):
         prev_end = to_sec(end_s)
     txt_lines = Path(txt).read_text(encoding='utf-8').strip().split('\n')
     assert len(txt_lines) == 3
-    assert all(l.startswith('[') and ' - ' in l for l in txt_lines)
+    assert all(line.startswith('[') and ' - ' in line for line in txt_lines)
 
 
 # ============ 引擎注册表（新增通道：通用生命周期） ============

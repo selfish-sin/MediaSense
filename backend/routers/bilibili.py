@@ -3,11 +3,10 @@ YouTube Tool V2 - B站登录路由
 使用统一的 bilibili_cookies 模块管理 cookie
 """
 import asyncio
-import json
 import logging
 import requests
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from services.bilibili_cookies import update_cookies, clear_cookies, get_status
 
@@ -63,9 +62,9 @@ async def check_bilibili_qr(qrcode_key: str):
                 if code == 0:
                     refresh_token = data.get('refresh_token', '')
                     cookie_url = data.get('url', '')
-                    
+
                     cookies_dict = {}
-                    
+
                     # B站扫码成功后，cookie 参数在 url 的 query string 里
                     # url 格式: https://passport.biligame.com/.../crossDomain?DedeUserID=xxx&SESSDATA=xxx&bili_jct=xxx&...
                     if cookie_url:
@@ -76,9 +75,9 @@ async def check_bilibili_qr(qrcode_key: str):
                         for key in ('SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid'):
                             if key in qs and qs[key]:
                                 cookies_dict[key] = qs[key][0]
-                    
+
                     logger.info(f'从URL提取到 {len(cookies_dict)} 个cookie: {list(cookies_dict.keys())}')
-                    
+
                     if cookies_dict:
                         update_cookies(cookies_dict, refresh_token)
                     else:

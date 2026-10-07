@@ -3,9 +3,7 @@ YouTube Tool V2 - SQLite 数据库层
 启动时自动建表，提供数据库连接
 """
 import sqlite3
-import json
 import logging
-from pathlib import Path
 from config import DB_PATH, DATA_DIR
 
 logger = logging.getLogger(__name__)

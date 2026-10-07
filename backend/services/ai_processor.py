@@ -12,13 +12,12 @@ from typing import Optional, Tuple, Dict, Any, List
 
 import httpx
 
-from config import DEFAULT_MODEL, PROXY, DATA_DIR
+from config import DEFAULT_MODEL
 from db.model_repo import get_model_by_key
 from db.database import get_connection
 from services import ai_cache
 from services.prompts import (
-    SUMMARY_PROMPTS, ORG_STRATEGY_DESCS,
-    build_prompt_vars,
+    SUMMARY_PROMPTS, build_prompt_vars,
 )
 from services.httpx_errors import describe_http_error
 
@@ -101,7 +100,7 @@ async def _call_ai(
     bypass_cache: bool = False,
 ) -> Tuple[str, int, int]:
     """单次AI调用（支持流式输出+批量推送+断连重试），返回(content, input_tokens, output_tokens)
-    
+
     max_retries: 流式断连时最大重试次数（指数退避: 2s → 4s → 8s）
 
     ★ state（可选出参，2026-10-05）：调用方传入可变 dict，本函数回填
@@ -242,11 +241,9 @@ async def _call_ai(
             return content_parts, in_tok, out_tok, batch_flush_count
 
         # ★ 流式调用 + 断连重试（指数退避: 2s → 4s → 8s）
-        last_error = None
         for retry in range(max_retries + 1):
             try:
                 content_parts, in_tok, out_tok, batch_flush_count = await asyncio.wait_for(_stream(), timeout=600.0)
-                last_error = None
                 break  # 成功
             except asyncio.TimeoutError:
                 logger.error('AI调用超时（单轮总超时 600s）')
@@ -255,7 +252,6 @@ async def _call_ai(
                     await emit_log(sio, job_id, 'AI处理超时（已自动终止，请重试）')
                 return '[处理失败: 超时]', 0, 0
             except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.ReadTimeout, ConnectionError) as e:
-                last_error = e
                 # ★ 已吐字就不再重试（2026-10-05）：重试会从头再流一遍，
                 #   而第一遍的半截已经推给前端了 → 前端变成「断连前的半截 + 重试的完整」，
                 #   一份文档里混了两次生成的文本。宁可失败让用户重试，也不产出混血文档。
@@ -594,7 +590,7 @@ async def ai_process(
     for i, chunk in enumerate(chunks):
         # ★ 每批开始前检查取消标记
         _check_cancelled(job_id)
-        
+
         pct = int(10 + (i + 1) / len(chunks) * 80)
         if sio:
             from socket_handlers import emit_progress

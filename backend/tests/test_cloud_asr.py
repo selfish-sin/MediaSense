@@ -518,9 +518,9 @@ class TestTranscribeAudioCloud:
         monkeypatch.setattr(cloud_asr, 'transcribe_file', reversed_transcribe)
         srt, txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
         assert seg_count == 5
-        lines = [l for l in Path(srt).read_text(encoding='utf-8').splitlines()
-                 if '-->' in l]
-        starts = [l.split(' --> ')[0] for l in lines]
+        lines = [line for line in Path(srt).read_text(encoding='utf-8').splitlines()
+                 if '-->' in line]
+        starts = [line.split(' --> ')[0] for line in lines]
         assert starts == sorted(starts)
 
     def test_empty_chunk_dropped(self, monkeypatch, tmp_path, fake_audio):
@@ -842,7 +842,7 @@ class TestSentenceLevelOutput:
         texts = ['今天天气很好。我们去公园玩耍吧！非常感谢你啊。'] * 5
         _setup_orchestration(monkeypatch, tmp_path, texts=texts)
         srt, txt, seg_count = transcribe_audio_cloud(fake_audio, provider='mimo')
-        lines = [l for l in Path(srt).read_text(encoding='utf-8').splitlines() if '-->' in l]
+        lines = [line for line in Path(srt).read_text(encoding='utf-8').splitlines() if '-->' in line]
         # 每片 3 句 × 5 片 = 15 条，远多于分片数
         assert seg_count == 15
         assert len(lines) == 15

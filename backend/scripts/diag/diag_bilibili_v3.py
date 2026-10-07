@@ -2,8 +2,6 @@
 B站字幕诊断 v3 — 针对豆包视频做完整测试
 """
 import sys
-import json
-import re
 import httpx
 from urllib.parse import urlencode
 
@@ -92,6 +90,6 @@ with httpx.Client(timeout=15.0, headers=HEADERS) as client:
                                     if isinstance(item, dict):
                                         print(f"      [{item.get('from',0):.1f}s] {item.get('content','')}")
                             else:
-                                print(f"    字幕内容为空")
+                                print("    字幕内容为空")
                     except Exception as e:
                         print(f"    下载异常: {e}")

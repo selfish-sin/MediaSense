@@ -3,7 +3,7 @@ YouTube Tool V2 - 完整提示词模板库
 从旧app.py + 提示词模板完整版.md 全量移植
 包含：14种总结类型prompt + 组织策略 + 快捷标签 + 变量构建
 """
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 # ============ Prompt 变量映射（与功能手册选项值对齐） ============
 TONE_DESCS = {

@@ -10,7 +10,7 @@ import httpx
 
 sys.path.insert(0, '.')
 from services.bilibili_cookies import load_cookies
-from services.downloader import _build_wbi_url, _compute_wbi_sign
+from services.downloader import _build_wbi_url
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -34,7 +34,7 @@ with httpx.Client(timeout=15.0, headers=HEADERS) as client:
 
     # ===== 来源1: 直接抓网页HTML =====
     print(f"\n{'='*70}")
-    print(f"来源1: 直接抓网页HTML，提取 __INITIAL_STATE__")
+    print("来源1: 直接抓网页HTML，提取 __INITIAL_STATE__")
     print(f"{'='*70}")
 
     resp = client.get(url)
@@ -46,7 +46,7 @@ with httpx.Client(timeout=15.0, headers=HEADERS) as client:
     if state_match:
         try:
             state = json.loads(state_match.group(1))
-            print(f"✅ 找到 __INITIAL_STATE__")
+            print("✅ 找到 __INITIAL_STATE__")
 
             # 导航到字幕信息
             video_data = state.get('videoData', {})
@@ -68,14 +68,14 @@ with httpx.Client(timeout=15.0, headers=HEADERS) as client:
         except Exception as e:
             print(f"❌ 解析__INITIAL_STATE__失败: {e}")
     else:
-        print(f"❌ 未找到 __INITIAL_STATE__")
+        print("❌ 未找到 __INITIAL_STATE__")
 
     # 也找 playinfo
     playinfo_match = re.search(r'window\.__playinfo__\s*=\s*(\{.*?\})\s*</script>', html, re.DOTALL)
     if playinfo_match:
         try:
             playinfo = json.loads(playinfo_match.group(1))
-            print(f"\n✅ 找到 __playinfo__")
+            print("\n✅ 找到 __playinfo__")
             # 字幕可能在 data.subtitle
             sub = playinfo.get('data', {}).get('subtitle', {})
             subs = sub.get('subtitles', [])
@@ -87,7 +87,7 @@ with httpx.Client(timeout=15.0, headers=HEADERS) as client:
 
     # ===== 来源2: player/wbi/v2 带 wbi 签名 =====
     print(f"\n{'='*70}")
-    print(f"来源2: player/wbi/v2 带 wbi 签名")
+    print("来源2: player/wbi/v2 带 wbi 签名")
     print(f"{'='*70}")
 
     # 先拿 cid
@@ -135,7 +135,7 @@ with httpx.Client(timeout=15.0, headers=HEADERS) as client:
                         if resp_sub.status_code == 200:
                             sub_json = resp_sub.json()
                             body = sub_json.get('body', []) if isinstance(sub_json, dict) else sub_json
-                            print(f"  字幕内容前3条:")
+                            print("  字幕内容前3条:")
                             for item in body[:3]:
                                 if isinstance(item, dict):
                                     print(f"    [{item.get('from',0):.1f}s] {item.get('content','')}")
@@ -148,7 +148,7 @@ with httpx.Client(timeout=15.0, headers=HEADERS) as client:
 
     # ===== 来源3: player/v2 带 aid（不用bvid）+ 完整浏览器参数 =====
     print(f"\n{'='*70}")
-    print(f"来源3: player/v2 带 aid + 完整参数")
+    print("来源3: player/v2 带 aid + 完整参数")
     print(f"{'='*70}")
 
     params = {
@@ -178,7 +178,7 @@ with httpx.Client(timeout=15.0, headers=HEADERS) as client:
                     resp_sub = client.get(sub_url)
                     if resp_sub.status_code == 200:
                         body = resp_sub.json().get('body', [])
-                        print(f"  内容前3条:")
+                        print("  内容前3条:")
                         for item in body[:3]:
                             if isinstance(item, dict):
                                 print(f"    [{item.get('from',0):.1f}s] {item.get('content','')}")
@@ -187,7 +187,7 @@ with httpx.Client(timeout=15.0, headers=HEADERS) as client:
 
     # ===== 来源4: aid+cid 直接查 view API（确认 aid/cid 正确）=====
     print(f"\n{'='*70}")
-    print(f"来源4: aid+cid 反查 view API")
+    print("来源4: aid+cid 反查 view API")
     print(f"{'='*70}")
     url4 = f"https://api.bilibili.com/x/web-interface/view?aid={aid}"
     resp = client.get(url4)
@@ -195,4 +195,4 @@ with httpx.Client(timeout=15.0, headers=HEADERS) as client:
     print(f"aid={aid} → 标题: {data4.get('title')}")
     print(f"aid={aid} → cid: {data4.get('cid')}")
     if data4.get('title') == title:
-        print(f"✅ aid/cid 对应视频正确")
+        print("✅ aid/cid 对应视频正确")

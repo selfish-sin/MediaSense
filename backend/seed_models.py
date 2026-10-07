@@ -3,7 +3,8 @@ Seed default AI models into the database.
 Run: python seed_models.py
 Creates glm-4.5-air and deepseek-v4-flash if they don't already exist.
 """
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from db.model_repo import add_model, get_all_models

@@ -121,7 +121,7 @@ def _extract_scene_frames(
     cmd = [
         FFMPEG_PATH,
         "-i", video_path,
-        "-vf", f"select='gte(scene,0.3)',scale=-1:480",
+        "-vf", "select='gte(scene,0.3)',scale=-1:480",
         "-vsync", "vfr",
         "-vframes", str(frame_count),
         "-q:v", str(quality),

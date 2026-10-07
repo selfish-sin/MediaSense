@@ -2,7 +2,9 @@
 
 - [x] ASR 身份/实际引擎：7 条新回归修复前全失败；修复后 cache/transcriber/cloud/管理共 242 条通过。
   v2 键纳入模型档位、设备/平台、provider 白名单及模型文件签名；整条降级结果不写成首选缓存。
-- [ ] Python 静态门禁/测试告警：修真实基线，运行 ruff 与 backend 验证，commit。
+- [x] Python 静态门禁/测试告警：132 项基线清理；全量 E/F/W（E501 除外）接入 verify。
+  无效目标拒绝执行；超时替身 close 协程；RuntimeWarning/未回收异常作失败。
+  ruff 全绿，977 backend passed，仅剩 2 条启动事件弃用警告（下一单元处理）。
 - [ ] 依赖锁/启动兼容/CI：干净安装与依赖检查，全量 verify，commit。
 - [ ] 过时任务/索引/规范：核对证据、归档、文档回写，commit。
 - [ ] 本地 API 冒烟与最终工作树检查；本轮不 push。

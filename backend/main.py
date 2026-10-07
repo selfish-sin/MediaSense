@@ -30,9 +30,9 @@ from config import (
 )
 import config
 from db.database import init_db, get_connection
-from db.job_repo import create_job, get_job, update_job, finish_job, fail_interrupted_jobs
+from db.job_repo import get_job, update_job, finish_job, fail_interrupted_jobs
 from db.model_repo import get_default_model_key
-from socket_handlers import emit_log, emit_progress
+from socket_handlers import emit_log, register_socket_events
 
 # ============ 日志配置 ============
 from logging.handlers import TimedRotatingFileHandler
@@ -191,20 +191,21 @@ app.add_middleware(
 socket_app = socketio.ASGIApp(sio, app, socketio_path='/ws/socket.io')
 
 # ============ 注册路由 ============
-from routers.jobs import router as jobs_router
-from routers.jobs_ai import router as jobs_ai_router
-from routers.jobs_batch import router as jobs_batch_router
-from routers.models import router as models_router
-from routers.asr import router as asr_router
-from routers.asr_admin import router as asr_admin_router
-from routers.summary import router as summary_router
-from routers.export import router as export_router
-from routers.bilibili import router as bilibili_router
-from routers.download import router as download_router
-from routers.templates import router as templates_router
-from routers.chat import router as chat_router
-from routers.search import router as search_router
-from routers.storage_cleanup import router as storage_cleanup_router
+# 延迟到日志、代理绕过和运行状态初始化完成后再载入路由。
+from routers.jobs import router as jobs_router  # noqa: E402 — 路由载入依赖前面的启动配置
+from routers.jobs_ai import router as jobs_ai_router  # noqa: E402 — 路由载入依赖前面的启动配置
+from routers.jobs_batch import router as jobs_batch_router  # noqa: E402 — 路由载入依赖前面的启动配置
+from routers.models import router as models_router  # noqa: E402 — 路由载入依赖前面的启动配置
+from routers.asr import router as asr_router  # noqa: E402 — 路由载入依赖前面的启动配置
+from routers.asr_admin import router as asr_admin_router  # noqa: E402 — 路由载入依赖前面的启动配置
+from routers.summary import router as summary_router  # noqa: E402 — 路由载入依赖前面的启动配置
+from routers.export import router as export_router  # noqa: E402 — 路由载入依赖前面的启动配置
+from routers.bilibili import router as bilibili_router  # noqa: E402 — 路由载入依赖前面的启动配置
+from routers.download import router as download_router  # noqa: E402 — 路由载入依赖前面的启动配置
+from routers.templates import router as templates_router  # noqa: E402 — 路由载入依赖前面的启动配置
+from routers.chat import router as chat_router  # noqa: E402 — 路由载入依赖前面的启动配置
+from routers.search import router as search_router  # noqa: E402 — 路由载入依赖前面的启动配置
+from routers.storage_cleanup import router as storage_cleanup_router  # noqa: E402 — 路由载入依赖前面的启动配置
 # ★ 格式转换已外包到独立工具，converter router 已删除（清理函数迁至 services.format_converter）
 
 app.include_router(jobs_router,   prefix="/api/jobs",      tags=["jobs"])
@@ -385,7 +386,6 @@ async def serve_vue_spa(path: str):
 
 
 # ============ Socket.IO 事件处理 ============
-from socket_handlers import register_socket_events
 register_socket_events(sio)
 
 
@@ -826,7 +826,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
     logger.info(f"process_job 进入: job_id={job_id}")
     from socket_handlers import (
         emit_progress, emit_log, emit_preview,
-        emit_ai_token, set_preview_event, pop_preview_event,
+        set_preview_event, pop_preview_event,
         check_cancelled,
     )
     from services.downloader import prevent_sleep, allow_sleep
@@ -1021,7 +1021,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
         if do_summary and preview_before_summary and srt_path:
             preview_text = await _read_text(txt_path)
 
-            await emit_log(sio, job_id, f'✅ 转录完成，等待确认后继续AI总结')
+            await emit_log(sio, job_id, '✅ 转录完成，等待确认后继续AI总结')
             await emit_preview(sio, job_id, preview_text, title=title, platform=platform,
                               srt_path=str(srt_path), txt_path=str(txt_path))
             update_job(job_id, status='preview', progress_msg='等待确认转录文本',

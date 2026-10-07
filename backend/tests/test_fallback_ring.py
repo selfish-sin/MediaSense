@@ -6,7 +6,6 @@
 3. 换模型的触发边界（_call_ai_with_fallback / run_with_fallback）
    核心不变量：**已向前端吐过字就绝不换模型**（否则产出跨模型混血文档）
 """
-import json
 
 import pytest
 
@@ -321,7 +320,8 @@ class TestRealCallAiTimeoutBranch:
         import asyncio
         from services import ai_processor as ap
 
-        async def boom(*a, **kw):
+        async def boom(coro, **kw):
+            coro.close()  # wait_for 替身负责释放未启动的协程
             raise asyncio.TimeoutError()
 
         monkeypatch.setattr(asyncio, 'wait_for', boom)
@@ -337,7 +337,8 @@ class TestRealCallAiTimeoutBranch:
         import asyncio
         from services import ai_processor as ap
 
-        async def boom(*a, **kw):
+        async def boom(coro, **kw):
+            coro.close()  # wait_for 替身负责释放未启动的协程
             raise asyncio.TimeoutError()
 
         monkeypatch.setattr(asyncio, 'wait_for', boom)
@@ -358,7 +359,8 @@ class TestRealCallAiTimeoutBranch:
 
         calls = []
 
-        async def boom(*a, **kw):
+        async def boom(coro, **kw):
+            coro.close()  # wait_for 替身负责释放未启动的协程
             calls.append(1)
             raise asyncio.TimeoutError()
 

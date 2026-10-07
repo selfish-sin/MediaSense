@@ -3,7 +3,7 @@ MediaSense - 模块化提示词构建引擎
 9 维度可组合：角色 + 认知模式 + 内容类型 + 认知规则 + 深度 + 输出格式 + 语气 + 字数 + 输出语言
 支持 DB 覆盖（prompt_module_overrides 表）和完全自定义（full_override）
 """
-from typing import Dict, Any, List, Optional
+from typing import Dict, List, Optional
 
 # ============ 维度元数据（供前端渲染选择器） ============
 # 每个维度包含若干模块，每个模块: {key, name, desc, template}

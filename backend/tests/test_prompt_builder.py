@@ -1,7 +1,6 @@
 """
 prompt_builder 模块化提示词引擎测试
 """
-import pytest
 from unittest.mock import patch, MagicMock
 
 from services.prompt_builder import (

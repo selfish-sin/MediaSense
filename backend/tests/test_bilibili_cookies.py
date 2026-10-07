@@ -3,8 +3,7 @@ bilibili_cookies B站 Cookie 管理测试
 """
 import pytest
 import json
-import os
-from unittest.mock import patch, mock_open, MagicMock
+from unittest.mock import patch
 from pathlib import Path
 import services.bilibili_cookies as bc
 

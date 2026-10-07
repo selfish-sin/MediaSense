@@ -11,8 +11,8 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-import config
-from services.storage_cleanup import CleanupPolicy, CleanupSafetyError, StorageCleanup
+import config  # noqa: E402 — CLI 入口先将 backend 加入 sys.path
+from services.storage_cleanup import CleanupPolicy, CleanupSafetyError, StorageCleanup  # noqa: E402 — CLI 入口先将 backend 加入 sys.path
 
 
 def _backend_is_listening(port: int) -> bool:

@@ -9,7 +9,6 @@ monkeypatch routers.export.get_job 提供假任务数据。
 """
 import io
 import zipfile
-from unittest.mock import patch
 from urllib.parse import unquote
 
 import pytest

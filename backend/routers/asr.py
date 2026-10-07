@@ -151,7 +151,6 @@ async def asr_status():
     - default_engine：用户显式设置的默认引擎（空串 = 未设置）
     """
     from services import local_asr
-    from services.transcriber import any_whisper_ready
 
     cloud_key = provider_for_engine('cloud')
     free_key = provider_for_engine('cloud_free')

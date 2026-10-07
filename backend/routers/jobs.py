@@ -152,7 +152,6 @@ async def upload_file(file: UploadFile = File(...)):
 
     # 保存文件到uploads目录（流式写盘，避免大文件 OOM）
     import uuid
-    import shutil
     safe_name = f"{uuid.uuid4().hex[:8]}_{filename}"
     dest_path = UPLOAD_DIR / safe_name
 

@@ -15,13 +15,13 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
-from urllib.parse import urlencode, urlparse, parse_qs
+from typing import Optional, Tuple, Dict
+from urllib.parse import urlencode, urlparse
 
 import httpx
 
-from config import DOWNLOAD_DIR, PROXY, DATA_DIR
-from services.bilibili_cookies import load_cookies, save_cookies, clear_cookies, get_status
+from config import PROXY, DATA_DIR
+from services.bilibili_cookies import load_cookies
 
 logger = logging.getLogger(__name__)
 
@@ -1175,7 +1175,6 @@ async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None
 
     # ★ 关键：记录调用前 output_dir 里已有的 srt 文件，后面只认"新增"的
     existing_srts = set(p.name for p in output_dir.glob('*.srt'))
-    existing_txts = set(p.name for p in output_dir.glob('*.txt'))
     if existing_srts and sio:
         from socket_handlers import emit_log
         await emit_log(sio, job_id, f'⚠ 目录已有 {len(existing_srts)} 个旧srt文件，将只认本次新增')
@@ -1509,7 +1508,7 @@ async def download_video(
             from socket_handlers import emit_progress, emit_log
             mode_hint = f'前 {int(max_seconds)}s 片段' if section_args else '完整音频'
             await emit_progress(sio, job_id, 'download', 15, f'下载中（{platform}，{mode_hint}）... 请稍候（最长约10分钟）')
-            await emit_log(sio, job_id, f'⬇️ 下载进行中 | yt-dlp 拉流中，完成后汇报文件与大小...')
+            await emit_log(sio, job_id, '⬇️ 下载进行中 | yt-dlp 拉流中，完成后汇报文件与大小...')
         returncode = await asyncio.to_thread(_run_download, _build_dl_args(bool(section_args)))
         if returncode != 0 and section_args:
             # 片段下载失败（个别流不支持 section 切割）→ 回退完整下载，保证调用方拿到可用音频

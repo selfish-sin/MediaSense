@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from db.job_repo import (
     create_job, get_job, update_job, finish_job,
-    _row_to_dict, fail_interrupted_jobs,
+    fail_interrupted_jobs,
 )
 
 

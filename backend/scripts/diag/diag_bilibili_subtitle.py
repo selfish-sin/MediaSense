@@ -13,18 +13,15 @@ B站字幕诊断脚本
     4. 对比：字幕内容是否与视频标题匹配
 """
 import sys
-import json
 import re
-import hashlib
-import time
-from urllib.parse import urlencode, urlparse, parse_qs
+from urllib.parse import urlencode
 
 import httpx
 
 # 复用项目的 cookie
 sys.path.insert(0, '.')
 from services.bilibili_cookies import load_cookies
-from services.downloader import _get_wbi_keys, _compute_wbi_sign, _build_wbi_url
+from services.downloader import _build_wbi_url
 
 MIXIN_KEY_ENC_TAB = [
     46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
@@ -92,9 +89,9 @@ def main():
     if p_match:
         page = int(p_match.group(1))
 
-    print(f"=" * 70)
-    print(f"诊断B站字幕问题")
-    print(f"=" * 70)
+    print("=" * 70)
+    print("诊断B站字幕问题")
+    print("=" * 70)
     print(f"输入URL: {url}")
     print(f"提取BV号: {bvid}")
     print(f"分P参数: p={page}")
@@ -106,14 +103,14 @@ def main():
         HEADERS['Cookie'] = cookie_str
         print(f"✅ 已加载 {len(cookies_dict)} 个cookie: {list(cookies_dict.keys())}")
     else:
-        print(f"⚠️ 未加载cookie（未登录B站）")
+        print("⚠️ 未加载cookie（未登录B站）")
     print()
 
     with httpx.Client(timeout=15.0, headers=HEADERS) as client:
 
         # ===== Step 1: view API =====
         print(f"{'='*70}")
-        print(f"Step 1: view API（获取视频信息和cid）")
+        print("Step 1: view API（获取视频信息和cid）")
         print(f"{'='*70}")
 
         view_url = _build_wbi_url(
@@ -156,11 +153,11 @@ def main():
 
         # ===== Step 2: player/v2 API（3种调用方式对比） =====
         print(f"{'='*70}")
-        print(f"Step 2: player/v2 API（对比3种调用方式）")
+        print("Step 2: player/v2 API（对比3种调用方式）")
         print(f"{'='*70}")
 
         # 方式A：只传 bvid+cid（当前代码的做法）
-        print(f"\n--- 方式A: 只传 bvid+cid（当前代码做法）---")
+        print("\n--- 方式A: 只传 bvid+cid（当前代码做法）---")
         url_a = f"https://api.bilibili.com/x/player/v2?bvid={bvid}&cid={actual_cid}"
         resp_a = client.get(url_a)
         data_a = resp_a.json().get('data', {})
@@ -171,7 +168,7 @@ def main():
             print(f"  lan={s.get('lan')}, lan_doc={s.get('lan_doc')}, url={s.get('subtitle_url','')[:80]}")
 
         # 方式B：带完整播放器参数（模拟B站播放器）
-        print(f"\n--- 方式B: 带完整播放器参数（模拟B站播放器）---")
+        print("\n--- 方式B: 带完整播放器参数（模拟B站播放器）---")
         params_b = {
             "aid": aid,
             "cid": actual_cid,
@@ -195,7 +192,7 @@ def main():
             print(f"  lan={s.get('lan')}, lan_doc={s.get('lan_doc')}, url={s.get('subtitle_url','')[:80]}")
 
         # 方式C：带 web_location + from_av（另一种常见调用）
-        print(f"\n--- 方式C: 带 web_location 参数 ---")
+        print("\n--- 方式C: 带 web_location 参数 ---")
         params_c = {
             "aid": aid,
             "cid": actual_cid,
@@ -214,7 +211,7 @@ def main():
 
         # ===== Step 3: 下载字幕内容对比 =====
         print(f"{'='*70}")
-        print(f"Step 3: 下载字幕内容对比（看是不是同一个字幕）")
+        print("Step 3: 下载字幕内容对比（看是不是同一个字幕）")
         print(f"{'='*70}")
 
         all_subs = [('A', s) for s in subs_a] + [('B', s) for s in subs_b] + [('C', s) for s in subs_c]
@@ -230,22 +227,22 @@ def main():
             print(f"\n方式{label}: lan={s.get('lan')}, lan_doc={s.get('lan_doc')}")
             print(f"  字幕URL: {sub_url[:100]}...")
             content = get_subtitle_content(client, sub_url)
-            print(f"  字幕内容前5条:")
+            print("  字幕内容前5条:")
             print(content)
 
         print()
 
         # ===== Step 4: 结论 =====
         print(f"{'='*70}")
-        print(f"Step 4: 诊断结论")
+        print("Step 4: 诊断结论")
         print(f"{'='*70}")
         print(f"视频标题: {title}")
-        print(f"如果字幕内容与视频标题不符 → B站API返回了错误的字幕URL")
-        print(f"如果3种方式返回的字幕URL相同 → 是B站数据问题，我们无能为力")
-        print(f"如果3种方式返回的字幕URL不同 → 需要切换到正确的方式调用")
+        print("如果字幕内容与视频标题不符 → B站API返回了错误的字幕URL")
+        print("如果3种方式返回的字幕URL相同 → 是B站数据问题，我们无能为力")
+        print("如果3种方式返回的字幕URL不同 → 需要切换到正确的方式调用")
 
         # ===== 额外: 检查 aid+cid 是否匹配 =====
-        print(f"\n--- 额外检查: aid+cid 对应的视频 ---")
+        print("\n--- 额外检查: aid+cid 对应的视频 ---")
         check_url = f"https://api.bilibili.com/x/web-interface/view?aid={aid}"
         resp_check = client.get(check_url)
         check_data = resp_check.json().get('data', {})
@@ -255,9 +252,9 @@ def main():
         print(f"  标题: {check_title}")
         print(f"  cid: {check_cid}")
         if check_title == title:
-            print(f"  ✅ aid+cid 对应的视频标题一致")
+            print("  ✅ aid+cid 对应的视频标题一致")
         else:
-            print(f"  ❌ aid+cid 对应的视频标题不一致！可能存在关联错误")
+            print("  ❌ aid+cid 对应的视频标题不一致！可能存在关联错误")
 
 
 if __name__ == '__main__':

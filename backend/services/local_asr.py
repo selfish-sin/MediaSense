@@ -61,7 +61,6 @@ from config import (
     FIRERED_MODEL_DIR,
     FIRERED_PUNCT_MODEL_DIR,
     FIRERED_VAD_MODEL_PATH,
-    WHISPER_BASE,
 )
 from services.cloud_asr import (
     _ffmpeg_bin,

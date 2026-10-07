@@ -17,7 +17,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from config import DATA_DIR, DOWNLOAD_DIR
-from db.job_repo import get_cleanup_jobs, count_jobs_with_status
+from db.job_repo import count_jobs_with_status
 from services.storage_cleanup import CleanupPlan, CleanupPolicy, StorageCleanup
 
 logger = logging.getLogger(__name__)

@@ -1,8 +1,6 @@
 """
 config_service 配置服务测试
 """
-import pytest
-from unittest.mock import patch
 import services.config_service as cs
 from config import DEFAULT_MODEL
 

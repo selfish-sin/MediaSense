@@ -411,7 +411,7 @@ def _get_audio_duration_seconds(audio_path: str) -> Optional[float]:
         )
         return float(result.stdout.strip())
     except Exception:
-        logger.warning(f'ffprobe 获取音频时长失败，跳过自动分片')
+        logger.warning('ffprobe 获取音频时长失败，跳过自动分片')
         return None
 
 

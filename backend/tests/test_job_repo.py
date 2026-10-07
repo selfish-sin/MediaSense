@@ -4,8 +4,7 @@ job_repo 数据库操作测试
 """
 import pytest
 import sqlite3
-import json
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from config import DEFAULT_MODEL
 from db.job_repo import (
@@ -14,8 +13,7 @@ from db.job_repo import (
     update_job, delete_job, finish_job,
     _row_to_dict, find_job_by_url, clear_jobs, clear_jobs_by_status,
     save_summary_version, get_summary_history, get_summary_version,
-    _now_utc_iso, delete_jobs_batch, get_jobs_disk_info,
-    claim_staged_upload, update_job_input_file_if_matches,
+    _now_utc_iso, delete_jobs_batch, claim_staged_upload, update_job_input_file_if_matches,
 )
 
 

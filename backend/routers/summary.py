@@ -130,7 +130,6 @@ async def api_upsert_override(body: ModuleOverrideUpsert):
     dim = PROMPT_DIMENSIONS.get(body.dimension_key)
     if not dim:
         raise HTTPException(status_code=400, detail=f"维度 {body.dimension_key} 不存在")
-    valid_modules = [m["key"] for m in dim.get("modules", [])]
     # 允许覆盖未在代码中定义的 module_key（支持维度级自定义模块）
     result = upsert_override(body.dimension_key, body.module_key, body.custom_text, body.display_name)
     return {"success": True, "override": result}

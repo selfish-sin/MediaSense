@@ -2,7 +2,10 @@
 main.py process_job + token API 测试
 mock socketio import 前解决副作用
 """
-import pytest, sys, asyncio, os
+import pytest
+import sys
+import asyncio
+import os
 from unittest.mock import patch, MagicMock, AsyncMock
 from pathlib import Path
 
@@ -90,7 +93,7 @@ class TestProcessJob:
              patch("socket_handlers.set_preview_event", side_effect=lambda _jid, event: event.set()), \
              patch("socket_handlers.pop_preview_event"), \
              patch("main.emit_log", new_callable=AsyncMock), \
-             patch("main.emit_progress", new_callable=AsyncMock), \
+             patch("socket_handlers.emit_progress", new_callable=AsyncMock), \
              patch("main.open", MagicMock()):
             mj.return_value = {"id":jid,"model":"glm","summary_type":"s",
                 "input_url":"","input_text":"x","input_file":"",

@@ -9,7 +9,6 @@ import re
 import uuid
 import zipfile
 from datetime import datetime
-from pathlib import Path
 from typing import List
 
 from fastapi import APIRouter, HTTPException
@@ -115,8 +114,6 @@ async def export_docx(req: ExportRequest):
 
     try:
         from docx import Document
-        from docx.shared import Pt, Inches
-        from docx.enum.text import WD_ALIGN_PARAGRAPH
     except ImportError:
         raise HTTPException(status_code=500, detail="python-docx 未安装，请运行: pip install python-docx")
 

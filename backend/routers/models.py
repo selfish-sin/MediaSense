@@ -10,7 +10,7 @@ import time
 import httpx
 from fastapi import APIRouter, HTTPException
 
-from models.schemas import ModelConfigCreate, ModelConfigResponse, ModelTestRequest, ModelTestResponse
+from models.schemas import ModelConfigCreate, ModelTestRequest, ModelTestResponse
 from db.model_repo import get_all_models, get_model_by_key, add_model, update_model, delete_model, get_default_model_key, set_default_model, get_default_correct_model_key, set_default_correct_model, get_fallback_chain, set_fallback_chain
 from services.httpx_errors import describe_http_response
 

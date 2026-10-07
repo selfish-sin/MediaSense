@@ -3,8 +3,6 @@
 用法：from services.config_service import get_config
 """
 
-import sys
-import importlib
 
 _config_module = None
 

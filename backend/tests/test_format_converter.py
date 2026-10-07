@@ -2,7 +2,6 @@
 format_converter 格式转换器测试
 """
 import pytest
-import asyncio
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 
@@ -10,7 +9,7 @@ from services.format_converter import (
     VIDEO_FORMATS, AUDIO_FORMATS, IMAGE_FORMATS,
     VIDEO_PRESETS, IMAGE_QUALITY, AUDIO_BITRATE, OUTPUT_TYPE,
     check_engines, classify_file, available_outputs, convert,
-    _find_exe, _ffmpeg_convert, _pillow_convert,
+    _ffmpeg_convert, _pillow_convert,
 )
 
 

@@ -25,7 +25,7 @@ from fastapi import APIRouter, HTTPException
 from config import LOCAL_MODEL_DIRS
 from db import asr_repo
 from models.schemas import AsrProviderUpsert, AsrSettingsUpdate
-from routers.asr import _settings, mask_provider, recommended_engine
+from routers.asr import _settings, recommended_engine
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

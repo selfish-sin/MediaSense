@@ -12,7 +12,7 @@ def test_config_importable():
 
 
 def test_schemas_importable():
-    from models.schemas import JobCreate, JobStatus, InputType
+    from models.schemas import JobStatus, InputType
     assert JobStatus.pending == "pending"
     assert InputType.text == "text"
 
