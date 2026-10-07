@@ -8,6 +8,7 @@
 - [ ] 跑过 `codegraph explore "<符号>"`（索引不可用时在 task 工件记录原因）
 - [ ] 涉及任务编排时读过 `main.py` 的 `process_job`（信号量并发由 `config.MAX_CONCURRENT_JOBS` 提供，**默认 2**；设 `MAX_CONCURRENT_JOBS=1` 才是严格串行；preview 阶段释放许可的设计勿破坏）
 - [ ] 涉及存储删除时读过 `scripts/cleanup_storage.py`（dry-run + `--apply --confirm DELETE` 双门槛不可绕过）
+- [ ] 涉及 AI 调用/重试/缓存时读过 [ai-call-cache.md](ai-call-cache.md)（忽略缓存仍写回、流式断连守卫、缓存故障降级）
 
 ## 核心约定
 

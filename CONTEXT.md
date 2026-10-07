@@ -1,6 +1,6 @@
 # youtube_tool_v2 CONTEXT
 
-> 最近核对：2026-10-05 | FastAPI + Socket.IO | 默认端口：7001
+> 最近核对：2026-10-07 | FastAPI + Socket.IO | 默认端口：7001
 
 ## 一分钟速览
 
@@ -36,6 +36,8 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `backend/services/cloud_asr.py` | 云端 ASR 双 provider：mimo（付费主力，chat+base64）/ xingchen（免费档 cloud_free，multipart）；**付费档只能显式选择**——provider 缺省走 `preferred_provider()`（只挑免费槽位，无免费档则抛 ConfigError）；静音切分→并发分片→句级化写盘；单片失败备用引擎补录（XingChen 免费→firered→Whisper）不留空洞；延迟画像日志 | 改云端引擎、句级切分或补录策略 |
 | `backend/services/local_asr.py` | **本地引擎注册表**（`LOCAL_ENGINES` 单一事实源，当前只注册 `firered`）+ FireRedASR2-AED 解码（sherpa-onnx int8/CPU）：就绪判定/文件明细/占用/后台下载（含取消）/删除/引擎级锁按 key 通用；管线=按需下载→VAD 分段（+padding）→段间并行解码→标点恢复→句级写盘 | 改本地引擎清单、FireRed 模型下载或 VAD/标点参数 |
 | `.trellis/spec/backend/transcription-chain.md` | **识别链全链路权威文档**：输入四策略/字幕优先防错位/引擎回退链/三引擎内部/分片补录/横评结论/参数速查/坑点汇总 | 改转录链任何环节前必读 |
+| `.trellis/spec/backend/ai-call-cache.md` | AI 调用/缓存边界：忽略缓存仅跳过读、成功仍写回；传不传 state 都守住正文后不重试；缓存建连失败告警降级 | 改 AI 调用、流式重试或缓存容错时 |
+| `docs/quality-audit-2026-10-07.md` | 质量检查证据、三项小修复、ASR 缓存参数遗漏复现与后续优化顺序 | 安排下一轮质量改进、修转录缓存时 |
 | `backend/services/web_search.py` | **联网检索唯一实现**（追问 + 深度研究共用）：智谱独立 Web Search API（`POST /api/paas/v4/web_search`，非 chat+tools 老姿势）优先 → DDGS 免 Key 兜底；`resolve_zhipu_key()` 三级兜底（env→config→DB bigmodel 模型）、`resolve_search_proxy()`（ddgs 不读 HTTP_PROXY 必须显式传）、`web_search_collect()` 返回 `SearchOutcome`（sources/text/provider/error，失败不静默） | 改联网搜索、追问引用来源、深度研究检索时 |
 | `backend/services/ai_cache.py` | **AI/转录结果缓存池读写单点**（表 `ai_cache`，2026-10-06）：`make_key`/`cache_get`/`cache_put`（只收成功非空结果，`AI_CACHE_MAX_ENTRIES` 淘汰最旧）+ 转录缓存 `lookup_transcription`/`store_transcription`（键=音频 sha256+引擎+语言+说话人分离，命中写回 `.srt`/`.txt` 约定路径）；开关 `config.AI_CACHE_ENABLED`（环境变量 `YT_AI_CACHE_ENABLED=0`） | 改缓存键要素、命中/淘汰策略，或排查"为什么秒出/没重新调 AI"时 |
 | `backend/services/` | 分段、摘要、导出、搜索等处理（`prompt_builder.py` 模块化提示词 9 维度含输出语言）。**`ai_processor.py` 是四个 AI 入口（总结/校正/打标签/思维导图）的兜底编排中心**：`_call_ai`（流式，失败返回 `[处理失败: ...]` 哨兵串而非抛异常，内置 AI 结果缓存——命中零 token、`bypass_cache=True` 跳过）、`_call_ai_with_fallback`（流式，**哨兵失败或零正文都换模型**，只在一字未吐时才换）、`run_with_fallback`（非流式，同样零正文换候选）、`is_call_failed`/`_strip_sentinel`（哨兵串判定，`''` 恒 False）、`ai_process`（跨批次记忆 `preferred_model`）、`correct_transcript_with_fallback` | 改 AI 调用、失败契约、缓存语义或换模型边界时 |
@@ -95,6 +97,8 @@ python main.py
 存储清理默认 dry-run；应用删除需要脚本的 `--apply --confirm DELETE`。staged 默认 72 小时、orphan 14 天、export/media 7 天、quarantine 30 天，具体阈值可由环境变量覆盖。不要把数据库、下载媒体、日志、模型或 API key 写入文档/Git。
 
 ## 当前状态
+
+- 质量检查（2026-10-07）：后端 968 / 前端 269 测试通过，前端 lint/build 通过。修复忽略缓存不更新 AI 结果、正文后断连重试/原因被 NameError 掩盖、缓存建连故障中断主流程；新增 8 条回归，其中 6 条修复前失败、修复后均通过。**待修**：ASR 缓存键遗漏 Whisper 档位/provider/model，同音频 base→medium 复现仍命中 base；临时勾「忽略缓存」。证据与改进顺序见质量报告。
 
 - 已实现：下载/导入、字幕/Whisper、任务并发、Socket.IO 进度、摘要（输出语言可选，默认中文）、导出、token 用量和受保护的存储清理。
 - 运行数据默认落在 `backend/data`；服务重启不会继续执行内存中的 Python 任务，但会处理启动时的中断记录。
