@@ -233,6 +233,15 @@ accept_waveform**，整段喂只报尾部；段首尾 +0.15s padding 防吞字�
 `(path,device,compute_type)` 键）。CUDA 推理期缺 DLL 自动降级 CPU 重跑（faster-whisper
 惰性编码，物化 `list(segs)` 必须留在 try 内）。tiny+B站自动升 base。
 
+**分片检查点（2026-10-07 断点恢复）**：每片识别完成立即写
+`{stem}_chunkNNN.transcript.json`（offset+segments dict），原片 WAV 才删；
+失败/取消后重试逐片复用（进度条显示「♻ 复用已完成分片」），只重跑缺失片。
+校验：offset 与本次切分差 >0.5s 或 JSON 残缺按未命中；`bypass_cache=true` 不读
+（忽略缓存=全新识别语义优先）但照常写；合并 SRT/TXT 落盘后清理全部检查点。
+`_split_audio_chunks` 复用上次遗留的有效 WAV 免重切。`bypass_cache` 参数沿
+`transcribe_audio → _transcribe_sync → _transcribe_by_engine → _transcribe_chunked`
+串接。segments 统一为 `{'start','end','text'}` dict（检查点可序列化 + 两路径同形态）。
+
 ### 3.4 备选未接入（已实测打通，报告见 09-12-asr-vendor-compare）
 
 - **百炼 qwen-audio-3.0-asr-flash**：DashScope 原生协议

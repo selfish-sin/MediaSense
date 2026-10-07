@@ -50,7 +50,8 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `backend/routers/asr_admin.py` | ASR 管理写操作：provider CRUD（内置不可删可停用；密钥留空或含 `****` = 不修改）、测试连接（2s 正弦探测音频真实调用，HTTP 200 + success 字段）、默认设置、本地模型生命周期（**`/local/{engine}/*` 按引擎 key 通用**：后台下载/取消/删除；Whisper 档位单列端点；下载中与转录中禁删） | 改 ASR 管理页端点或本地模型下载/删除 |
 | `backend/socket_handlers.py` | 实时日志和进度事件 | 改前端实时反馈 |
 | `backend/scripts/cleanup_storage.py` | staged/orphan/export/media 清理 | 改清理策略；删除必须显式确认 |
-| `backend/scripts/export_openapi.py` + `contracts/` | 导出/存放 OpenAPI 契约快照（`openapi.json`，**78 端点**，2026-10-05 重导出——此前长期停在 66，ASR 管理/chat 会话/兜底环等新增端点均未回写） | 改后端 API 后**必须**重新导出；查全部端点契约时读它 |
+| `backend/scripts/export_openapi.py` + `contracts/` | 导出/存放 OpenAPI 契约快照（`openapi.json`，**78 端点**，2026-10-07 重导出——JobResponse 增 transcript_meta） | 改后端 API 后**必须**重新导出；查全部端点契约时读它 |
+| `backend/scripts/eval_quality.py` + `eval_metrics.py` | **真实内容质量评测**：转录引擎横评（CER 近似/术语/剂量命中/耗时/降级落点）+ 摘要模型横评（钉死单模型不走兜底环；术语保留/剂量保留/无出处数字代理幻觉/token 成本，summary 全文落 results.json）。指南 `eval/README.md`，样本 `eval/samples/`，报告 `eval/reports/`（不入库） | 做引擎/模型选型横评或改评测指标时（真实跑批需自备音频+参考文本+术语清单；付费档 cloud 仅显式列入 --engines 才调用） |
 | `verify.py`（**仓库根**，不在 backend/） | 一键验证：`python verify.py [backend\|frontend\|all]` = Python ruff + backend pytest（用 `backend/venv/Scripts/python.exe`）+ frontend lint/vitest/build；无效目标失败 | 改完代码做全量验证，或想快速回归 |
 | `backend/requirements.in` / `requirements-dev.in` 及对应 `.txt` | 直接依赖意图/完整版本锁，Windows x64/Python 3.13；运行锁先于开发锁生成 | 改 Python 依赖或干净安装时 |
 | `backend/start.bat` / `.github/workflows/quality.yml` | 启动优先项目 venv、依赖失败停止；CI Windows Python 3.13 + Node 24 执行同一 verify | 改启动方式或自动检查时 |
@@ -104,7 +105,7 @@ python main.py
 
 ## 当前状态
 
-- 后续只读复核（2026-10-07）：强制重试 force=True 的输入备份失败后仍可能清理 job_dir，目录内素材存在丢失风险；尚未故障注入/修复。建议先补“备份失败停止删除”保护，再做结果来源展示、真实内容质量样本集及长视频分片恢复。详见质量报告末节。
+- 四项质量改进已落地（2026-10-07，逐单元提交，后端 1021 / 前端 279 测试 + verify 全绿）：①强制重试备份失败/校验不过即中止、不删任何文件（`55480ab`）；②结果页来源展示 `transcript_meta`（jobs 新列 + JobResponse + `TranscriptProvenance.vue`，onAiDone 终态后 `refreshMeta` 补拉）；③长音频分片检查点断点恢复（每片落盘、失败只重跑缺失片，`bypass_cache` 不读）；④真实内容质量评测框架（`eval_quality.py`，真实跑批待用户确认素材/参考文本与调用范围）。**业务改动需重启服务生效，本轮未重启/push。**
 
 - 质量改进（2026-10-07）：**979 后端 / 269 前端测试、ruff/eslint/build 全绿**，干净锁定环境同样通过且零测试告警。AI 缓存刷新、流式断连、缓存故障与 ASR v2 模型身份均已修；新增 19 条回归（较初始 960）。依赖锁/Windows CI 已配置、lifespan 保留启动恢复、两项历史任务已归档、索引排除构建/归档。隔离 localhost 实测启动、队列、OpenAPI、SPA、CORS 通过。详见 `docs/quality-audit-2026-10-07.md`；业务改动需重启服务生效，本轮未重启/push。
 
