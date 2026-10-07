@@ -1378,6 +1378,124 @@ class TestChatVariants:
         assert left == []
 
 
+class TestChatBatchDelete:
+    """多选批量删除：提问行=整轮（不牵连后续轮次）、回答行=该回答全部版本 + 孤儿提问清理。"""
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, client):
+        """三轮会话：第 1 轮两条变体（生效 v2），第 2/3 轮各一条单变体回答。
+        ★ 每测唯一 job/session：DB 是会话级共享的，同 id 会跨测试串数据。"""
+        import uuid
+        from routers.chat import _insert_chat, _gen_variant_group, _ensure_session, _activate_variant
+        from db.database import get_connection
+        self.JID = "jb-" + uuid.uuid4().hex[:8]
+        self.SID = "sb-" + uuid.uuid4().hex[:8]
+        conn = get_connection()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO jobs (id, title, status, result_text) VALUES (?, '批量删除测试', 'completed', '结果')",
+                (self.JID,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        _ensure_session(self.JID, self.SID)
+        self.group = _gen_variant_group()
+        self.u1 = _insert_chat(self.JID, self.SID, "user", "问题一")
+        self.a1 = _insert_chat(self.JID, self.SID, "assistant", "答案一v1", variant_group=self.group)
+        self.a2 = _insert_chat(self.JID, self.SID, "assistant", "答案一v2", variant_group=self.group)
+        _activate_variant(self.JID, self.SID, self.group, self.a2)
+        self.u2 = _insert_chat(self.JID, self.SID, "user", "问题二")
+        self.a3 = _insert_chat(self.JID, self.SID, "assistant", "答案二")
+        self.u3 = _insert_chat(self.JID, self.SID, "user", "问题三")
+        self.a4 = _insert_chat(self.JID, self.SID, "assistant", "答案三")
+
+    def _left(self):
+        from db.database import get_connection
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT id, role, content FROM job_chats WHERE job_id = ? ORDER BY id", (self.JID,)
+            ).fetchall()
+            return [(r["id"], r["role"], r["content"]) for r in rows]
+        finally:
+            conn.close()
+
+    def _post(self, client, ids):
+        return client.post(f"/api/jobs/{self.JID}/chat/messages/delete", json={"ids": ids})
+
+    def test_delete_middle_turn_keeps_later_turns(self, client):
+        """★ 回归锚点：勾选中间一轮提问 → 只删该轮（提问+变体组），后续轮次不受影响"""
+        resp = self._post(client, [self.u1])
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 3          # u1 + a1 + a2
+        left = self._left()
+        assert [i for i, _, _ in left] == [self.u2, self.a3, self.u3, self.a4]
+
+    def test_delete_answer_removes_all_versions_and_orphan_question(self, client):
+        """勾选回答行（生效 v2）→ 该回答全部版本一起删；提问成孤儿一并删除"""
+        resp = self._post(client, [self.a2])
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 3          # a1 + a2 + 所属提问 u1
+        left = self._left()
+        assert [i for i, _, _ in left] == [self.u2, self.a3, self.u3, self.a4]
+
+    def test_delete_ungrouped_answer_removes_orphan_question(self, client):
+        """单变体回答：删除该行后该轮无回答 → 提问一并删除（不留孤儿）"""
+        resp = self._post(client, [self.a3])
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 2          # a3 + 所属提问 u2
+        left = self._left()
+        assert [i for i, _, _ in left] == [self.u1, self.a1, self.a2, self.u3, self.a4]
+
+    def test_delete_mixed_question_and_answer(self, client):
+        """混合勾选：提问轮 + 另一轮的末条回答，各自按语义删除"""
+        resp = self._post(client, [self.u1, self.u3, self.a4])
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 5          # (u1+a1+a2) + a4 + 孤儿提问 u3
+        left = self._left()
+        assert [i for i, _, _ in left] == [self.u2, self.a3]
+
+    def test_delete_question_keeps_variants_of_other_turn(self, client):
+        """勾选提问 + 同一轮的回答：整轮删一次，不重复计数、不误删后续"""
+        resp = self._post(client, [self.u1, self.a2])
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 3
+        left = self._left()
+        assert [i for i, _, _ in left] == [self.u2, self.a3, self.u3, self.a4]
+
+    def test_delete_empty_ids_rejected(self, client):
+        assert self._post(client, []).status_code == 400
+
+    def test_delete_unknown_ids_noop(self, client):
+        """不存在的 id 静默跳过（幂等），不报错"""
+        resp = self._post(client, [999999, 999998])
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 0
+        assert len(self._left()) == 7
+
+    def test_delete_other_job_ids_not_touched(self, client):
+        """id 属于其它任务 → 不受影响（job 作用域）"""
+        import uuid
+        from routers.chat import _insert_chat, _ensure_session
+        from db.database import get_connection
+        other_jid = "jb-" + uuid.uuid4().hex[:8]
+        conn = get_connection()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO jobs (id, title, status, result_text) VALUES (?, '其它任务', 'completed', '结果')",
+                (other_jid,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        _ensure_session(other_jid, "sb2")
+        other_u = _insert_chat(other_jid, "sb2", "user", "别的问题")
+        resp = self._post(client, [other_u])
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 0
+
+
 # ── ASR 状态 ──
 class TestAsrStatusRouter:
     @pytest.fixture(autouse=True)

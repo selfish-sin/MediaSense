@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Literal
 
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -43,6 +43,9 @@ BROAD_PER_QUERY_RESULTS = 6
 BROAD_MAX_SOURCES = 12
 BROAD_QUERY_MAX = 120
 
+# 多选批量删除单次上限（防单个请求删除过量；超限提示分批）
+MAX_BATCH_DELETE = 200
+
 
 class ChatMessage(BaseModel):
     content: str
@@ -60,6 +63,12 @@ class SessionCreate(BaseModel):
 
 class SessionRename(BaseModel):
     title: str
+
+
+class MessagesDelete(BaseModel):
+    """多选批量删除的入参（消息行 id 集合）"""
+
+    ids: List[int] = []
 
 
 # ============ DB 辅助 ============
@@ -224,9 +233,108 @@ def _delete_chat_from(job_id, msg_id):
         conn.close()
 
 
+def _next_user_id(conn, job_id, session_id, after_id):
+    """同会话内 after_id 之后的第一条提问行 id（无则 None）；存量无 session 行按"空会话"分组。"""
+    if session_id:
+        row = conn.execute(
+            "SELECT MIN(id) FROM job_chats WHERE job_id = ? AND session_id = ? "
+            "AND role = 'user' AND id > ?",
+            (job_id, session_id, after_id),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT MIN(id) FROM job_chats WHERE job_id = ? AND (session_id IS NULL OR session_id = '') "
+            "AND role = 'user' AND id > ?",
+            (job_id, after_id),
+        ).fetchone()
+    return row[0] if row and row[0] is not None else None
+
+
+def _delete_turn(conn, job_id, user_id, session_id):
+    """删整轮：该提问 + 其全部回答版本（到下一条提问之前），**不牵连后续轮次**。
+
+    与 `_delete_chat_from`（级联到会话末尾，编辑回填用）的区别：多选语境下用户逐项勾选，
+    不能因为勾了一条中间提问就把后面的轮次一起删掉。
+    """
+    nxt = _next_user_id(conn, job_id, session_id, user_id)
+    if session_id:
+        sql = "DELETE FROM job_chats WHERE job_id = ? AND session_id = ? AND id >= ?"
+        params = [job_id, session_id, user_id]
+    else:
+        sql = ("DELETE FROM job_chats WHERE job_id = ? AND (session_id IS NULL OR session_id = '') "
+               "AND id >= ?")
+        params = [job_id, user_id]
+    if nxt is not None:
+        sql += " AND id < ?"
+        params.append(nxt)
+    conn.execute(sql, tuple(params))
+
+
+def _answer_owner_user_id(conn, job_id, session_id, anchor_id):
+    """回答行所属的提问行 id（同会话内 anchor 之前最后一条 user 行）"""
+    if not session_id:
+        return None
+    row = conn.execute(
+        "SELECT MAX(id) FROM job_chats WHERE job_id = ? AND session_id = ? "
+        "AND role = 'user' AND id < ?",
+        (job_id, session_id, anchor_id),
+    ).fetchone()
+    return row[0] if row and row[0] is not None else None
+
+
+def _prune_orphan_question(conn, job_id, session_id, anchor_id):
+    """该轮回答已清空 → 连带删除所属提问行（防孤儿提问，与单删同规则）"""
+    owner = _answer_owner_user_id(conn, job_id, session_id, anchor_id)
+    if owner is None:
+        return
+    nxt = _next_user_id(conn, job_id, session_id, owner)
+    sql = ("SELECT COUNT(*) FROM job_chats WHERE job_id = ? AND session_id = ? "
+           "AND role = 'assistant' AND id > ?")
+    params = [job_id, session_id, owner]
+    if nxt is not None:
+        sql += " AND id < ?"
+        params.append(nxt)
+    if conn.execute(sql, tuple(params)).fetchone()[0] == 0:
+        conn.execute("DELETE FROM job_chats WHERE id = ?", (owner,))
+
+
+def _delete_answer(conn, job_id, msg_id):
+    """删该回答：有变体组则全组删除（含全部历史版本），无组则只删该行；
+    两种情形都在删空该轮回答后连带删除提问行（防孤儿）。返回 False 表示行已不存在。"""
+    row = conn.execute(
+        "SELECT session_id, variant_group FROM job_chats WHERE job_id = ? AND id = ?",
+        (job_id, msg_id),
+    ).fetchone()
+    if not row:
+        return False
+    session_id = row["session_id"]
+    group = row["variant_group"] or ""
+    if group:
+        first = conn.execute(
+            "SELECT MIN(id) FROM job_chats WHERE job_id = ? AND variant_group = ?",
+            (job_id, group),
+        ).fetchone()[0]
+        if session_id:
+            conn.execute(
+                "DELETE FROM job_chats WHERE job_id = ? AND session_id = ? AND variant_group = ?",
+                (job_id, session_id, group),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM job_chats WHERE job_id = ? AND variant_group = ? "
+                "AND (session_id IS NULL OR session_id = '')",
+                (job_id, group),
+            )
+        anchor = first if first is not None else msg_id
+    else:
+        conn.execute("DELETE FROM job_chats WHERE job_id = ? AND id = ?", (job_id, msg_id))
+        anchor = msg_id
+    _prune_orphan_question(conn, job_id, session_id, anchor)
+    return True
+
+
 def _sse(obj):
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
-
 
 def _parse_json(value, default):
     if not value:
@@ -856,3 +964,41 @@ def delete_chat_message(job_id: str, msg_id: int):
 def delete_chat_from_endpoint(job_id: str, msg_id: int):
     _delete_chat_from(job_id, msg_id)
     return {"message": "已删除该消息及其后续"}
+
+
+# ============ 多选批量删除 ============
+
+@router.post("/{job_id}/chat/messages/delete")
+def delete_chat_messages(job_id: str, body: MessagesDelete):
+    """多选批量删除（单事务）。语义与单删一致但按"项"删除、不级联到后续轮次：
+
+    - 提问行 → 删该提问整轮（提问 + 其全部回答版本）；
+    - 回答行 → 删该回答的全部版本（含历史变体）；该轮回答删空后提问成孤儿 → 一并删除。
+    不存在/已删除的 id 静默跳过（幂等），返回实际删除行数。
+    """
+    ids = list(dict.fromkeys(body.ids))  # 去重保序
+    if not ids:
+        raise HTTPException(status_code=400, detail="未选择要删除的消息")
+    if len(ids) > MAX_BATCH_DELETE:
+        raise HTTPException(
+            status_code=400, detail=f"一次最多删除 {MAX_BATCH_DELETE} 项，请分批操作")
+    conn = get_connection()
+    try:
+        before = conn.total_changes
+        placeholders = ",".join("?" * len(ids))
+        rows = conn.execute(
+            f"SELECT id, role, session_id FROM job_chats WHERE job_id = ? AND id IN ({placeholders})",
+            (job_id, *ids),
+        ).fetchall()
+        by_id = {r["id"]: r for r in rows}
+        # 先处理提问行（整轮），后处理回答行——被整轮覆盖的回答行查不到会自然跳过
+        for rid in sorted(i for i in ids if i in by_id and by_id[i]["role"] == "user"):
+            _delete_turn(conn, job_id, rid, by_id[rid]["session_id"])
+        for rid in sorted(i for i in ids if i in by_id and by_id[i]["role"] == "assistant"):
+            _delete_answer(conn, job_id, rid)
+        conn.commit()
+        deleted = conn.total_changes - before
+    finally:
+        conn.close()
+    logger.info(f"[chat] 批量删除 {job_id}: 请求 {len(ids)} 项 → 实际删除 {deleted} 行")
+    return {"deleted": deleted, "message": f"已删除 {deleted} 行"}
