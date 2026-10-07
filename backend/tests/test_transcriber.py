@@ -729,7 +729,7 @@ class TestChunkCheckpoints:
         assert tr._load_chunk_checkpoint(str(c), 300.0) is None
 
     def test_split_reuses_existing_chunk_files(self, monkeypatch, tmp_path):
-        """重试重切时，已存在的有效分片 WAV 不再过 ffmpeg。"""
+        """重试重切时，时长校验通过的有效分片不再过 ffmpeg。"""
         import services.transcriber as tr
 
         audio = tmp_path / 'long_video.m4a'
@@ -744,7 +744,11 @@ class TestChunkCheckpoints:
             out = Path(cmd[-1])
             out.write_bytes(b'new-chunk')
 
-        monkeypatch.setattr(tr, '_get_audio_duration_seconds', lambda p: 700.0)
+        # 音频 700s → 3 片；遗留 chunk000 ffprobe 实测 300s → 有效复用
+        def fake_probe(path):
+            return 300.0 if 'chunk000' in str(path) else 700.0
+
+        monkeypatch.setattr(tr, '_get_audio_duration_seconds', fake_probe)
         monkeypatch.setattr(tr, 'subprocess', type('S', (), {
             'run': staticmethod(fake_run), 'TimeoutExpired': Exception})())
         chunks = tr._split_audio_chunks(str(audio), 300)
@@ -752,3 +756,46 @@ class TestChunkCheckpoints:
         assert len(calls) == 2                    # chunk001/002 需要重切，chunk000 复用
         assert chunks[0][0] == str(existing)      # chunk000 复用旧文件（未被覆盖）
         assert Path(chunks[1][0]).read_bytes() == b'new-chunk'
+
+    def test_split_recuts_truncated_leftover_chunk(self, monkeypatch, tmp_path):
+        """崩溃遗留的截断分片（size>0 但时长不符）必须重切，不能复用。"""
+        import services.transcriber as tr
+
+        audio = tmp_path / 'long_video.m4a'
+        audio.write_bytes(b'audio')
+        truncated = tmp_path / 'long_video_chunk000.wav'
+        truncated.write_bytes(b'x' * 4096)
+
+        calls = []
+
+        def fake_run(cmd, capture_output, check, timeout):
+            calls.append(cmd)
+            Path(cmd[-1]).write_bytes(b'recut')
+
+        def fake_probe(path):
+            # 音频 700s；遗留 chunk000 只有 120s → 与预期 300s 不符
+            return 700.0 if 'chunk000' not in str(path) else 120.0
+
+        monkeypatch.setattr(tr, '_get_audio_duration_seconds', fake_probe)
+        monkeypatch.setattr(tr, 'subprocess', type('S', (), {
+            'run': staticmethod(fake_run), 'TimeoutExpired': Exception})())
+        chunks = tr._split_audio_chunks(str(audio), 300)
+
+        assert len(calls) == 3                    # 全部重切（含截断的 chunk000）
+        assert Path(chunks[0][0]).read_bytes() == b'recut'
+
+    def test_cleanup_checkpoints_with_glob_special_chars_in_stem(self, monkeypatch, tmp_path):
+        """标题含 [ ] 等 glob 特殊字符时清理仍按文件名过滤生效。"""
+        import services.transcriber as tr
+
+        audio = tmp_path / '中药[上]讲座.m4a'
+        audio.write_bytes(b'audio')
+        cp = tmp_path / '中药[上]讲座_chunk000.transcript.json'
+        cp.write_text('{}', encoding='utf-8')
+        other = tmp_path / '其他任务_chunk000.transcript.json'
+        other.write_text('{}', encoding='utf-8')
+
+        tr._cleanup_chunk_checkpoints(str(audio))
+
+        assert not cp.exists()                    # 本任务的检查点被清掉
+        assert other.exists()                     # 别的任务的不误删

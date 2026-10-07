@@ -639,8 +639,9 @@ async function copyTranscript() {
     </el-card>
 
     <!-- ★ 转录来源说明（2026-10-07 结果可解释性）：与首页结果面板共用 TranscriptProvenance。
-         独立成卡：失败任务没有结果卡片，但"这份结果怎么来的"失败时同样该被看见。 -->
-    <el-card v-if="job?.transcript_meta" class="app-card" shadow="never">
+         独立成卡：失败任务没有结果卡片，但"这份结果怎么来的"失败时同样该被看见。
+         source 守卫防畸形 meta 渲染空卡（组件内部有同样的可见性判定）。 -->
+    <el-card v-if="job?.transcript_meta?.source" class="app-card" shadow="never">
       <TranscriptProvenance :meta="job.transcript_meta" />
     </el-card>
 

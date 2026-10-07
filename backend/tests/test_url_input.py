@@ -216,7 +216,34 @@ class TestRetryResume:
         assert files['video'] == str(existing)
         assert 'audio' not in files
 
+    async def test_resume_scan_skips_leftover_chunk_wavs(self, tmp_path):
+        """分片转录失败遗留的 chunk WAV 不能被断点续传当主音频捡走（mtime 更新也不行）。
 
+        捡走 chunk = 只转录 5 分钟 + 分片检查点恢复链失效。
+        """
+        from main import _handle_url_input
+
+        leftover_chunk = tmp_path / 'prev_audio_chunk002.wav'
+        leftover_chunk.write_bytes(b'x' * 4096)
+        import os
+        os.utime(leftover_chunk, (2_000_000_000, 2_000_000_000))  # 比原始音频新得多
+        original = tmp_path / 'prev_audio.m4a'
+        original.write_bytes(b'y' * 4096)
+
+        with ExitStack() as stack:
+            _enter_bili_common(stack)
+            stack.enter_context(
+                patch('services.downloader.extract_bilibili_subtitles', new_callable=AsyncMock,
+                      return_value={'success': False, 'message': 'no_subtitle'}))
+            m_dl = stack.enter_context(patch('services.downloader.download_video', new_callable=AsyncMock))
+            stack.enter_context(
+                patch('services.transcriber.transcribe_audio', new_callable=AsyncMock,
+                      return_value=('t.srt', 't.txt', 2)))
+            _srt, _txt, _seg, _title, _platform, files, _meta = await _handle_url_input(
+                BILI_URL, tmp_path, MagicMock(), 'j1', _opts(_retry=True), 'base', False, 'zh')
+
+        m_dl.assert_not_called()
+        assert files['audio'] == str(original)    # 选中的是原始音频，不是 chunk
 class TestTranscriptMeta:
     """结果可解释性（2026-10-07）：transcript_meta 覆盖来源/引擎/缓存/降级。"""
 

@@ -436,8 +436,16 @@ def _split_audio_chunks(audio_path: str, chunk_seconds: int = 300) -> list:
         chunk_left -= actual_t
         chunk_path = base_dir / f"{stem}_chunk{i:03d}.wav"
         # ★ 断点续传：上次运行遗留的有效分片直接复用，省一次 ffmpeg 重切
-        # （同一音频文件重试时切分结果确定不变；失败恢复场景常见）
-        if not (chunk_path.exists() and chunk_path.stat().st_size > 0):
+        # （同一音频文件重试时切分结果确定不变；失败恢复场景常见）。
+        #   有效性按 ffprobe 时长校验——崩溃时写一半的截断 WAV 同样 size>0，
+        #   直接复用会让该片推理必炸（旧代码每次 ffmpeg -y 重切，天然自愈）。
+        reuse = False
+        if chunk_path.exists() and chunk_path.stat().st_size > 0:
+            leftover = _get_audio_duration_seconds(str(chunk_path))
+            reuse = leftover is not None and abs(leftover - actual_t) <= 2.0
+            if not reuse:
+                logger.warning(f'遗留分片 {chunk_path.name} 时长异常（{leftover}s ≠ 预期 {actual_t:.0f}s），重切')
+        if not reuse:
             cmd = [
                 ffmpeg, '-y', '-v', 'quiet',
                 '-i', audio_path,
@@ -504,10 +512,16 @@ def _load_chunk_checkpoint(chunk_path: str, offset: float) -> Optional[list]:
 
 
 def _cleanup_chunk_checkpoints(audio_path: str) -> None:
-    """合并结果写盘后清理同目录下全部相关检查点（音频可能被重命名过，按前缀匹配）。"""
+    """合并结果写盘后清理同目录下全部相关检查点（音频可能被重命名过，按前缀匹配）。
+
+    按文件名过滤而非 glob 模式：标题做 stem 时可能含 [ ] 等字符，
+    进 glob 会被当字符类解析导致失配（检查点泄漏）。
+    """
     stem = Path(audio_path).stem
     try:
-        for cp in Path(audio_path).parent.glob(f'{stem}_chunk*.transcript.json'):
+        for cp in Path(audio_path).parent.iterdir():
+            if not cp.name.startswith(f'{stem}_chunk') or not cp.name.endswith('.transcript.json'):
+                continue
             try:
                 cp.unlink()
             except OSError:

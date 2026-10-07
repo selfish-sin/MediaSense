@@ -18,6 +18,7 @@ const SOURCE_LABELS = {
   platform_subtitle: '平台字幕',
   subtitle_file: '上传的字幕文件',
   text_input: '直接文本输入（未经识别）',
+  text_file: '上传的文本文件（未经识别）',
   transcription: '语音识别',
 }
 

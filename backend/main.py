@@ -454,8 +454,12 @@ async def _extract_bvid(input_url: str):
     return None
 
 
-async def _handle_text_input(text, job_dir, sio, job_id, title, platform, progress_msg):
-    """纯文本/文本文件输入：直接生成 txt+srt，跳过下载与转录。"""
+async def _handle_text_input(text, job_dir, sio, job_id, title, platform, progress_msg,
+                             source='text_input'):
+    """纯文本/文本文件输入：直接生成 txt+srt，跳过下载与转录。
+
+    source: text_input=直接粘贴 / text_file=上传 .txt/.md 文件（来源展示区分二者）
+    """
     from socket_handlers import emit_progress
     from services.downloader import handle_text_input as _text_input
     txt_path_obj, srt_path_obj = await _text_input(text, job_dir, sio, job_id)
@@ -463,7 +467,7 @@ async def _handle_text_input(text, job_dir, sio, job_id, title, platform, progre
                progress_msg=progress_msg)
     await emit_progress(sio, job_id, 'transcribe', 100, progress_msg)
     return str(srt_path_obj), str(txt_path_obj), len(text) // 1000 + 1, title, platform, {}, \
-        {'source': 'text_input'}
+        {'source': source}
 
 
 async def _handle_subtitle_file(input_file, job_dir, sio, job_id):
@@ -728,6 +732,10 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
 
 # 复用/登记时的视频扩展名（断点续传复用的媒体按扩展名归类，其余按音频素材）
 _VIDEO_EXTS = ('.mp4', '.mkv', '.avi', '.mov')
+# 分片转录的中间 WAV（long_video_chunk000.wav）：上次失败运行会遗留，
+# mtime 比原始音频新——断点续传扫描绝不能把它当主音频捡走（只会转录 5 分钟，
+# 且分片检查点恢复链整个失效），恢复应回到原音频走 _transcribe_chunked 复用检查点
+_CHUNK_WAV_RE = re.compile(r'_chunk\d{3}\.wav$', re.IGNORECASE)
 
 
 async def _acquire_audio(input_url, job_dir, sio, job_id, options, files, *,
@@ -746,7 +754,8 @@ async def _acquire_audio(input_url, job_dir, sio, job_id, options, files, *,
         # 搜索 job_dir 下已有音频/视频文件（重试场景）
         audio_exts = ('.m4a', '.mp3', '.wav', '.opus', '.aac', '.webm', '.mp4', '.mkv')
         for f in sorted(job_dir.glob('*'), key=lambda x: x.stat().st_mtime, reverse=True):
-            if f.suffix.lower() in audio_exts and f.stat().st_size > 1000:
+            if f.suffix.lower() in audio_exts and f.stat().st_size > 1000 \
+                    and not _CHUNK_WAV_RE.search(f.name):
                 file_path = f
                 title = title or f.stem
                 files['video' if f.suffix.lower() in _VIDEO_EXTS else 'audio'] = str(f)
@@ -965,6 +974,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                     Path(input_file).read_text(encoding='utf-8'), job_dir, sio, job_id,
                     title=Path(input_file).stem, platform='文本文件',
                     progress_msg='文本文件已读取，跳过转录',
+                    source='text_file',
                 )
             elif file_ext in ('.srt', '.vtt'):
                 # 字幕文件：直接转换 → 跳过转录

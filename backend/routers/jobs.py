@@ -550,6 +550,9 @@ async def retry_job(job_id: str, force: bool = Query(False, description="强制�
         "options": opts,
         "files": None,
         "result_text": None,
+        # 上一轮的来源说明随结果一并作废（新一轮 Step 1 完成时重新写入；
+        # 不清的话重试期间/再度失败时展示的是旧一轮的引擎与缓存信息）
+        "transcript_meta": None,
     }
 
     update_job(job_id, **update_kwargs)
