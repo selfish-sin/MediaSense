@@ -1,5 +1,5 @@
 <template>
-  <section class="chat-panel app-card">
+  <section class="chat-panel app-card" :class="{ 'cp-selecting': selectMode }">
     <!-- 单行纤细头部：品牌 + 会话切换 + 模型选择 + 更多菜单（替代旧三行工具栏） -->
     <header class="cp-head">
       <div class="cp-head-left">
@@ -40,6 +40,18 @@
           />
         </el-select>
         <span v-if="modelStore.loading" class="cp-hint">模型加载中…</span>
+        <!-- 多选删除：进入多选模式后逐行勾选，删除前弹确认窗 -->
+        <button
+          v-if="messages.length && !streaming"
+          type="button"
+          class="cp-toggle"
+          :class="{ 'is-on': selectMode }"
+          :title="selectMode ? '退出多选' : '多选删除（可勾选多条消息）'"
+          @click="toggleSelectMode"
+        >
+          <el-icon :size="13"><ListChecks /></el-icon>
+          {{ selectMode ? '退出多选' : '多选' }}
+        </button>
         <el-dropdown trigger="click" @command="onMenuCommand">
           <!-- ⚠ 不能再包一层 el-tooltip：tooltip 作为 dropdown 直接子元素会拦截触发点击（实测菜单弹不出来） -->
           <button class="cp-icon-btn" type="button" title="会话操作">
@@ -85,8 +97,13 @@
               :key="msg.id"
               :data-mid="msg.id"
               class="chat-row"
-              :class="[msg.role === 'user' ? 'row-user' : 'row-ai', { 'row-active': String(msg.id) === String(activeMsgId) }]"
+              :class="[msg.role === 'user' ? 'row-user' : 'row-ai', { 'row-active': String(msg.id) === String(activeMsgId), 'row-selected': selectMode && isSelected(msg) }]"
+              @click="selectMode && toggleSelect(msg)"
             >
+              <!-- 多选模式：整行可点选（内容区 pointer-events 由 .cp-selecting 关闭） -->
+              <span v-if="selectMode" class="cp-check" :class="{ 'is-on': isSelected(msg) }">
+                <el-icon v-if="isSelected(msg)" :size="12"><Check /></el-icon>
+              </span>
               <!-- 用户消息：弱色右对齐气泡，操作 hover 显形 -->
               <div v-if="msg.role === 'user'" class="cp-user">
                 <div class="cp-user-bubble">{{ msg.content }}</div>
@@ -253,8 +270,27 @@
       </div>
     </div>
 
+    <!-- 多选操作条（多选模式下替代输入舱）：已选计数 + 全选/取消/删除所选 -->
+    <div v-if="selectMode" class="cp-select-bar">
+      <span class="cp-select-count">已选 {{ selectedCount }} 项</span>
+      <div class="cp-select-actions">
+        <el-button size="small" text :disabled="!messages.length" @click="toggleSelectAll">
+          {{ allSelected ? '取消全选' : '全选' }}
+        </el-button>
+        <el-button size="small" text @click="exitSelectMode">取消</el-button>
+        <el-button
+          size="small"
+          type="danger"
+          :disabled="!selectedCount"
+          @click="confirmDeleteSelected"
+        >
+          <el-icon :size="13"><Trash2 /></el-icon> 删除所选
+        </el-button>
+      </div>
+    </div>
+
     <!-- Composer：圆角输入舱，模式/开关在底栏左侧，发送在右侧 -->
-    <div class="cp-composer">
+    <div v-else class="cp-composer">
       <el-input
         v-model="input"
         type="textarea"
@@ -306,7 +342,7 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import {
   MessageCircle, Plus, Pencil, Trash2, ArrowDown, ArrowUp, Sparkles,
   Search, Copy, ChevronDown, ChevronLeft, ChevronRight, Globe, Square,
-  MoreVertical, RefreshCw, Download,
+  MoreVertical, RefreshCw, Download, ListChecks, Check,
 } from 'lucide-vue-next'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatApi } from '../utils/api'
@@ -386,6 +422,73 @@ function durationLabel(ms) {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
+// ===== 多选删除（进入多选模式 → 勾选消息 → 确认弹窗 → 批量删除） =====
+const selectMode = ref(false)
+const selectedIds = ref(new Set())
+const selectedCount = computed(() => selectedIds.value.size)
+const allSelected = computed(() => messages.value.length > 0 && selectedIds.value.size >= messages.value.length)
+
+function toggleSelectMode() {
+  if (selectMode.value) exitSelectMode()
+  else enterSelectMode()
+}
+
+function enterSelectMode() {
+  if (streaming.value || !messages.value.length) return
+  selectedIds.value = new Set()
+  selectMode.value = true
+}
+
+function exitSelectMode() {
+  selectMode.value = false
+  selectedIds.value = new Set()
+}
+
+function isSelected(msg) {
+  return selectedIds.value.has(msg.id)
+}
+
+function toggleSelect(msg) {
+  const next = new Set(selectedIds.value)
+  if (next.has(msg.id)) next.delete(msg.id)
+  else next.add(msg.id)
+  selectedIds.value = next
+}
+
+function toggleSelectAll() {
+  selectedIds.value = allSelected.value ? new Set() : new Set(messages.value.map((m) => m.id))
+}
+
+// 删除所选：确认弹窗 → 批量端点（提问=整轮、回答=含全部历史版本，语义见后端）
+async function confirmDeleteSelected() {
+  if (streaming.value) return
+  const ids = [...selectedIds.value]
+  if (!ids.length) return
+  try {
+    await ElMessageBox.confirm(
+      `确定删除所选的 ${ids.length} 项？勾选的提问会连同其回答一起删除；勾选的回答会删除该条的全部历史版本。删除后不可恢复。`,
+      '删除所选内容',
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        confirmButtonClass: 'el-button--danger',
+      },
+    )
+  } catch {
+    return
+  }
+  try {
+    await chatApi.deleteMessages(props.jobId, ids)
+    exitSelectMode()
+    await loadHistory()
+    await refreshSessionMeta()
+    ElMessage.success(`已删除所选的 ${ids.length} 项`)
+  } catch (e) {
+    ElMessage.error('删除失败: ' + (e?.message || '未知错误'))
+  }
+}
+
 // ===== 多会话状态 =====
 const sessions = ref([])
 const activeSessionId = ref(null)
@@ -432,6 +535,7 @@ async function onSelectSession(id) {
   streaming.value = false
   activeMsg.value = null
   abortCtrl = null
+  exitSelectMode()
   await loadHistory()
 }
 
@@ -484,6 +588,8 @@ async function deleteSession() {
 
 // 头部「⋯」菜单分发
 function onMenuCommand(cmd) {
+  // 会话级操作会整体换掉消息列表 → 先退出多选，避免残留选中态
+  if (cmd === 'new' || cmd === 'clear' || cmd === 'delete') exitSelectMode()
   if (cmd === 'new') createSession()
   else if (cmd === 'rename') renameSession()
   else if (cmd === 'copy') copyConversation()
@@ -756,7 +862,14 @@ function markLastDuration(ms) {
 
 // Esc 中断流式生成（ChatGPT/豆包惯例；流式中不会同时开着确认对话框，无冲突）
 function onKeydown(e) {
-  if (e.key === 'Escape' && streaming.value) {
+  if (e.key !== 'Escape') return
+  // 多选模式下 Esc 先退出多选（流式与多选不会同时存在）
+  if (selectMode.value) {
+    e.stopPropagation()
+    exitSelectMode()
+    return
+  }
+  if (streaming.value) {
     e.stopPropagation()
     onStop()
   }
@@ -980,6 +1093,7 @@ watch(
       historyTimer = null
       streaming.value = false
       activeMsg.value = null
+      exitSelectMode()
       await loadSessions()
     }
   },
@@ -1589,6 +1703,83 @@ button.cp-search-row:hover {
 .rail-bottom:hover {
   color: var(--app-accent-1);
   border-color: rgba(var(--app-accent-1-rgb), 0.5);
+}
+
+/* ---- 多选模式：整行可点选；内容区交互关闭（点哪都落到行上），纯展示型控件隐藏 ---- */
+.cp-selecting .chat-row {
+  cursor: pointer;
+  padding: 4px 8px;
+  margin: 10px -8px;
+  border-radius: 12px;
+  transition: background 0.12s;
+}
+.cp-selecting .chat-row > * {
+  pointer-events: none;
+}
+.cp-selecting .chat-row:hover {
+  background: var(--app-hover-bg);
+}
+.cp-selecting .chat-row.row-selected,
+.cp-selecting .chat-row.row-selected:hover {
+  background: rgba(var(--app-accent-1-rgb), 0.1);
+}
+/* 多选下这些控件点了没反应（pointer-events 已关）→ 直接隐去，避免误导 */
+.cp-selecting .cp-msg-actions,
+.cp-selecting .cp-followups,
+.cp-selecting .cp-variants {
+  display: none;
+}
+/* 勾选圈：圆形，选中填充主色渐变 + 对勾 */
+.cp-check {
+  flex-shrink: 0;
+  align-self: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid var(--app-border);
+  background: var(--app-chip-bg, transparent);
+  color: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.row-ai .cp-check {
+  align-self: flex-start;
+  margin: 4px 8px 0 0;
+}
+.row-user .cp-check {
+  margin-right: 8px;
+}
+.cp-check.is-on {
+  background: linear-gradient(135deg, var(--app-accent-1), var(--app-accent-2));
+  border-color: transparent;
+  color: #fff;
+}
+
+/* ---- 多选操作条（多选模式下替代输入舱） ---- */
+.cp-select-bar {
+  margin: 4px 14px 14px;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 1px solid rgba(var(--app-accent-1-rgb), 0.32);
+  border-radius: 16px;
+  background: rgba(var(--app-accent-1-rgb), 0.07);
+}
+.cp-select-count {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-accent-1);
+  font-variant-numeric: tabular-nums;
+}
+.cp-select-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 /* ============ Composer 输入舱 ============ */

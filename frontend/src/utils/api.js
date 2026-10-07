@@ -243,6 +243,8 @@ export const chatApi = {
   activateVariant: (jobId, msgId) => api.post(`/jobs/${jobId}/chat/variants/${msgId}/activate`),
   // 删除单条（user/assistant）——按 msg_id 全局唯一
   deleteMessage: (jobId, msgId) => api.delete(`/jobs/${jobId}/chat/${msgId}`),
+  // 多选批量删除（body: { ids: [] }）：提问行=整轮（不级联后续轮次）、回答行=该条全部版本
+  deleteMessages: (jobId, ids) => api.post(`/jobs/${jobId}/chat/messages/delete`, { ids }),
   // 删除从该条（含）之后的所有消息
   deleteFrom: (jobId, msgId) => api.delete(`/jobs/${jobId}/chat/from/${msgId}`),
   // SSE 流式追问：返回 Promise；通过 onEvent/onEnd/onError 回调驱动 UI
