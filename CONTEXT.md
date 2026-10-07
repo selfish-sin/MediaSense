@@ -65,7 +65,7 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `frontend/src/utils/effects.js` | 效果层：`DEFAULT_EFFECTS` + `effectVars(effects, mode)` 把氛围参数换算为 CSS 变量——**四层 scrim**（中性黑/白 + 上下渐晕 + 径向暗角 + 整体浓度）、玻璃三件套（blur/saturate/高光描边）、surface 三档、`--app-card-rest`+`--el-card-box-shadow`、`--app-glass-sheen`（dark 卡片高光）、light 材质补偿 +12%；`loadEffects` 兼容旧 `background` 内嵌效果参数 | 改遮罩/暗角/玻璃参数或默认值时 |
 | `frontend/src/utils/skinSchema.js` | 皮肤 JSON 校验与归一化：`normalizeSkin()` 返回 `{ok, skin}` 或 `{ok:false, error}`（**错误原因必须可行动**）+ `REQUIRED_PALETTE_KEYS`（palette 必需色单一事实源）+ `skinToJson()` | 改皮肤导入格式或校验规则时 |
 | `frontend/src/components/BackgroundPanel.vue` | 背景与配色设置面板：皮肤选择（色块预览卡 + 导入/导出）、内置氛围背景 + **动态背景卡**（左上角发光点标记）、**背景图库网格**（缩略图切换 / hover 删除 / `N/24 · XMB` 用量）、上传后**亮度推荐直接展示数值并可一键采用**、提色板、氛围遮罩 5 滑块、卡片材质 2 滑块、背景提示条（`bgNotice` / `storageError`） | 改背景设置面板 UI 时 |
-| `frontend/src/components/ChatPanel.vue` | 追问聊天面板（多会话/流式/SSE search 事件/**联网三态选择器：关闭·严格依据材料·广泛收集（`searchMode` ref）**/消息操作栏：复制·编辑·删除·重新生成/时间戳/整对话复制） | 改追问交互、引用来源展示、联网模式或检索状态时 |
+| `frontend/src/components/ChatPanel.vue` | 追问聊天面板（2026-10-07 重设计为豆包/DeepSeek 风格）：**单行纤细头部**（品牌+会话下拉+模型下拉+⋯菜单[新建/重命名/复制对话/清空/删除会话]）；消息流居中 860px，用户消息=弱强调色右对齐气泡、AI 回答=平铺无气泡（头像列+内容列，操作 hover 显形）；**检索状态条点击展开两列来源卡片栅格**（默认折叠）；Composer 输入舱（联网三态/思考开关内嵌底栏、圆形发送/停止钮）；空态建议 chips；流式尾光标+跳到最新浮动钮；导航轨保留。**坑点：el-dropdown 直接子元素套 el-tooltip 会拦截触发点击（菜单弹不出）**；历史消息 `search` 事件不落库（loadHistory 恒 null），来源展开入口必须按 `msg.sources` 判断而非 `msg.search` | 改追问交互、引用来源展示、联网模式或检索状态时 |
 | `frontend/src/utils/chatExport.js` | 追问复制/导出格式化纯函数：`parseChatTime`（SQLite naive 时间戳按 **UTC** 解析）、`buildAiText`（正文 ± 参考来源）、`buildConversationMarkdown`（`### 你` / `### AI` 分节）、**`SEARCH_MODES`/`searchProviderName`/`searchStateLabel`（联网三态取值与状态气泡文案，与后端 search_mode 契约对齐）** | 改追问复制内容、时间戳显示或联网模式文案时 |
 | `frontend/src/utils/codeCopy.js` | Markdown 代码块「复制」按钮的 **document 全局事件委托**（`data-md-code-copy`），main.js 安装一次 | 改代码块复制，或排查"复制按钮点了没反应"/"某页面复制是死的"时 |
 | `frontend/src/utils/shortcut.js` | 工作台提交快捷键纯函数：`isSubmitShortcut`（Ctrl/Cmd+Enter 判定，含小键盘/keyCode 兜底）、`modifierLabel`/`shortcutHint`（macOS ⌘、其余 Ctrl）；HomeView 绑 window keydown + HomeInputPanel 头部提示共用 | 改/加工作台键盘快捷键时 |
@@ -104,6 +104,8 @@ python main.py
 存储清理默认 dry-run；应用删除需要脚本的 `--apply --confirm DELETE`。staged 默认 72 小时、orphan 14 天、export/media 7 天、quarantine 30 天，具体阈值可由环境变量覆盖。不要把数据库、下载媒体、日志、模型或 API key 写入文档/Git。
 
 ## 当前状态
+
+- 追问面板 UI 重设计（2026-10-07，task 10-07-chat-panel-ui-redesign，M0，verify 全绿 + 明暗双主题浏览器实测，`777000e`）：按豆包/DeepSeek 桌面端风格重做——三层工具栏收敛为单行头部 + Composer 底栏；用户消息弱色气泡/AI 平铺+头像列；引用来源改两列卡片栅格（可折叠）；空态建议 chips；流式光标/跳到最新；全 `--app-*` token 化。功能零删减（多会话/编辑回填/重新生成/复制带来源/token 统计/导航轨全保留），另补清空与整轮删除的二次确认。新坑点两条已记入文件索引行（dropdown×tooltip 嵌套拦点击、历史消息 search 恒 null）。
 
 - 追问联网搜索换引擎 + 双模式（2026-10-07，task 10-07-chat-search-engine-and-modes，M1，pytest 1037 / vitest 283 / verify 全绿 + 7001 重启浏览器实测两模式通过）：①搜索引擎链 **Ollama（免费主路径，Key 自 ting-ear 迁入 config.py）→ Tavily → Firecrawl（配 Key 才参与）→ DDGS**，智谱整体移除（用户决定弃用；`ZHIPU_API_KEY` 仅剩 seed_models.py LLM 播种引用）；②追问联网三态 `search_mode`：**关闭 / 严格依据材料（单路检索+材料约束）/ 广泛收集（「问题+视频标题」双路并行、URL 去重 ≤12 条、材料仅作参考放开作答）**，旧 `enable_search` 兼容为 strict；SSE `search` 事件带 `mode`；③`config.example.py` 增三个搜索 Key 占位；OpenAPI 已重导。**坑点**：Firecrawl 免 Key 实测 403 必须配 Key；Ollama 搜索直连/代理均通、单次 ≤10 条、正文长（~3700 字符）；Tavily 额度码是 432（非 402）、Firecrawl 是 402。
 
