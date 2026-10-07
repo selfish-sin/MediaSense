@@ -1,0 +1,11 @@
+[
+  {
+    "name": "示例-中药学讲座片段",
+    "audio": "C:/path/to/your/lecture_clip.m4a",
+    "transcript": "C:/path/to/your/reference.txt",
+    "terms": ["黄芪", "白术", "防风", "足三里", "桂枝汤"],
+    "dosages": ["黄芪30g", "白术10g"],
+    "language": "zh",
+    "summary_dimensions": { "role": "tcm" }
+  }
+]
