@@ -77,8 +77,17 @@ SERVER_HOST = "0.0.0.0"
 # ★ 默认 2（实测稳态值）；设环境变量 MAX_CONCURRENT_JOBS=1 可改成严格串行。
 MAX_CONCURRENT_JOBS = max(1, int(os.getenv('MAX_CONCURRENT_JOBS', '2')))
 
-# ============ 智谱 API Key（从环境变量读取，避免泄露到 Git） ============
+# ============ 联网搜索 Key（services/web_search 链路用，从环境变量读取，避免泄露到 Git） ============
+# 链路：Ollama（免费主路径）→ Tavily → Firecrawl → DuckDuckGo（免 Key 兜底）。
+# 前三级配了 Key 才参与；留空即跳过该级。智谱 Web Search 已于 2026-10-07 移除。
+# ZHIPU_API_KEY 仅剩 seed_models.py 播种智谱 LLM 模型时引用，与联网搜索无关。
 ZHIPU_API_KEY = os.getenv("ZHIPU_API_KEY", "")
+# Ollama Web Search（免费）：https://ollama.com/settings/keys 申请
+OLLAMA_SEARCH_API_KEY = os.getenv("OLLAMA_SEARCH_API_KEY", "")
+# Tavily（免费 1000 credits/月）：https://app.tavily.com 申请
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+# Firecrawl（免费 1000 credits/月，免 Key 实测不可用）：https://firecrawl.dev 申请
+FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "")
 
 # ============ 代理配置 ============
 # 联网检索的 DuckDuckGo 兜底会显式使用此代理（ddgs 不读 HTTP_PROXY 环境变量）；

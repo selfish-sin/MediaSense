@@ -3,7 +3,7 @@ YouTube Tool V2 - 深度研究模式处理器
 转录→提取主题→联网检索逐主题扩展→合并博文
 触发：summary_type='deep_research' 或 dimensions.depth='research'
 
-搜索策略：统一走 `services/web_search.py`（智谱独立 Web Search API 优先，DuckDuckGo 免 Key 兜底）。
+搜索策略：统一走 `services/web_search.py`（Ollama → Tavily → Firecrawl → DDGS 逐级回退）。
 本模块**不再自建搜索实现**——2026-09-16 收敛前，这里内联了一份智谱 chat+tools 调用，用的是
 只读环境变量的 `config.ZHIPU_API_KEY`，未配 Key 时整条链路静默失效（表现为"联网模式没用"）；
 且该内联解析把数组形态的 `message.web_search` 当 dict 取值，即使配了 Key 也拿不到来源。
@@ -76,7 +76,7 @@ async def _expand_topic(
 ) -> str:
     """对一个主题做联网检索，并交给用户所选模型写成研究段落。
 
-    搜索后端由 `services/web_search` 统一决定（智谱 → DDGS），本函数只负责拼提示词；
+    搜索后端由 `services/web_search` 统一决定（Ollama → Tavily → Firecrawl → DDGS），本函数只负责拼提示词；
     检索失败时如实告知（日志 + 提示词内注明），不假装有资料。
     """
     outcome = await web_search_service.web_search_collect(
@@ -86,7 +86,7 @@ async def _expand_topic(
     if sio:
         from socket_handlers import emit_log
         if outcome.ok:
-            provider_label = '智谱' if outcome.provider == 'zhipu' else 'DuckDuckGo'
+            provider_label = {'ollama': 'Ollama', 'tavily': 'Tavily', 'firecrawl': 'Firecrawl'}.get(outcome.provider, 'DuckDuckGo')
             await emit_log(sio, job_id, f'🔬 检索到 {len(outcome.sources)} 条资料（{provider_label}）: {topic}')
         else:
             await emit_log(sio, job_id, f'🔬 联网检索不可用（{outcome.error}），仅基于视频内容扩展: {topic}')
@@ -142,19 +142,24 @@ async def research_process(
 ) -> Tuple[str, int, int]:
     """深度研究模式主流程
 
-    搜索后端：`services/web_search`（智谱独立 Web Search API 优先，DDGS 免 Key 兜底），
-    与「用户选的 AI 模型」解耦——只需要一个智谱搜索 Key，不需要在模型管理里配智谱模型。
+    搜索后端：`services/web_search`（Ollama → Tavily → Firecrawl → DDGS 逐级回退），
+    与「用户选的 AI 模型」解耦——搜索 Key 走 config.py / 环境变量，不需要配成模型。
     """
     model_cfg = get_model_by_key(model) or get_model_by_key(DEFAULT_MODEL)
     if not model_cfg:
         raise Exception(f'模型 {model} 不存在')
 
-    if web_search_service.zhipu_configured():
-        search_label = '智谱 Web Search'
-    elif web_search_service.ddgs_available():
-        search_label = 'DuckDuckGo（未配智谱 Key，走免费兜底）'
+    backends = web_search_service.describe_search_backends()
+    if backends.get("ollama"):
+        search_label = "Ollama Web Search（免费）"
+    elif backends.get("tavily"):
+        search_label = "Tavily"
+    elif backends.get("firecrawl"):
+        search_label = "Firecrawl"
+    elif backends.get("ddgs"):
+        search_label = "DuckDuckGo（免费兜底）"
     else:
-        search_label = '不可用（未配智谱 Key 且未安装 ddgs）'
+        search_label = "不可用（未配任何搜索 Key 且未安装 ddgs）"
 
     if sio:
         from socket_handlers import emit_progress, emit_log

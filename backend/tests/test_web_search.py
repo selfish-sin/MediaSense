@@ -1,12 +1,15 @@
 """
 联网检索链路测试（services/web_search.py 单一实现）
 
-背景（2026-09-16）：追问面板的「联网」开关是死按钮——智谱主路径用只读环境变量的 Key
-（未配即跳过）、旧代码走已被官方独立端点取代的 chat+tools 姿势、DDGS 兜底的 ddgs 包未安装，
-三层全部失效却静默返回空列表。本文件锁定修复后的契约：
-  - 智谱独立 Web Search API 的请求姿势与 search_result 解析
-  - Key 三级兜底（env → config → DB 模型）
-  - 智谱失败 → DDGS 兜底 → 都失败时**必须带可行动原因**（不静默）
+背景（2026-09-16 首修，2026-10-07 换引擎）：追问面板的「联网」开关曾是死按钮——
+主路径用未配置的 Key、旧代码走已被官方独立端点取代的 chat+tools 姿势、ddgs 包未安装，
+三层全部失效却静默返回空列表。2026-10-07 起引擎链换为：
+  Ollama（免费主路径）→ Tavily → Firecrawl（后两级配 Key 才参与）→ DDGS（免 Key 兜底）
+智谱 Web Search 整体移除（账号套餐过期欠费，用户决定弃用）。
+本文件锁定契约：
+  - 各后端的请求姿势与结果解析
+  - Key 两级兜底（env → config）与「配 Key 才参与」的链路顺序
+  - 全部失败时**必须带可行动原因**（不静默）
 不触网：httpx.AsyncClient / ddgs 全部替换为替身。
 """
 import json
@@ -32,21 +35,31 @@ def _fake_client(status=200, payload=None, text=None):
     return client
 
 
-ZHIPU_OK = {
-    "id": "t1",
-    "search_result": [
-        {"title": "标题A", "content": "摘要 A", "link": "https://a.com",
-         "media": "站点A", "publish_date": "2026-09-01"},
-        {"title": "标题B", "content": "摘要 B", "link": "https://b.com", "media": "站点B"},
+OLLAMA_OK = {
+    "results": [
+        {"title": "标题A", "content": "正文A", "url": "https://a.com"},
+        {"title": "标题B", "content": "正文B", "url": "https://b.com"},
     ],
+}
+TAVILY_OK = {
+    "results": [
+        {"title": "标题A", "content": "正文A", "url": "https://a.com", "score": 0.9},
+    ],
+}
+FIRECRAWL_OK = {
+    "success": True,
+    "data": {"web": [{"title": "标题A", "description": "正文A", "url": "https://a.com"}]},
 }
 
 
 @pytest.fixture(autouse=True)
 def _no_env_key(monkeypatch):
-    """屏蔽开发机上的 ZHIPU_API_KEY 环境变量，避免用例受本地配置影响"""
-    monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
-    monkeypatch.setattr("config.ZHIPU_API_KEY", "", raising=False)
+    """屏蔽开发机上的搜索 Key 环境变量与 config 属性，避免用例受本地配置影响"""
+    for name in ("OLLAMA_SEARCH_API_KEY", "TAVILY_API_KEY", "FIRECRAWL_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr("config.OLLAMA_SEARCH_API_KEY", "", raising=False)
+    monkeypatch.setattr("config.TAVILY_API_KEY", "", raising=False)
+    monkeypatch.setattr("config.FIRECRAWL_API_KEY", "", raising=False)
 
 
 @pytest.fixture
@@ -55,112 +68,182 @@ def ddgs_off(monkeypatch):
     monkeypatch.setattr(web_search, "ddgs_available", lambda: False)
 
 
-# ── Key 三级兜底 ──
+# ── Key 两级兜底（env → config） ──
 
-class TestResolveZhipuKey:
+class TestResolveKeys:
     def test_env_var_wins(self, monkeypatch):
-        monkeypatch.setenv("ZHIPU_API_KEY", "sk-env")
-        assert web_search.resolve_zhipu_key() == "sk-env"
-        assert web_search.zhipu_configured() is True
+        monkeypatch.setenv("OLLAMA_SEARCH_API_KEY", "sk-env")
+        assert web_search.resolve_ollama_key() == "sk-env"
+        assert web_search.ollama_configured() is True
 
-    def test_falls_back_to_db_model(self, monkeypatch):
-        monkeypatch.setattr(
-            "db.model_repo.get_all_models",
-            lambda: [{"api_key": "sk-db", "endpoint": "https://open.bigmodel.cn/api/paas/v4/chat/completions"}],
-        )
-        assert web_search.resolve_zhipu_key() == "sk-db"
+    def test_falls_back_to_config(self, monkeypatch):
+        monkeypatch.setattr("config.OLLAMA_SEARCH_API_KEY", "sk-cfg", raising=False)
+        monkeypatch.delenv("OLLAMA_SEARCH_API_KEY", raising=False)
+        assert web_search.resolve_ollama_key() == "sk-cfg"
 
-    def test_db_model_without_zhipu_endpoint_ignored(self, monkeypatch):
-        monkeypatch.setattr(
-            "db.model_repo.get_all_models",
-            lambda: [{"api_key": "sk-other", "endpoint": "https://api.deepseek.com/v1/chat/completions"}],
-        )
-        assert web_search.resolve_zhipu_key() == ""
-
-    def test_nothing_configured(self, monkeypatch):
-        monkeypatch.setattr("db.model_repo.get_all_models", lambda: [])
-        assert web_search.resolve_zhipu_key() == ""
-        assert web_search.zhipu_configured() is False
+    def test_nothing_configured(self):
+        assert web_search.resolve_ollama_key() == ""
+        assert web_search.ollama_configured() is False
+        assert web_search.tavily_configured() is False
+        assert web_search.firecrawl_configured() is False
 
 
-# ── 智谱独立 Web Search API ──
+# ── Ollama Web Search（免费主路径） ──
 
-class TestZhipuSearch:
+class TestOllamaSearch:
     @pytest.mark.asyncio
-    async def test_parses_search_result(self, monkeypatch):
-        monkeypatch.setenv("ZHIPU_API_KEY", "sk-x")
-        fake = _fake_client(200, ZHIPU_OK)
+    async def test_parses_results_and_request_shape(self, monkeypatch):
+        monkeypatch.setenv("OLLAMA_SEARCH_API_KEY", "sk-x")
+        fake = _fake_client(200, OLLAMA_OK)
         monkeypatch.setattr(web_search.httpx, "AsyncClient", lambda **kw: fake)
 
-        results = await web_search.zhipu_search("测试问题", max_results=5)
+        results = await web_search.ollama_search("测试问题", max_results=5)
 
         assert [r["title"] for r in results] == ["标题A", "标题B"]
-        assert results[0]["url"] == "https://a.com"          # link → url
-        assert results[0]["snippet"] == "摘要 A"             # content → snippet
-        assert results[0]["date"] == "2026-09-01"            # publish_date → date
-        # 请求姿势：独立 web_search 端点 + search_query/search_engine/search_intent
-        body = fake.post.call_args.kwargs["json"]
-        assert fake.post.call_args.args[0] == web_search.ZHIPU_SEARCH_ENDPOINT
-        assert body["search_query"] == "测试问题"
-        assert body["search_engine"] == "search_pro"
-        assert body["search_intent"] is True
-        assert body["count"] == 5
+        assert results[0]["url"] == "https://a.com"
+        assert results[0]["snippet"] == "正文A"          # content → snippet
+        assert results[0]["media"] == "Ollama"
+        # 请求姿势：POST {base}/api/web_search + Bearer 头 + query/max_results
+        assert fake.post.call_args.args[0] == "https://ollama.com/api/web_search"
+        assert fake.post.call_args.kwargs["json"]["query"] == "测试问题"
+        assert fake.post.call_args.kwargs["json"]["max_results"] == 5
+        headers = fake.post.call_args.kwargs["headers"]
+        assert headers["Authorization"] == "Bearer sk-x"
 
     @pytest.mark.asyncio
-    async def test_long_query_truncated_to_70(self, monkeypatch):
-        # 官方限制 search_query ≤ 70 字符，超长会导致参数错误
-        monkeypatch.setenv("ZHIPU_API_KEY", "sk-x")
-        fake = _fake_client(200, {"search_result": []})
+    async def test_max_results_capped_to_10(self, monkeypatch):
+        monkeypatch.setenv("OLLAMA_SEARCH_API_KEY", "sk-x")
+        fake = _fake_client(200, {"results": []})
         monkeypatch.setattr(web_search.httpx, "AsyncClient", lambda **kw: fake)
 
-        await web_search.zhipu_search("长" * 200)
+        await web_search.ollama_search("q", max_results=50)
 
-        assert len(fake.post.call_args.kwargs["json"]["search_query"]) == web_search.SEARCH_QUERY_MAX
-
-    @pytest.mark.asyncio
-    async def test_engine_mapping(self, monkeypatch):
-        monkeypatch.setenv("ZHIPU_API_KEY", "sk-x")
-        fake = _fake_client(200, {"search_result": []})
-        monkeypatch.setattr(web_search.httpx, "AsyncClient", lambda **kw: fake)
-
-        await web_search.zhipu_search("q", engine="quark")
-
-        assert fake.post.call_args.kwargs["json"]["search_engine"] == "search_pro_quark"
+        assert fake.post.call_args.kwargs["json"]["max_results"] == web_search.OLLAMA_MAX_RESULTS
 
     @pytest.mark.asyncio
-    async def test_non_200_raises_with_server_reason(self, monkeypatch):
-        monkeypatch.setenv("ZHIPU_API_KEY", "sk-x")
-        payload = {"error": {"code": "1002", "message": "Authorization Token illegal"}}
+    async def test_snippet_limit_respected(self, monkeypatch):
+        """广泛模式需要更长正文：snippet_limit 参数决定截断上限"""
+        monkeypatch.setenv("OLLAMA_SEARCH_API_KEY", "sk-x")
+        payload = {"results": [{"title": "T", "content": "长" * 1000, "url": "https://a.com"}]}
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", lambda **kw: _fake_client(200, payload))
+
+        strict = await web_search.ollama_search("q", snippet_limit=500)
+        broad = await web_search.ollama_search("q", snippet_limit=900)
+
+        assert len(strict[0]["snippet"]) == 500
+        assert len(broad[0]["snippet"]) == 900
+
+    @pytest.mark.asyncio
+    async def test_non_200_raises_with_actionable_hint(self, monkeypatch):
+        monkeypatch.setenv("OLLAMA_SEARCH_API_KEY", "sk-x")
         monkeypatch.setattr(web_search.httpx, "AsyncClient",
-                            lambda **kw: _fake_client(401, payload))
+                            lambda **kw: _fake_client(401, {"error": "unauthorized"}))
 
         with pytest.raises(web_search.SearchError) as exc:
-            await web_search.zhipu_search("q")
+            await web_search.ollama_search("q")
 
         assert "401" in str(exc.value)
-        assert "Authorization Token illegal" in str(exc.value)
+        assert "ollama.com/settings/keys" in str(exc.value)   # 可行动提示
 
     @pytest.mark.asyncio
-    async def test_no_key_raises_unavailable(self, monkeypatch):
-        monkeypatch.setattr("db.model_repo.get_all_models", lambda: [])
+    async def test_no_key_raises_unavailable(self):
         with pytest.raises(web_search.SearchUnavailable) as exc:
-            await web_search.zhipu_search("q")
-        assert "未配置智谱 API Key" in str(exc.value)
+            await web_search.ollama_search("q")
+        assert "未配置 Ollama" in str(exc.value)
+
+
+# ── Tavily ──
+
+class TestTavilySearch:
+    @pytest.mark.asyncio
+    async def test_parses_results_and_request_shape(self, monkeypatch):
+        monkeypatch.setenv("TAVILY_API_KEY", "tvly-x")
+        fake = _fake_client(200, TAVILY_OK)
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", lambda **kw: fake)
+
+        results = await web_search.tavily_search("测试问题", max_results=8)
+
+        assert results[0]["url"] == "https://a.com"
+        assert results[0]["snippet"] == "正文A"
+        assert results[0]["media"] == "Tavily"
+        body = fake.post.call_args.kwargs["json"]
+        # 固定 basic 档（1 credit/次）：advanced 不开放
+        assert body["search_depth"] == "basic"
+        assert body["include_answer"] is False
+        assert body["max_results"] == 8
+
+    @pytest.mark.asyncio
+    async def test_quota_error_hint(self, monkeypatch):
+        """432 是 Tavily 的额度耗尽码（区别于常规 402）"""
+        monkeypatch.setenv("TAVILY_API_KEY", "tvly-x")
+        monkeypatch.setattr(web_search.httpx, "AsyncClient",
+                            lambda **kw: _fake_client(432, {"detail": "quota exceeded"}))
+
+        with pytest.raises(web_search.SearchError) as exc:
+            await web_search.tavily_search("q")
+
+        assert "432" in str(exc.value)
+        assert "额度" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_no_key_raises_unavailable(self):
+        with pytest.raises(web_search.SearchUnavailable) as exc:
+            await web_search.tavily_search("q")
+        assert "未配置 Tavily" in str(exc.value)
+
+
+# ── Firecrawl ──
+
+class TestFirecrawlSearch:
+    @pytest.mark.asyncio
+    async def test_parses_results_and_request_shape(self, monkeypatch):
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-x")
+        fake = _fake_client(200, FIRECRAWL_OK)
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", lambda **kw: fake)
+
+        results = await web_search.firecrawl_search("测试问题", max_results=6)
+
+        assert results[0]["url"] == "https://a.com"
+        assert results[0]["snippet"] == "正文A"          # description → snippet
+        assert results[0]["media"] == "Firecrawl"
+        body = fake.post.call_args.kwargs["json"]
+        assert body["country"] == "CN"                    # 中文地区定向
+        assert body["sources"] == [{"type": "web"}]
+        assert body["limit"] == 6
+
+    @pytest.mark.asyncio
+    async def test_quota_error_hint(self, monkeypatch):
+        """402 是 Firecrawl 的额度耗尽码"""
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-x")
+        monkeypatch.setattr(web_search.httpx, "AsyncClient",
+                            lambda **kw: _fake_client(402, {"error": "insufficient credits"}))
+
+        with pytest.raises(web_search.SearchError) as exc:
+            await web_search.firecrawl_search("q")
+
+        assert "402" in str(exc.value)
+        assert "firecrawl.dev" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_no_key_raises_unavailable(self):
+        with pytest.raises(web_search.SearchUnavailable) as exc:
+            await web_search.firecrawl_search("q")
+        assert "未配置 Firecrawl" in str(exc.value)
 
 
 # ── 统一入口 web_search_collect ──
 
 class TestWebSearchCollect:
     @pytest.mark.asyncio
-    async def test_zhipu_success(self, monkeypatch):
-        monkeypatch.setenv("ZHIPU_API_KEY", "sk-x")
+    async def test_ollama_success(self, monkeypatch):
+        monkeypatch.setenv("OLLAMA_SEARCH_API_KEY", "sk-x")
         monkeypatch.setattr(web_search.httpx, "AsyncClient",
-                            lambda **kw: _fake_client(200, ZHIPU_OK))
+                            lambda **kw: _fake_client(200, OLLAMA_OK))
 
         outcome = await web_search.web_search_collect("问题")
 
         assert outcome.ok is True
-        assert outcome.provider == "zhipu"
+        assert outcome.provider == "ollama"
         assert outcome.error == ""
         assert len(outcome.sources) == 2
         assert "[1] 标题A" in outcome.text          # 注入模型的编号资料
@@ -173,23 +256,21 @@ class TestWebSearchCollect:
         assert "关键词为空" in outcome.error
 
     @pytest.mark.asyncio
-    async def test_no_backend_configured_reports_actionable_reason(self, ddgs_off, monkeypatch):
-        """★ 回归锚点：未配 Key 且无 ddgs 兜底时，必须给出可行动原因（修复前是静默空列表）"""
-        monkeypatch.setattr("db.model_repo.get_all_models", lambda: [])
-
+    async def test_no_backend_configured_reports_actionable_reason(self, ddgs_off):
+        """★ 回归锚点：全链无 Key 且无 ddgs 时，必须给出可行动原因（修复前是静默空列表）"""
         outcome = await web_search.web_search_collect("问题")
 
         assert outcome.ok is False
         assert outcome.sources == []
         assert outcome.provider == ""
-        assert "未配置智谱 API Key" in outcome.error
+        assert "未配置 Ollama" in outcome.error
         assert "未安装 ddgs" in outcome.error
 
     @pytest.mark.asyncio
-    async def test_falls_back_to_ddgs_when_zhipu_fails(self, monkeypatch):
-        monkeypatch.setenv("ZHIPU_API_KEY", "sk-x")
+    async def test_falls_back_to_ddgs_when_ollama_fails(self, monkeypatch):
+        monkeypatch.setenv("OLLAMA_SEARCH_API_KEY", "sk-x")
         monkeypatch.setattr(web_search.httpx, "AsyncClient",
-                            lambda **kw: _fake_client(500, {"error": {"message": "internal"}}))
+                            lambda **kw: _fake_client(500, {"error": "internal"}))
         monkeypatch.setattr(web_search, "ddgs_available", lambda: True)
 
         async def _fake_ddgs(query, max_results=5):
@@ -203,10 +284,36 @@ class TestWebSearchCollect:
         assert outcome.sources[0]["title"] == "DDG 结果"
 
     @pytest.mark.asyncio
-    async def test_zhipu_ok_returns_zero_keeps_reason(self, monkeypatch):
-        monkeypatch.setenv("ZHIPU_API_KEY", "sk-x")
+    async def test_ollama_fails_tavily_takes_over(self, monkeypatch):
+        """链路顺序：Ollama 失败 → 配了 Key 的 Tavily 接棒（不到 DDGS）"""
+        monkeypatch.setenv("OLLAMA_SEARCH_API_KEY", "sk-x")
+        monkeypatch.setenv("TAVILY_API_KEY", "tvly-x")
+
+        def _client_factory(**kw):
+            return _fake_client(500, {"error": "internal"})
+
+        async def _fake_tavily(query, **kw):
+            return [{"title": "Tavily 结果", "url": "https://t.com", "snippet": "s", "media": "Tavily", "date": ""}]
+
+        monkeypatch.setattr(web_search.httpx, "AsyncClient", _client_factory)
+        monkeypatch.setattr(web_search, "tavily_search", _fake_tavily)
+        monkeypatch.setattr(web_search, "ddgs_available", lambda: True)
+
+        async def _fail_ddgs(query, max_results=5):
+            raise AssertionError("不应走到 DDGS")
+
+        monkeypatch.setattr(web_search, "ddgs_search", _fail_ddgs)
+
+        outcome = await web_search.web_search_collect("问题")
+
+        assert outcome.provider == "tavily"
+        assert outcome.sources[0]["title"] == "Tavily 结果"
+
+    @pytest.mark.asyncio
+    async def test_ollama_ok_returns_zero_keeps_reason(self, monkeypatch):
+        monkeypatch.setenv("OLLAMA_SEARCH_API_KEY", "sk-x")
         monkeypatch.setattr(web_search.httpx, "AsyncClient",
-                            lambda **kw: _fake_client(200, {"search_result": []}))
+                            lambda **kw: _fake_client(200, {"results": []}))
         monkeypatch.setattr(web_search, "ddgs_available", lambda: True)
 
         async def _fake_ddgs(query, max_results=5):
@@ -223,20 +330,23 @@ class TestWebSearchCollect:
     @pytest.mark.asyncio
     async def test_search_web_delegates_and_swallows_to_list(self, monkeypatch):
         """search_web 保持既有签名（routers/search.py 复用）：成功给 list，失败给 []"""
-        monkeypatch.setenv("ZHIPU_API_KEY", "sk-x")
+        monkeypatch.setenv("OLLAMA_SEARCH_API_KEY", "sk-x")
         monkeypatch.setattr(web_search.httpx, "AsyncClient",
-                            lambda **kw: _fake_client(200, ZHIPU_OK))
+                            lambda **kw: _fake_client(200, OLLAMA_OK))
 
         assert len(await web_search.search_web("q")) == 2
 
 
 class TestDescribeSearchBackends:
     def test_reports_availability(self, monkeypatch):
-        monkeypatch.setattr(web_search, "zhipu_configured", lambda: False)
+        monkeypatch.setattr(web_search, "ollama_configured", lambda: True)
+        monkeypatch.setattr(web_search, "tavily_configured", lambda: False)
+        monkeypatch.setattr(web_search, "firecrawl_configured", lambda: False)
         monkeypatch.setattr(web_search, "ddgs_available", lambda: True)
         monkeypatch.setattr(web_search, "resolve_search_proxy", lambda: "")
         assert web_search.describe_search_backends() == {
-            "zhipu": None, "ddgs": "available", "proxy": None}
+            "ollama": "configured", "tavily": None, "firecrawl": None,
+            "ddgs": "available", "proxy": None}
 
 
 class TestResolveSearchProxy:
@@ -289,6 +399,9 @@ class TestResolveSearchProxy:
 
     @pytest.mark.asyncio
     async def test_timeout_message_is_actionable(self, monkeypatch):
+        monkeypatch.setattr(web_search, "ollama_configured", lambda: False)
+        monkeypatch.setattr(web_search, "tavily_configured", lambda: False)
+        monkeypatch.setattr(web_search, "firecrawl_configured", lambda: False)
         monkeypatch.setattr(web_search, "ddgs_available", lambda: True)
 
         async def _timeout(query, max_results=5):
@@ -302,13 +415,20 @@ class TestResolveSearchProxy:
 
 
 class TestNoDuplicateSearchImplementation:
-    def test_research_processor_has_no_inline_zhipu_call(self):
-        """回归锚点：深度研究不得再内联第二份智谱调用（单一事实源）"""
+    def test_research_processor_has_no_inline_search_call(self):
+        """回归锚点：深度研究不得再内联第二份搜索调用（单一事实源）"""
         import services.research_processor as rp
 
         assert not hasattr(rp, "_zhipu_web_search")
         assert not hasattr(rp, "web_search_collect")
-        assert not hasattr(rp, "ZHIPU_ENDPOINT")
         assert hasattr(rp, "_expand_topic")
         src = rp.__doc__ or ""
         assert "web_search" in src
+
+    def test_web_search_module_has_no_zhipu_leftover(self):
+        """回归锚点：智谱搜索已整体移除（2026-10-07 用户决定弃用），不得残留符号"""
+        assert not hasattr(web_search, "zhipu_search")
+        assert not hasattr(web_search, "resolve_zhipu_key")
+        assert not hasattr(web_search, "zhipu_configured")
+        assert not hasattr(web_search, "ZHIPU_SEARCH_ENDPOINT")
+        assert not hasattr(web_search, "ENGINE_MAP")
