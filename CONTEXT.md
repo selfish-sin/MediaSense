@@ -105,7 +105,7 @@ python main.py
 
 ## 当前状态
 
-- 四项质量改进已落地（2026-10-07，逐单元提交，后端 1021 / 前端 279 测试 + verify 全绿）：①强制重试备份失败/校验不过即中止、不删任何文件（`55480ab`）；②结果页来源展示 `transcript_meta`（jobs 新列 + JobResponse + `TranscriptProvenance.vue`，onAiDone 终态后 `refreshMeta` 补拉）；③长音频分片检查点断点恢复（每片落盘、失败只重跑缺失片，`bypass_cache` 不读）；④真实内容质量评测框架（`eval_quality.py`，真实跑批待用户确认素材/参考文本与调用范围）。**业务改动需重启服务生效，本轮未重启/push。**
+- 四项质量改进已落地（2026-10-07，逐单元提交，后端 1024 / 前端 279 测试 + verify 全绿）：①强制重试备份失败/校验不过即中止、不删任何文件（`55480ab`）；②结果页来源展示 `transcript_meta`（jobs 新列 + JobResponse + `TranscriptProvenance.vue`，onAiDone 终态后 `refreshMeta` 补拉）；③长音频分片检查点断点恢复（每片落盘、失败只重跑缺失片，`bypass_cache` 不读）；④真实内容质量评测框架（`eval_quality.py`，真实跑批待用户确认素材/参考文本与调用范围）。**复查修复**：遗留分片 WAV 复用前 ffprobe 校验时长（截断自愈）、断点续传扫描跳过 `*_chunkNNN.wav`、retry 清空旧 `transcript_meta`、检查点清理免疫 glob 特殊字符。**业务改动需重启服务生效，本轮未重启/push。**
 
 - 质量改进（2026-10-07）：**979 后端 / 269 前端测试、ruff/eslint/build 全绿**，干净锁定环境同样通过且零测试告警。AI 缓存刷新、流式断连、缓存故障与 ASR v2 模型身份均已修；新增 19 条回归（较初始 960）。依赖锁/Windows CI 已配置、lifespan 保留启动恢复、两项历史任务已归档、索引排除构建/归档。隔离 localhost 实测启动、队列、OpenAPI、SPA、CORS 通过。详见 `docs/quality-audit-2026-10-07.md`；业务改动需重启服务生效，本轮未重启/push。
 
