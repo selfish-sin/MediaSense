@@ -37,7 +37,7 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `backend/services/local_asr.py` | **本地引擎注册表**（`LOCAL_ENGINES` 单一事实源，当前只注册 `firered`）+ FireRedASR2-AED 解码（sherpa-onnx int8/CPU）：就绪判定/文件明细/占用/后台下载（含取消）/删除/引擎级锁按 key 通用；管线=按需下载→VAD 分段（+padding）→段间并行解码→标点恢复→句级写盘 | 改本地引擎清单、FireRed 模型下载或 VAD/标点参数 |
 | `.trellis/spec/backend/transcription-chain.md` | **识别链全链路权威文档**：输入四策略/字幕优先防错位/引擎回退链/三引擎内部/分片补录/横评结论/参数速查/坑点汇总 | 改转录链任何环节前必读 |
 | `.trellis/spec/backend/ai-call-cache.md` | AI/ASR v2 调用与缓存边界：忽略缓存仅跳过读、成功仍写回；传不传 state 都守住正文后不重试；缓存建连失败告警降级 | 改 AI 调用、流式重试或缓存容错或转录模型身份时 |
-| `docs/quality-audit-2026-10-07.md` | 质量检查证据、三项小修复、ASR 缓存参数遗漏复现与后续优化顺序 | 安排下一轮质量改进、修转录缓存时 |
+| `docs/quality-audit-2026-10-07.md` | 已完成质量改进/验收证据、效果说明及后续只读发现（强制重试备份保护待修） | 排查缓存、强制重试，或安排下一轮质量改进时 |
 | `backend/services/web_search.py` | **联网检索唯一实现**（追问 + 深度研究共用）：智谱独立 Web Search API（`POST /api/paas/v4/web_search`，非 chat+tools 老姿势）优先 → DDGS 免 Key 兜底；`resolve_zhipu_key()` 三级兜底（env→config→DB bigmodel 模型）、`resolve_search_proxy()`（ddgs 不读 HTTP_PROXY 必须显式传）、`web_search_collect()` 返回 `SearchOutcome`（sources/text/provider/error，失败不静默） | 改联网搜索、追问引用来源、深度研究检索时 |
 | `backend/services/ai_cache.py` | AI/ASR 缓存读写单点；失败告警降级、忽略缓存仍写回；ASR v2 身份含模型上下文，记录实际整体引擎 | 改缓存键、读写、故障边界时 |
 | `backend/services/` | 分段、摘要、导出、搜索等处理（`prompt_builder.py` 模块化提示词 9 维度含输出语言）。**`ai_processor.py` 是四个 AI 入口（总结/校正/打标签/思维导图）的兜底编排中心**：`_call_ai`（流式，失败返回 `[处理失败: ...]` 哨兵串而非抛异常，内置 AI 结果缓存——命中零 token、`bypass_cache=True` 跳过）、`_call_ai_with_fallback`（流式，**哨兵失败或零正文都换模型**，只在一字未吐时才换）、`run_with_fallback`（非流式，同样零正文换候选）、`is_call_failed`/`_strip_sentinel`（哨兵串判定，`''` 恒 False）、`ai_process`（跨批次记忆 `preferred_model`）、`correct_transcript_with_fallback` | 改 AI 调用、失败契约、缓存语义或换模型边界时 |
@@ -102,6 +102,8 @@ python main.py
 存储清理默认 dry-run；应用删除需要脚本的 `--apply --confirm DELETE`。staged 默认 72 小时、orphan 14 天、export/media 7 天、quarantine 30 天，具体阈值可由环境变量覆盖。不要把数据库、下载媒体、日志、模型或 API key 写入文档/Git。
 
 ## 当前状态
+
+- 后续只读复核（2026-10-07）：强制重试 force=True 的输入备份失败后仍可能清理 job_dir，目录内素材存在丢失风险；尚未故障注入/修复。建议先补“备份失败停止删除”保护，再做结果来源展示、真实内容质量样本集及长视频分片恢复。详见质量报告末节。
 
 - 质量改进（2026-10-07）：**979 后端 / 269 前端测试、ruff/eslint/build 全绿**，干净锁定环境同样通过且零测试告警。AI 缓存刷新、流式断连、缓存故障与 ASR v2 模型身份均已修；新增 19 条回归（较初始 960）。依赖锁/Windows CI 已配置、lifespan 保留启动恢复、两项历史任务已归档、索引排除构建/归档。隔离 localhost 实测启动、队列、OpenAPI、SPA、CORS 通过。详见 `docs/quality-audit-2026-10-07.md`；业务改动需重启服务生效，本轮未重启/push。
 
