@@ -50,13 +50,14 @@ class TestBilibiliPaths:
             m_tr = stack.enter_context(
                 patch('services.transcriber.transcribe_audio', new_callable=AsyncMock,
                       return_value=('t.srt', 't.txt', 3)))
-            srt, txt, seg, _title, _platform, files = await _handle_url_input(
+            srt, txt, seg, _title, _platform, files, meta = await _handle_url_input(
                 BILI_URL, tmp_path, MagicMock(), 'j1', _opts(), 'base', False, 'zh')
 
         m_dl.assert_called_once()
         m_tr.assert_called_once()
         assert files['audio'] == str(audio)
         assert (srt, txt, seg) == ('t.srt', 't.txt', 3)
+        assert meta == {'source': 'transcription'}
 
     async def test_subtitle_check_fail_downloads_full_audio_for_transcribe(self, tmp_path):
         """B站字幕抽查失败：丢弃错位字幕；抽查只下片段，转录时完整音频重新下载。"""
@@ -86,7 +87,7 @@ class TestBilibiliPaths:
             m_tr = stack.enter_context(
                 patch('services.transcriber.transcribe_audio', new_callable=AsyncMock,
                       return_value=('t.srt', 't.txt', 5)))
-            _srt, _txt, _seg, _title, _platform, files = await _handle_url_input(
+            _srt, _txt, _seg, _title, _platform, files, _meta = await _handle_url_input(
                 BILI_URL, tmp_path, MagicMock(), 'j1', _opts(), 'base', False, 'zh')
 
         # 两次下载：抽查片段（max_seconds=90，子目录）+ 转录完整音频（片段不复用）
@@ -124,7 +125,7 @@ class TestBilibiliPaths:
                       return_value=(str(sample), '', '')))
             m_tr = stack.enter_context(
                 patch('services.transcriber.transcribe_audio', new_callable=AsyncMock))
-            srt, _txt, _seg, _title, _platform, files = await _handle_url_input(
+            srt, _txt, _seg, _title, _platform, files, meta = await _handle_url_input(
                 BILI_URL, tmp_path, MagicMock(), 'j1', _opts(), 'base', False, 'zh')
 
         m_tr.assert_not_called()                     # 字幕可用，不转录
@@ -132,6 +133,8 @@ class TestBilibiliPaths:
         m_dl.assert_called_once()                    # 抽查只下载一次
         assert m_dl.call_args.kwargs.get('max_seconds') == 90
         assert 'audio' not in files                  # 片段不作为素材登记
+        assert meta == {'source': 'platform_subtitle', 'subtitle_from': 'bilibili',
+                        'subtitle_check': 'passed'}
 
 
 class TestNonBilibiliPaths:
@@ -157,7 +160,7 @@ class TestNonBilibiliPaths:
             stack.enter_context(patch('socket_handlers.check_cancelled', return_value=False))
             stack.enter_context(patch('main.emit_log', new_callable=AsyncMock))
             stack.enter_context(patch('main.update_job'))
-            _srt, _txt, _seg, _title, _platform, files = await _handle_url_input(
+            _srt, _txt, _seg, _title, _platform, files, _meta = await _handle_url_input(
                 'https://www.youtube.com/watch?v=test', tmp_path, MagicMock(), 'j1',
                 _opts(), 'base', False, 'zh')
 
@@ -183,7 +186,7 @@ class TestRetryResume:
             m_tr = stack.enter_context(
                 patch('services.transcriber.transcribe_audio', new_callable=AsyncMock,
                       return_value=('t.srt', 't.txt', 2)))
-            _srt, _txt, _seg, _title, _platform, files = await _handle_url_input(
+            _srt, _txt, _seg, _title, _platform, files, _meta = await _handle_url_input(
                 BILI_URL, tmp_path, MagicMock(), 'j1', _opts(_retry=True), 'base', False, 'zh')
 
         m_dl.assert_not_called()
@@ -206,9 +209,142 @@ class TestRetryResume:
             stack.enter_context(
                 patch('services.transcriber.transcribe_audio', new_callable=AsyncMock,
                       return_value=('t.srt', 't.txt', 2)))
-            _srt, _txt, _seg, _title, _platform, files = await _handle_url_input(
+            _srt, _txt, _seg, _title, _platform, files, _meta = await _handle_url_input(
                 BILI_URL, tmp_path, MagicMock(), 'j1', _opts(_retry=True), 'base', False, 'zh')
 
         m_dl.assert_not_called()
         assert files['video'] == str(existing)
         assert 'audio' not in files
+
+
+class TestTranscriptMeta:
+    """结果可解释性（2026-10-07）：transcript_meta 覆盖来源/引擎/缓存/降级。"""
+
+    async def test_bilibili_subtitle_check_skipped_when_disabled(self, tmp_path):
+        """subtitle_check=false：直接采用平台字幕，meta 标记 skipped。"""
+        from main import _handle_url_input
+
+        sub_srt = tmp_path / 'bilibili_subtitle.srt'
+        sub_srt.write_text('1\n00:00:00,000 --> 00:00:06,000\n字幕\n', encoding='utf-8')
+        sub_txt = tmp_path / 'bilibili_subtitle.txt'
+        sub_txt.write_text('[00:00 - 00:06] 字幕\n', encoding='utf-8')
+
+        with ExitStack() as stack:
+            _enter_bili_common(stack)
+            stack.enter_context(
+                patch('services.downloader.extract_bilibili_subtitles', new_callable=AsyncMock,
+                      return_value={'success': True, 'srt_path': sub_srt, 'txt_path': sub_txt,
+                                    'title': '标题', 'message': 'ok'}))
+            _srt, _txt, _seg, _title, _platform, _files, meta = await _handle_url_input(
+                BILI_URL, tmp_path, MagicMock(), 'j1', _opts(subtitle_check=False),
+                'base', False, 'zh')
+
+        assert meta == {'source': 'platform_subtitle', 'subtitle_from': 'bilibili',
+                        'subtitle_check': 'skipped'}
+
+    async def test_bilibili_subtitle_check_error_keeps_subtitle_meta(self, tmp_path):
+        """抽查异常按原结果使用字幕：meta 标记 unavailable（可解释性优先）。"""
+        from main import _handle_url_input
+
+        sub_srt = tmp_path / 'bilibili_subtitle.srt'
+        sub_srt.write_text('1\n00:00:00,000 --> 00:00:06,000\n字幕\n', encoding='utf-8')
+        sub_txt = tmp_path / 'bilibili_subtitle.txt'
+        sub_txt.write_text('[00:00 - 00:06] 字幕\n', encoding='utf-8')
+
+        with ExitStack() as stack:
+            _enter_bili_common(stack)
+            stack.enter_context(
+                patch('services.downloader.extract_bilibili_subtitles', new_callable=AsyncMock,
+                      return_value={'success': True, 'srt_path': sub_srt, 'txt_path': sub_txt,
+                                    'title': '标题', 'message': 'ok'}))
+            stack.enter_context(
+                patch('services.downloader.download_video', new_callable=AsyncMock,
+                      side_effect=RuntimeError('下载器不可用')))
+            _srt, _txt, _seg, _title, _platform, _files, meta = await _handle_url_input(
+                BILI_URL, tmp_path, MagicMock(), 'j1', _opts(), 'base', False, 'zh')
+
+        assert meta == {'source': 'platform_subtitle', 'subtitle_from': 'bilibili',
+                        'subtitle_check': 'unavailable'}
+
+    async def test_youtube_subtitle_success_records_source(self, tmp_path):
+        """YouTube 原文字幕抓取成功：meta 标记 platform_subtitle/youtube（无抽查环节）。"""
+        from main import _handle_url_input
+
+        sub_srt = tmp_path / 'yt.srt'
+        sub_srt.write_text('1\n00:00:00,000 --> 00:00:06,000\ncc\n', encoding='utf-8')
+        sub_txt = tmp_path / 'yt.txt'
+        sub_txt.write_text('cc\n', encoding='utf-8')
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch('services.downloader.detect_platform', return_value=('YouTube', True)))
+            stack.enter_context(
+                patch('services.downloader.extract_youtube_subtitles', new_callable=AsyncMock,
+                      return_value={'success': True, 'srt_path': sub_srt, 'txt_path': sub_txt,
+                                    'title': 'YT 标题', 'message': 'ok'}))
+            _srt, _txt, _seg, _title, _platform, _files, meta = await _handle_url_input(
+                'https://www.youtube.com/watch?v=test', tmp_path, MagicMock(), 'j1',
+                _opts(), 'base', False, 'zh')
+
+        assert meta == {'source': 'platform_subtitle', 'subtitle_from': 'youtube'}
+
+    async def test_engine_degradation_passthrough_in_meta(self, tmp_path):
+        """请求 cloud 实际落 cloud_free：transcribe_audio 的 info 原样并入 meta。"""
+        from main import _handle_url_input
+
+        audio = tmp_path / 'v.m4a'
+        audio.write_bytes(b'x' * 2048)
+
+        async def fake_transcribe(*args, **kwargs):
+            info = kwargs.get('info')
+            if info is not None:
+                info.update({
+                    'engine': 'cloud_free', 'engine_label': '云端 XingChen（免费）',
+                    'requested_engine': 'cloud', 'cache': 'miss', 'degraded': True,
+                })
+            return ('t.srt', 't.txt', 3)
+
+        with ExitStack() as stack:
+            _enter_bili_common(stack)
+            stack.enter_context(
+                patch('services.downloader.extract_bilibili_subtitles', new_callable=AsyncMock,
+                      return_value={'success': False, 'message': 'no_subtitle'}))
+            stack.enter_context(
+                patch('services.downloader.download_video', new_callable=AsyncMock,
+                      return_value=(str(audio), '标题', '哔哩哔哩')))
+            stack.enter_context(
+                patch('services.transcriber.transcribe_audio',
+                      new=AsyncMock(side_effect=fake_transcribe)))
+            _srt, _txt, _seg, _title, _platform, _files, meta = await _handle_url_input(
+                BILI_URL, tmp_path, MagicMock(), 'j1', _opts(transcribe_engine='cloud'),
+                'base', False, 'zh')
+
+        assert meta['source'] == 'transcription'
+        assert meta['engine'] == 'cloud_free'
+        assert meta['requested_engine'] == 'cloud'
+        assert meta['degraded'] is True
+        assert meta['cache'] == 'miss'
+
+    async def test_resume_reuse_records_resume_meta(self, tmp_path):
+        """断点续传复用已有转录文件：meta 标记 resume=true，不再转录。"""
+        from main import _handle_url_input
+
+        existing = tmp_path / 'prev_audio.m4a'
+        existing.write_bytes(b'x' * 4096)
+        (tmp_path / 'prev_audio.srt').write_text(
+            '1\n00:00:00,000 --> 00:00:02,000\n内容充实的字幕行\n' * 10, encoding='utf-8')
+        (tmp_path / 'prev_audio.txt').write_text('内容充实的字幕行\n' * 20, encoding='utf-8')
+
+        with ExitStack() as stack:
+            _enter_bili_common(stack)
+            stack.enter_context(
+                patch('services.downloader.extract_bilibili_subtitles', new_callable=AsyncMock,
+                      return_value={'success': False, 'message': 'no_subtitle'}))
+            m_tr = stack.enter_context(
+                patch('services.transcriber.transcribe_audio', new_callable=AsyncMock))
+            _srt, _txt, _seg, _title, _platform, _files, meta = await _handle_url_input(
+                BILI_URL, tmp_path, MagicMock(), 'j1', _opts(_retry=True), 'base', False, 'zh')
+
+        m_tr.assert_not_called()
+        assert meta == {'source': 'transcription', 'resume': True}
+        assert existing.exists()

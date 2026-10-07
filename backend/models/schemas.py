@@ -65,6 +65,9 @@ class JobResponse(BaseModel):
     #   不声明的话结果页的「校正统计」告警/改动明细和「AI 调用链」会永远空白。
     correction_stats: Optional[Dict[str, Any]] = None
     ai_call_chain: Optional[List[Dict[str, Any]]] = None
+    # ★ 转录来源元数据（2026-10-07 结果可解释性）：字幕/识别来源、实际引擎、
+    #   缓存复用、降级标记。历史任务为 null，前端不渲染来源说明。
+    transcript_meta: Optional[Dict[str, Any]] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 

@@ -83,6 +83,17 @@ export const useJobStore = defineStore('job', () => {
   const jobError = ref('')
   // AI 调用链（兜底环）：[{model, ok, reason}]，仅在发生换模型重试时有值
   const aiCallChain = ref([])
+  // 转录来源元数据（2026-10-07 结果可解释性）：{source, engine?, cache?, degraded?, ...}
+  // 历史任务为 null → 结果页不渲染来源说明
+  const transcriptMeta = ref(null)
+
+  // ai_call_chain / transcript_meta 都可能是 JSON 字符串或已解析对象，统一归一化
+  function normalizeJsonField(value) {
+    if (typeof value === 'string') {
+      try { return JSON.parse(value) } catch { return null }
+    }
+    return value ?? null
+  }
 
   // 日志持久化节流：进度日志高频到达，合并为一次写（trailing debounce）
   let logsSaveTimer = null
@@ -137,6 +148,7 @@ export const useJobStore = defineStore('job', () => {
     jobTitle.value = ''
     jobError.value = ''
     aiCallChain.value = []
+    transcriptMeta.value = null
     clearStorage()
   }
 
@@ -330,6 +342,7 @@ export const useJobStore = defineStore('job', () => {
         try { chain = JSON.parse(chain) } catch { chain = [] }
       }
       aiCallChain.value = Array.isArray(chain) ? chain : []
+      transcriptMeta.value = normalizeJsonField(job.transcript_meta)
       resultText.value = job.result_text || ''
       // 恢复预览文本（preview 状态）
       if (job.status === 'preview' && job.preview_text) {
@@ -373,6 +386,26 @@ export const useJobStore = defineStore('job', () => {
     }
   }
 
+  /**
+   * 轻量刷新来源信息（2026-10-07 结果可解释性）：
+   * 流式总结任务完成时不走 loadJob（避免扰动流式状态），但 transcript_meta /
+   * ai_call_chain 只有 GET /api/jobs/{id} 才有——完成/失败后补拉一次。
+   * 只更新这两个展示字段，不碰 resultText/logs/进度。
+   */
+  async function refreshMeta(jobId) {
+    try {
+      const job = await jobsApi.get(jobId)
+      let chain = job.ai_call_chain
+      if (typeof chain === 'string') {
+        try { chain = JSON.parse(chain) } catch { chain = [] }
+      }
+      aiCallChain.value = Array.isArray(chain) ? chain : []
+      transcriptMeta.value = normalizeJsonField(job.transcript_meta)
+    } catch {
+      // 来源信息拉取失败不影响主流程；结果页显示为无来源记录
+    }
+  }
+
   return {
     // 状态
     currentJobId,
@@ -387,6 +420,7 @@ export const useJobStore = defineStore('job', () => {
     jobTitle,
     jobError,
     aiCallChain,
+    transcriptMeta,
     // 动作
     reset,
     addLog,
@@ -401,6 +435,7 @@ export const useJobStore = defineStore('job', () => {
     setFailed,
     submitJob,
     loadJob,
+    refreshMeta,
     tryRestore,
     saveState,
   }

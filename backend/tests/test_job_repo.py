@@ -216,6 +216,18 @@ class TestUpdateJob:
         assert job["files"]["srt"] == "/tmp/x.srt"
         assert "tag1" in job["tags"]
 
+    def test_update_transcript_meta_roundtrip(self):
+        """transcript_meta 必须同时进 update_job 序列化表与 _row_to_dict 反序列化表。"""
+        jid = create_job(input_type="url", input_url="x")
+        meta = {"source": "transcription", "engine": "cloud_free",
+                "requested_engine": "cloud", "cache": "miss", "degraded": True}
+        assert update_job(jid, transcript_meta=meta)
+        job = get_job(jid)
+        assert job["transcript_meta"] == meta
+        # 未设置的旧任务读回应是 None（不是字符串 'null'）
+        other = create_job(input_type="url", input_url="y")
+        assert get_job(other)["transcript_meta"] is None
+
     def test_update_nonexistent(self):
         assert update_job("no", title="x") is False
 

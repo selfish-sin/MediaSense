@@ -12,6 +12,7 @@ import { buildRerunRoute, buildRestoreRoute, getJobActionModel, buildSamePromptP
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
 import ResummarizeControl from '../components/ResummarizeControl.vue'
 import AiCallChain from '../components/AiCallChain.vue'
+import TranscriptProvenance from '../components/TranscriptProvenance.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 import {
   onAiToken, onAiDone, onAiThinking,
@@ -635,6 +636,12 @@ async function copyTranscript() {
         <span v-else style="color: var(--app-text-secondary);">本地文件导入，无网页链接</span>
       </el-descriptions-item>
     </el-descriptions>
+    </el-card>
+
+    <!-- ★ 转录来源说明（2026-10-07 结果可解释性）：与首页结果面板共用 TranscriptProvenance。
+         独立成卡：失败任务没有结果卡片，但"这份结果怎么来的"失败时同样该被看见。 -->
+    <el-card v-if="job?.transcript_meta" class="app-card" shadow="never">
+      <TranscriptProvenance :meta="job.transcript_meta" />
     </el-card>
 
     <!-- ★ AI 调用链（兜底环）：与首页结果面板共用 AiCallChain，形态/措辞完全一致。

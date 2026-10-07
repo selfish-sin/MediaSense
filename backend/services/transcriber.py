@@ -1023,6 +1023,7 @@ async def transcribe_audio(
     device: str = 'auto',
     engine: str = 'cloud_free',
     bypass_cache: bool = False,
+    info: Optional[dict] = None,
 ) -> Tuple[str, str, int]:
     """
     异步转录音频（在线程池中运行同步引擎，云端/本地由 engine 路由）
@@ -1032,6 +1033,10 @@ async def transcribe_audio(
 
     bypass_cache（2026-10-06）：True 跳过 ASR 缓存**读取**（用户勾了"忽略缓存"，
     缓存不全/有害时强制重新识别）；重新生成的结果仍回写缓存池修复旧条目。
+
+    info（2026-10-07 结果可解释性）：可选出参 dict，成功路径回填本次识别的来源信息——
+    engine（实际整体引擎）/ engine_label / requested_engine / cache（hit|miss|bypassed）/
+    degraded（实际引擎≠请求引擎）。失败路径不写入，调用方以空 dict 兜底。
     """
     engine = engine if engine in ENGINE_VALUES else 'cloud_free'
     if cancel_check and cancel_check():
@@ -1065,6 +1070,16 @@ async def transcribe_audio(
             cache_key=cache_key,
         )
         if _cached:
+            if info is not None:
+                info.update({
+                    'engine': _cached['engine'],
+                    'engine_label': engine_label(_cached['engine']),
+                    'requested_engine': engine,
+                    'requested_engine_label': engine_label(engine),
+                    'cache': 'hit',
+                    'degraded': False,
+                    'model_size': model_size if _cached['engine'] == 'local' else None,
+                })
             if sio:
                 from socket_handlers import emit_progress, emit_log
                 await emit_log(sio, job_id,
@@ -1174,6 +1189,20 @@ async def transcribe_audio(
         await emit_log(sio, job_id, f'✅ 转录完成: 共 {result[2]} 段')
         await emit_log(sio, job_id, f'📄 SRT: {Path(result[0]).name}')
         await emit_log(sio, job_id, f'📄 TXT: {Path(result[1]).name}')
+
+    # 结果可解释性（2026-10-07）：实际引擎来自 execution_state（回退链落点），
+    # 与请求引擎不同即发生了降级；缓存读取被 bypass 时标记 bypassed 而非 miss
+    if info is not None:
+        _actual = execution_state.get('engine', engine)
+        info.update({
+            'engine': _actual,
+            'engine_label': engine_label(_actual),
+            'requested_engine': engine,
+            'requested_engine_label': engine_label(engine),
+            'cache': 'bypassed' if bypass_cache else 'miss',
+            'degraded': _actual != engine,
+            'model_size': model_size if _actual == 'local' else None,
+        })
 
     # ★ 转录成功结果入缓存池（2026-10-06）：键按音频内容哈希，下次同音频同引擎直接复用
     try:

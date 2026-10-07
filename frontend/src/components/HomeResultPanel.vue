@@ -17,6 +17,7 @@ import { useRafMarkdown } from '../composables/useMarkdownRender'
 import { createFailureNotifier } from '../utils/errorNotice'
 import ResummarizeControl from './ResummarizeControl.vue'
 import AiCallChain from './AiCallChain.vue'
+import TranscriptProvenance from './TranscriptProvenance.vue'
 
 const jobStore = useJobStore()
 const settings = useSettingsStore()
@@ -343,6 +344,10 @@ defineExpose({ reset })
          兜底环最怕"配了却看不见有没有用"——这里告诉用户这次实际调了谁、哪个挂了、为什么。
          形态与结果详情页共用 AiCallChain 组件，两处不会跑偏。 -->
     <AiCallChain :chain="jobStore.aiCallChain" />
+
+    <!-- ★ 转录来源说明（2026-10-07 结果可解释性）：字幕/识别、实际引擎、缓存复用、降级。
+         与结果详情页共用 TranscriptProvenance 组件。 -->
+    <TranscriptProvenance :meta="jobStore.transcriptMeta" />
 
     <!-- 无结果时的空状态（失败态不说"提交任务后在此展示"，避免误导） -->
     <el-empty

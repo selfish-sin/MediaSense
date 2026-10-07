@@ -241,6 +241,15 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
+    # ★ 转录来源元数据（迁移：旧 jobs 表没有，2026-10-07 结果可解释性）
+    #   JSON：{source, subtitle_from?, subtitle_check?, engine?, engine_label?,
+    #          requested_engine?, cache?, resume?, degraded?, model_size?}
+    #   —— 结果页「这份结果怎么来的」：字幕/识别、实际引擎、缓存复用、降级。
+    try:
+        cursor.execute("ALTER TABLE jobs ADD COLUMN transcript_meta TEXT")
+    except sqlite3.OperationalError:
+        pass
+
     # ★ 模块化提示词覆盖表（TemplatesView 编辑器写入）
     #   用户可覆盖任意维度任意模块的 template 文本，build_modular_prompt 优先读取
     cursor.execute("""

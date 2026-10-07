@@ -4389,6 +4389,18 @@
             ],
             "title": "Ai Call Chain"
           },
+          "transcript_meta": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transcript Meta"
+          },
           "created_at": {
             "anyOf": [
               {

@@ -537,3 +537,73 @@ class TestEngineValuesAndChains:
         from services import transcriber
         for fn in (transcriber._transcribe_sync, transcriber.transcribe_audio):
             assert inspect.signature(fn).parameters['engine'].default == 'cloud_free'
+
+
+# ============ 结果可解释性：info 出参（2026-10-07） ============
+
+class TestTranscribeInfoOutParam:
+    """transcribe_audio 的 info 出参：实际引擎/缓存命中/降级标记回填。"""
+
+    async def test_info_records_actual_engine_and_cache_miss(self, monkeypatch):
+        from services import transcriber
+        monkeypatch.setattr(transcriber, '_transcribe_sync', lambda **kw: ('a.srt', 'a.txt', 1))
+        info = {}
+        await transcriber.transcribe_audio('a.wav', engine='cloud_free', info=info)
+
+        assert info['engine'] == 'cloud_free'
+        assert info['requested_engine'] == 'cloud_free'
+        assert info['engine_label'] == '云端 XingChen（免费）'
+        assert info['cache'] == 'miss'
+        assert info['degraded'] is False
+        assert info['model_size'] is None
+
+    async def test_info_records_degradation_and_local_model_size(self, monkeypatch):
+        from services import transcriber
+
+        def fake_sync(**kw):
+            kw['execution_state']['engine'] = 'local'
+            return ('a.srt', 'a.txt', 1)
+
+        monkeypatch.setattr(transcriber, '_transcribe_sync', fake_sync)
+        info = {}
+        await transcriber.transcribe_audio('a.wav', engine='cloud_free', model_size='medium', info=info)
+
+        assert info['engine'] == 'local'
+        assert info['requested_engine'] == 'cloud_free'
+        assert info['degraded'] is True
+        assert info['model_size'] == 'medium'
+
+    async def test_info_records_cache_hit(self, monkeypatch, tmp_path):
+        from services import transcriber, ai_cache
+        # conftest 会话级 fixture 默认关缓存（防跨用例污染），本用例显式打开
+        monkeypatch.setattr('config.AI_CACHE_ENABLED', True)
+        audio = tmp_path / 'a.wav'
+        audio.write_bytes(b'x' * 2048)
+        monkeypatch.setattr(ai_cache, 'lookup_transcription', lambda *a, **kw: {
+            'srt_path': 'c.srt', 'txt_path': 'c.txt', 'seg_count': 5,
+            'engine': 'cloud_free', 'created_at': '2026-10-07 10:00:00',
+        })
+        info = {}
+        result = await transcriber.transcribe_audio(str(audio), engine='cloud_free', info=info)
+
+        assert result == ('c.srt', 'c.txt', 5)
+        assert info['cache'] == 'hit'
+        assert info['engine'] == 'cloud_free'
+        assert info['degraded'] is False
+
+    async def test_info_records_bypassed_cache(self, monkeypatch):
+        from services import transcriber, ai_cache
+        monkeypatch.setattr(transcriber, '_transcribe_sync', lambda **kw: ('a.srt', 'a.txt', 1))
+        monkeypatch.setattr(ai_cache, 'store_transcription', lambda *a, **kw: True)
+        info = {}
+        await transcriber.transcribe_audio('a.wav', engine='cloud_free', bypass_cache=True, info=info)
+
+        assert info['cache'] == 'bypassed'
+
+    async def test_no_info_arg_keeps_old_behavior(self, monkeypatch):
+        """不传 info 时行为与旧版完全一致（返回三元组，无副作用）。"""
+        from services import transcriber
+        monkeypatch.setattr(transcriber, '_transcribe_sync', lambda **kw: ('a.srt', 'a.txt', 1))
+        result = await transcriber.transcribe_audio('a.wav', engine='cloud_free')
+
+        assert result == ('a.srt', 'a.txt', 1)

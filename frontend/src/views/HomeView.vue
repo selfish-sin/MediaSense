@@ -170,6 +170,9 @@ onMounted(async () => {
 
   socketUnsubs.push(onAiDone((data) => {
     if (data.job_id === jobStore.currentJobId) {
+      // ★ 来源信息（transcript_meta/ai_call_chain）只在任务详情里有：终态后补拉一次，
+      //   流式任务不走 loadJob（不扰动结果区状态），只刷新这两个展示字段
+      jobStore.refreshMeta(data.job_id)
       if (data.success) {
         _realTimeComplete = true       // ★ 标记实时完成
         jobStore.jobStatus = 'completed'

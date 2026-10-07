@@ -462,7 +462,8 @@ async def _handle_text_input(text, job_dir, sio, job_id, title, platform, progre
     update_job(job_id, title=title, platform=platform, status='transcribing',
                progress_msg=progress_msg)
     await emit_progress(sio, job_id, 'transcribe', 100, progress_msg)
-    return str(srt_path_obj), str(txt_path_obj), len(text) // 1000 + 1, title, platform, {}
+    return str(srt_path_obj), str(txt_path_obj), len(text) // 1000 + 1, title, platform, {}, \
+        {'source': 'text_input'}
 
 
 async def _handle_subtitle_file(input_file, job_dir, sio, job_id):
@@ -476,7 +477,8 @@ async def _handle_subtitle_file(input_file, job_dir, sio, job_id):
     update_job(job_id, title=title, platform='文本文件', status='transcribing',
                progress_msg='文本文件已读取，跳过转录')
     await emit_progress(sio, job_id, 'transcribe', 100, '文本文件已读取，跳过转录')
-    return str(srt_path_obj), str(txt_path_obj), 0, title, '文本文件', {}
+    return str(srt_path_obj), str(txt_path_obj), 0, title, '文本文件', {}, \
+        {'source': 'subtitle_file'}
 
 
 async def _handle_media_file(input_file, job_dir, sio, job_id, model_size, speaker_diarization, language,
@@ -489,6 +491,7 @@ async def _handle_media_file(input_file, job_dir, sio, job_id, model_size, speak
     audio_path, title, platform = await handle_file_upload(input_file, job_dir, sio, job_id)
     files = {'audio': str(audio_path)}
     update_job(job_id, status='transcribing', progress_msg='开始转录上传文件')
+    _info: dict = {}
     srt_path, txt_path, seg_count = await transcribe_audio(
         audio_path, model_size=model_size, platform=platform,
         speaker_diarization=speaker_diarization, language=language,
@@ -497,8 +500,10 @@ async def _handle_media_file(input_file, job_dir, sio, job_id, model_size, speak
         device=whisper_device,
         engine=transcribe_engine,
         bypass_cache=bypass_cache,
+        info=_info,
     )
-    return srt_path, txt_path, seg_count, title, platform, files
+    return srt_path, txt_path, seg_count, title, platform, files, \
+        {'source': 'transcription', **_info}
 
 
 async def _handle_url_input(input_url, job_dir, sio, job_id, options,
@@ -523,6 +528,8 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
     srt_path = None
     txt_path = None
     seg_count = 0
+    # 结果可解释性（2026-10-07）：本任务的转录文本来源/引擎/缓存/降级，最终落 jobs.transcript_meta
+    meta = None
 
     # B站特殊路径：优先尝试提取字幕（CC + AI 双路径）
     # ★ force_transcribe=True 时跳过B站字幕，直接下载音频转录
@@ -555,6 +562,8 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                 txt_path = sub_result['txt_path']
                 # 用B站API返回的视频标题（不是字幕内容第一行）
                 title = sub_result.get('title') or bvid
+                meta = {'source': 'platform_subtitle', 'subtitle_from': 'bilibili',
+                        'subtitle_check': 'skipped' if not options.get('subtitle_check', True) else None}
                 await emit_log(sio, job_id, f'📄 B站字幕已下载，待内容抽查确认（{sub_result.get("message", "")}）')
                 update_job(job_id, title=title, platform=platform, status='transcribing',
                            progress_msg='B站字幕已获取（跳过下载和转录）')
@@ -580,6 +589,7 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                             language=language,
                         )
                         if ok:
+                            meta['subtitle_check'] = 'passed'
                             await emit_log(sio, job_id, f'✅ B站字幕内容抽查通过（{_detail}），使用该字幕')
                         else:
                             await emit_log(sio, job_id, f'⚠ B站字幕内容抽查未通过（{_detail}）：疑似旧/错误字幕，丢弃，转转录（{_engine_desc}）')
@@ -592,6 +602,7 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                             srt_path = None
                             txt_path = None
                     except Exception as e:
+                        meta['subtitle_check'] = 'unavailable'
                         logger.warning(f'B站字幕抽查异常（保留原字幕结果）: {e}')
                         await emit_log(sio, job_id, f'⚠ B站字幕抽查不可用（{e}），按原结果使用字幕')
             else:
@@ -611,6 +622,8 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
             srt_path = sub_result['srt_path']
             txt_path = sub_result['txt_path']
             title = sub_result.get('title') or title
+            meta = {'source': 'platform_subtitle', 'subtitle_from': 'douyin',
+                    'subtitle_check': 'skipped' if not options.get('subtitle_check', True) else None}
             await emit_log(sio, job_id, f'📄 抖音AI字幕已下载，待内容抽查确认（{sub_result.get("message", "")}）')
             update_job(job_id, title=title, platform=platform, status='transcribing',
                        progress_msg='抖音AI字幕已获取（跳过下载和转录）')
@@ -628,6 +641,7 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                         language=language,
                     )
                     if ok:
+                        meta['subtitle_check'] = 'passed'
                         await emit_log(sio, job_id, f'✅ 抖音字幕内容抽查通过（{_detail}），使用该字幕')
                     else:
                         await emit_log(sio, job_id, f'⚠ 抖音字幕内容抽查未通过（{_detail}）：疑似旧/错误字幕，丢弃，转转录（{_engine_desc}）')
@@ -639,6 +653,7 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                         srt_path = None
                         txt_path = None
                 except Exception as e:
+                    meta['subtitle_check'] = 'unavailable'
                     logger.warning(f'抖音字幕抽查异常（保留原字幕结果）: {e}')
                     await emit_log(sio, job_id, f'⚠ 抖音字幕抽查不可用（{e}），按原结果使用字幕')
         else:
@@ -656,6 +671,7 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
             srt_path = yt_sub['srt_path']
             txt_path = yt_sub['txt_path']
             title = yt_sub.get('title') or title
+            meta = {'source': 'platform_subtitle', 'subtitle_from': 'youtube'}
             await emit_log(sio, job_id, f'✅ 原文字幕抓取成功：{yt_sub.get("message", "已获取字幕")}')
             update_job(job_id, title=title, platform=platform, status='transcribing',
                        progress_msg='原文字幕已获取（跳过转录）')
@@ -688,11 +704,13 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                 srt_path = str(expected_srt)
                 txt_path = str(expected_txt)
                 skip_transcribe = True
+                meta = {'source': 'transcription', 'resume': True}
                 await emit_log(sio, job_id, f'🔁 断点续传：发现已有转录文件，跳过转录（SRT:{expected_srt.stat().st_size}字节 TXT:{expected_txt.stat().st_size}字节）')
 
         if not skip_transcribe:
             # 转录
             update_job(job_id, status='transcribing', progress_msg='开始转录')
+            _info: dict = {}
             srt_path, txt_path, seg_count = await transcribe_audio(
                 file_path, model_size=model_size, platform=platform,
                 speaker_diarization=speaker_diarization, language=language,
@@ -701,9 +719,11 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                 device=whisper_device,
                 engine=transcribe_engine,
                 bypass_cache=bool(options.get('bypass_cache', False)),
+                info=_info,
             )
+            meta = {'source': 'transcription', **_info}
 
-    return srt_path, txt_path, seg_count, title, platform, files
+    return srt_path, txt_path, seg_count, title, platform, files, meta
 
 
 # 复用/登记时的视频扩展名（断点续传复用的媒体按扩展名归类，其余按音频素材）
@@ -929,7 +949,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             #   （压缩空白并截断，避免换行/长文本把标题撑爆）
             _brief = ' '.join((input_text or '').split())[:20]
             _text_title = f'文本输入 · {_brief}' if _brief else '文本输入'
-            srt_path, txt_path, seg_count, title, platform, step_files = await _handle_text_input(
+            srt_path, txt_path, seg_count, title, platform, step_files, transcript_meta = await _handle_text_input(
                 input_text, job_dir, sio, job_id,
                 title=_text_title, platform='纯文本', progress_msg='文本已准备',
             )
@@ -941,19 +961,19 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
 
             if file_ext in ('.txt', '.md'):
                 # 文本文件：直接读取 → 跳过转录
-                srt_path, txt_path, seg_count, title, platform, step_files = await _handle_text_input(
+                srt_path, txt_path, seg_count, title, platform, step_files, transcript_meta = await _handle_text_input(
                     Path(input_file).read_text(encoding='utf-8'), job_dir, sio, job_id,
                     title=Path(input_file).stem, platform='文本文件',
                     progress_msg='文本文件已读取，跳过转录',
                 )
             elif file_ext in ('.srt', '.vtt'):
                 # 字幕文件：直接转换 → 跳过转录
-                srt_path, txt_path, seg_count, title, platform, step_files = await _handle_subtitle_file(
+                srt_path, txt_path, seg_count, title, platform, step_files, transcript_meta = await _handle_subtitle_file(
                     input_file, job_dir, sio, job_id
                 )
             else:
                 # 音频/视频文件：需要转录
-                srt_path, txt_path, seg_count, title, platform, step_files = await _handle_media_file(
+                srt_path, txt_path, seg_count, title, platform, step_files, transcript_meta = await _handle_media_file(
                     input_file, job_dir, sio, job_id,
                     model_size=model_size, speaker_diarization=speaker_diarization,
                     language=language, whisper_device=whisper_device,
@@ -962,7 +982,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                 )
         else:
             # URL输入
-            srt_path, txt_path, seg_count, title, platform, step_files = await _handle_url_input(
+            srt_path, txt_path, seg_count, title, platform, step_files, transcript_meta = await _handle_url_input(
                 input_url, job_dir, sio, job_id, options,
                 model_size=model_size, speaker_diarization=speaker_diarization,
                 language=language, whisper_device=whisper_device,
@@ -977,7 +997,8 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
         txt_path = str(txt_path)
         result['files']['srt'] = srt_path
         result['files']['txt'] = txt_path
-        update_job(job_id, files=result['files'])
+        # 结果可解释性：转录来源/实际引擎/缓存/降级随 Step 1 结果一并落库（结果页展示）
+        update_job(job_id, files=result['files'], transcript_meta=transcript_meta or None)
 
         # ===== Step 1.5: AI 校正转录文本（可选） =====
         # ★ 用云端模型校正文本常见错误（同音字、专有名词、标点）——

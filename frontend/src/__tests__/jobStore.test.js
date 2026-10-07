@@ -366,3 +366,51 @@ describe('jobStore', () => {
     expect(ACTIVE_JOB_STATUSES).toContain('summarizing')
   })
 })
+
+describe('jobStore.refreshMeta / transcript_meta（2026-10-07 结果可解释性）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    localStorage.clear()
+    vi.clearAllMocks()
+  })
+
+  it('refreshMeta 只回填来源信息与调用链，不扰动流式结果状态', async () => {
+    apiMocks.get.mockResolvedValueOnce({
+      id: 'j9', status: 'completed', result_text: 'DB里的文本',
+      transcript_meta: JSON.stringify({ source: 'transcription', engine: 'cloud_free', degraded: true }),
+      ai_call_chain: [{ model: 'm1', ok: false, reason: 'x' }, { model: 'm2', ok: true, reason: '' }],
+    })
+    const store = useJobStore()
+    store.resultText = '流式累积的文本'
+    await store.refreshMeta('j9')
+
+    expect(store.transcriptMeta).toEqual({ source: 'transcription', engine: 'cloud_free', degraded: true })
+    expect(store.aiCallChain.length).toBe(2)
+    expect(store.resultText).toBe('流式累积的文本')
+  })
+
+  it('refreshMeta 拉取失败不抛错（来源信息缺失可容忍）', async () => {
+    apiMocks.get.mockRejectedValueOnce(new Error('网络断开'))
+    const store = useJobStore()
+    await expect(store.refreshMeta('j9')).resolves.toBeUndefined()
+    expect(store.transcriptMeta).toBeNull()
+  })
+
+  it('loadJob 归一化 transcript_meta（对象/JSON串/null），reset 清空', async () => {
+    const store = useJobStore()
+    apiMocks.get.mockResolvedValueOnce({ id: 'j1', status: 'completed', transcript_meta: { source: 'text_input' } })
+    await store.loadJob('j1')
+    expect(store.transcriptMeta).toEqual({ source: 'text_input' })
+
+    apiMocks.get.mockResolvedValueOnce({ id: 'j2', status: 'completed', transcript_meta: '{"source":"subtitle_file"}' })
+    await store.loadJob('j2')
+    expect(store.transcriptMeta).toEqual({ source: 'subtitle_file' })
+
+    apiMocks.get.mockResolvedValueOnce({ id: 'j3', status: 'completed' })
+    await store.loadJob('j3')
+    expect(store.transcriptMeta).toBeNull()
+
+    store.reset()
+    expect(store.transcriptMeta).toBeNull()
+  })
+})
