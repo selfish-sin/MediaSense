@@ -15,12 +15,15 @@
   真实 socket_app ASGI 入口验证恢复状态、任务/队列/OpenAPI；30 定向测试通过，无告警。
   默认示例配置补测发现 8 条云端测试隐式依赖本机免费 provider 配置；修 asr_enabled
   明确两个假槽位后，默认无密钥配置的完整 978 项通过，无告警，CI 首次安装路径得到覆盖。
-- [ ] 过时任务/索引/规范：核对证据、归档、文档回写，commit。
+- [x] 过时任务/索引/规范：核对证据、归档、文档回写。
   两个历史 planning 任务已补 result 并按 Trellis 归档，active 指针未改。
   CodeGraph 官方随包 README 确认 root codegraph.json.exclude 支持已提交目录；
   排除 backend/static/ 与 .trellis/tasks/archive/ 后重建：节点 9574→5132，DB 44.27→15.41 MB。
   transcription_key 和 _transcription_cache_key 已能定位，归档研究脚本不再入图；模糊查询仍需核对路径。
-- [ ] 本地 API 冒烟与最终工作树检查；本轮不 push。
+- [x] 本地 API 冒烟：默认示例配置 + 临时数据 + localhost 随机端口。
+  启动/空队列/OpenAPI/SPA/CORS 放行与拒绝全部通过，临时服务正常退出；不重启真实服务。
+- [x] 终审完整 verify 979 backend / 269 frontend，ruff/eslint/build 全绿；
+  干净环境 + 默认无密钥示例配置 979 全绿，零测试告警；本轮不 push。
 
 CodeGraph：启动状态 up to date，但 explore ai_cache.py / 精确函数返回无关符号并包含 static/archive，
 已尝试 graph 优先；未覆盖的目标使用当前源码。此前已验证关键调用链由 transcribe_audio 统一读写缓存，

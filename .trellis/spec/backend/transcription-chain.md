@@ -402,7 +402,7 @@ Whisper **base 是链路里最弱一环**（`asr_whisper_model` 未设置时即�
       **判据边界**：拿不到完整字幕仍走 `subtitle_incomplete` 转转录（宁缺勿错），不因加长重试
       而放宽覆盖校验。
 
-  ## 8. ASR 配置管理 API（模型管理页「ASR 模型」域，2026-09-15）
+## 8. ASR 配置管理 API（模型管理页「ASR 模型」域，2026-09-15）
 
 只读 `routers/asr.py`，写操作 `routers/asr_admin.py`（同挂 `/api/asr` 前缀，对外路径连续）：
 
@@ -425,3 +425,13 @@ Whisper **base 是链路里最弱一环**（`asr_whisper_model` 未设置时即�
 - 探测音频用 ffmpeg 生成正弦波：仓库不存媒体；无人声返回空文本属正常，`note` 字段会说明。
 - 管理页数据流：`stores/asrStore.js`（失败落 `error` 供失败态展示；写操作抛错由视图 ElMessage 提示）
   → `components/models/AsrPanel.vue`（云端/本地二级分段）→ `AsrCloudPanel` / `AsrLocalPanel`。
+
+
+## 9. ASR 结果缓存身份（2026-10-07）
+
+`transcribe_audio` 的 v2 缓存键纳入请求模型档位、语言/说话人、设备/平台、回退链 provider
+白名单配置与本地模型文件签名；旧四要素键不再读取。身份由 `_transcription_cache_key` 单点生成，
+一次调用读写共用；配置不含 API Key。整体回退到其它引擎的结果可正常交付，但不存成首选缓存，
+避免临时故障恢复后仍锁定 Whisper。`execution_state['engine']` 表示成功的整体引擎，
+不表示云端逐片补录来源；三元返回值不变。完整签名、错误矩阵和回归要求见
+[ai-call-cache.md](ai-call-cache.md)。写入前再次核对开始时身份，识别期间配置变化时只返回结果，不缓存。

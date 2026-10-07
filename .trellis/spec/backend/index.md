@@ -9,6 +9,8 @@
 - [ ] 涉及任务编排时读过 `main.py` 的 `process_job`（信号量并发由 `config.MAX_CONCURRENT_JOBS` 提供，**默认 2**；设 `MAX_CONCURRENT_JOBS=1` 才是严格串行；preview 阶段释放许可的设计勿破坏）
 - [ ] 涉及存储删除时读过 `scripts/cleanup_storage.py`（dry-run + `--apply --confirm DELETE` 双门槛不可绕过）
 - [ ] 涉及 AI 调用/重试/缓存时读过 [ai-call-cache.md](ai-call-cache.md)（忽略缓存仍写回、流式断连守卫、缓存故障降级）
+- [ ] 涉及转录缓存时同读 [ai-call-cache.md](ai-call-cache.md) 的 ASR v2 身份/整体降级契约
+- [ ] 涉及 verify、依赖、启动或 CI 时读过 [quality-tooling.md](quality-tooling.md)
 
 ## 核心约定
 
@@ -112,6 +114,6 @@
 
 ## Quality Check
 
-- [ ] `cd backend && venv/Scripts/python.exe -m pytest` 全绿（基线 748，必须用项目 venv——沙箱默认 Python 缺 pytest-asyncio，异步用例会批量假失败）
+- [ ] 仓库根 `backend/venv/Scripts/python.exe verify.py backend` 全绿（ruff + pytest；2026-10-07 基线 979；必须用已安装开发锁的环境）
 - [ ] 新增/修改的 service 函数有对应测试（成功 + 主要错误路径）
 - [ ] 没有在 async 函数中引入新的同步阻塞调用

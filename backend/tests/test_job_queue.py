@@ -2,7 +2,7 @@
 
 钉死的契约：
 - pending/running 各自按 created_at ASC（同秒再用 rowid 兜底）→ 界面顺序 = 实际获槽顺序
-- `concurrency` 来自 config.MAX_CONCURRENT_JOBS（默认 1）
+- `concurrency` 来自 config.MAX_CONCURRENT_JOBS（默认 2，设为 1 才是严格串行）
 - 空队列返回 200 + 空数组（不是 404）
 - `/queue` 不被 `GET /{job_id}` 捕获（单段路径路由遮蔽回归锁）
 - 队列项只含轻量列，不带 result_text 等大文本（轮询成本）

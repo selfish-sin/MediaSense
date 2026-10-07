@@ -111,7 +111,7 @@ apply_proxy_bypass_hosts()
 RUNNING_JOBS: Dict[str, Dict[str, Any]] = {}
 
 # ============ 全局并发限制 ============
-# ★ 上限由 config.MAX_CONCURRENT_JOBS 提供（默认 1 = 严格串行，环境变量可覆盖为 2）。
+# ★ 上限由 config.MAX_CONCURRENT_JOBS 提供（默认 2；环境变量设为 1 才是严格串行）。
 #   批量任务或用户快速连续提交时，超过上限的任务停在 pending 状态排队，等信号量释放。
 _job_semaphore = None  # 懒加载创建（需要 event loop）
 

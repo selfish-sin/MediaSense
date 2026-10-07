@@ -3,7 +3,7 @@
   "name": "quality-improvements",
   "title": "质量改进落地",
   "description": "落实质量报告：ASR缓存身份、Python门禁、依赖锁定、治理记录收尾",
-  "status": "planning",
+  "status": "completed",
   "dev_type": "backend",
   "scope": "quality",
   "package": null,
@@ -11,7 +11,7 @@
   "creator": "dev",
   "assignee": "dev",
   "createdAt": "2026-10-07",
-  "completedAt": null,
+  "completedAt": "2026-10-07",
   "branch": null,
   "base_branch": "master",
   "worktree_path": null,
@@ -22,5 +22,9 @@
   "parent": null,
   "relatedFiles": [],
   "notes": "",
-  "meta": {"risk": "M1", "shape": "web-fullstack", "approval": "2026-10-07 用户确认质量报告全部建议"}
+  "meta": {
+    "risk": "M1",
+    "shape": "web-fullstack",
+    "approval": "2026-10-07 用户确认质量报告全部建议"
+  }
 }

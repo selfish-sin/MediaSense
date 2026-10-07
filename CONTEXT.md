@@ -24,22 +24,22 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 
 | 文件 | 核心内容 | 何时读 |
 |---|---|---|
-| `backend/main.py` | FastAPI、Socket.IO、`process_job`（策略函数拆分：`_handle_text_input`/`_handle_subtitle_file`/`_handle_media_file`/`_handle_url_input`）、`_acquire_audio`（音频获取单点：断点续传复用/下载 + `files` 登记）、`_emit_batch_progress`、`resolve_transcribe_engine`（引擎缺省/非法值落免费优先推荐，付费档只能显式选择）、启动恢复和 SPA 路由 | 改任务编排、输入处理策略或批量进度推送 |
+| `backend/main.py` | FastAPI、Socket.IO、`process_job`（策略函数拆分：`_handle_text_input`/`_handle_subtitle_file`/`_handle_media_file`/`_handle_url_input`）、`_acquire_audio`（音频获取单点：断点续传复用/下载 + `files` 登记）、`_emit_batch_progress`、`resolve_transcribe_engine`（引擎缺省/非法值落免费优先推荐，付费档只能显式选择）、`lifespan` 启动恢复和 SPA 路由 | 改任务编排、输入处理策略或批量进度推送 |
 | `backend/config.py` | 数据目录、7001、Whisper 模型和清理 TTL | 改路径、端口或默认值 |
 | `backend/db/` | SQLite 初始化、job、模型、token 用量仓储 | 改持久化或任务状态 |
 | `backend/db/model_repo.py` | 模型仓储 + **兜底环唯一解析点**：键 `llm_fallback_ring` 存 `app_settings`（复用 `default_model` 同一张表，不新增表/列）；`get/set_fallback_chain` 剔除已删模型/重复项/当前默认模型（非法 JSON 按未配置降级不崩）；**`resolve_ai_candidates(model)` 全项目唯一候选解析点**＝`[本次所选] + [环内其余去重]`（环未启用只返回所选）；`set_default_model` 内置**自动把新默认模型从环里摘除** | 改 AI 候选顺序、兜底环配置或默认模型联动时 |
 | `backend/db/job_repo.py` | 任务仓储：`update_job` 的 JSON 序列化字段表 + `_row_to_dict` 的反序列化字段表（**两张表必须同步**，只改前者会让读取拿到裸字符串）+ `GET /api/jobs/queue` 快照（FIFO 靠 `created_at, rowid`） | 改 jobs 表 JSON 字段时 |
 | `backend/services/downloader.py` | yt-dlp 下载/媒体准备（`download_video(max_seconds)` 只取前 N 秒片段、失败回退完整）、**B站字幕单一自研链路**（`extract_bilibili_subtitles` = `_fetch_video_info_http` 元数据 → `_fetch_subtitles_via_player_v2` 轨列表（legacy→wbi→匿名）→ `_pick_zh_subtitle` 选轨（CC优先·简体优先·剔除生成中AI）→ `_acquire_bilibili_subtitle` 下载+覆盖校验+换新链接重试 → yt-dlp 仅兜底且吃同一套校验 `_rank_subtitle_file`/`_srt_to_entries`）、`_validate_subtitle_body`（AI 0.75×时长/CC 0.5×时长-30s）、`_resolve_video_target`（多P cid/时长解析）、`verify_subtitle_against_audio` 内容抽查、**412 风控冷却**（`note_bili_risk_control`/`_wait_bili_risk_cooldown` 进程级共享冷却窗，连续 412 升级长冷却；`_throttle_bili_api` 单点消费）与**字幕递增退避**（`_subtitle_retry_delay`）、`PLATFORM_CONFIG`（平台识别，含 douyin/iesdouyin）与 `sanitize_input_url`（裸 BV/b23.tv/v.douyin.com 短链补全） | 改 URL 下载、代理、B站风控或字幕优先链路 |
 | `backend/services/douyin.py` | **抖音游客链路单点**（无登录态）：`is_douyin_url`/`extract_aweme_id_sync`（video/modal_id/share/裸短链 302 展开+无 scheme 容错）→ `_mint_ttwid`（进程级缓存）+ `_sign_endpoint`（vendor ABogus 签名）→ `fetch_detail_sync`（空响应换新 ttwid 重试）→ `download_douyin_video`（play_addr 直链 httpx 流式 + **实时进度轮询**；max_seconds 走项目 ffmpeg 截取；**直链过期自动绕缓存重拉换新链重试一次**）+ `extract_douyin_subtitles`（cla_info→SRT/TXT，zh 优先选轨；**游客态实测常为空→回退转录宁缺勿错**）。稳性：全局限流 `_throttle_douyin_api`（≥1s，`DOUYIN_API_MIN_INTERVAL` 可调，detail/短链展开共享，防批量齐射）+ 元数据 90s 进程级缓存（同任务字幕探测+下载共用一次 detail） | 改抖音解析/下载/字幕，或排查"抖音任务失败"时 |
-| `backend/services/douyin_abogus.py` | **vendor 文件**（f2 的 a_bogus 签名算法，Apache-2.0）：SM3 改用项目已有 cryptography（替代 gmssl，零新增依赖）；签名算法变动时从 f2 master 重新同步此单文件 | 抖音接口突然全挂（签名失效）时更新它 |
-| `backend/services/transcriber.py` | 字幕读取、Whisper 转录、语言/模型/设备（auto/cuda/cpu）、`_transcribe_sync` 引擎路由单点（回退链 cloud→cloud_free→firered→local；cloud_free→firered→local，付费失败只降不升反向不回付费，firered 仅模型就绪时参与且不触发下载，取消不回退）、`engine_label()` 引擎显示名单点、`transcribe_audio` 前置 **ASR 缓存命中**（同音频+同引擎直接复用上次 SRT/TXT，2026-10-06） | 改转录回退、引擎路由、设备选择、ASR 缓存或引擎文案 |
+| `backend/services/douyin_abogus.py` | **vendor 文件**（f2 的 a_bogus 签名算法，Apache-2.0）：SM3 使用显式运行依赖 cryptography（替代 gmssl）；签名算法变动时从 f2 master 重新同步此单文件 | 抖音接口突然全挂（签名失效）时更新它 |
+| `backend/services/transcriber.py` | 字幕读取、Whisper 转录、语言/模型/设备（auto/cuda/cpu）、`_transcribe_sync` 引擎路由单点（回退链 cloud→cloud_free→firered→local；cloud_free→firered→local，付费失败只降不升反向不回付费，firered 仅模型就绪时参与且不触发下载，取消不回退）、`engine_label()` 引擎显示名单点、`transcribe_audio` 前置 **ASR v2 缓存**（音频/模型档位/provider 配置/本地文件签名同身份复用 SRT/TXT；整体降级/识别期间配置变化不污染缓存，2026-10-07） | 改转录回退、引擎路由、设备选择、ASR 缓存或引擎文案 |
 | `backend/services/cloud_asr.py` | 云端 ASR 双 provider：mimo（付费主力，chat+base64）/ xingchen（免费档 cloud_free，multipart）；**付费档只能显式选择**——provider 缺省走 `preferred_provider()`（只挑免费槽位，无免费档则抛 ConfigError）；静音切分→并发分片→句级化写盘；单片失败备用引擎补录（XingChen 免费→firered→Whisper）不留空洞；延迟画像日志 | 改云端引擎、句级切分或补录策略 |
 | `backend/services/local_asr.py` | **本地引擎注册表**（`LOCAL_ENGINES` 单一事实源，当前只注册 `firered`）+ FireRedASR2-AED 解码（sherpa-onnx int8/CPU）：就绪判定/文件明细/占用/后台下载（含取消）/删除/引擎级锁按 key 通用；管线=按需下载→VAD 分段（+padding）→段间并行解码→标点恢复→句级写盘 | 改本地引擎清单、FireRed 模型下载或 VAD/标点参数 |
 | `.trellis/spec/backend/transcription-chain.md` | **识别链全链路权威文档**：输入四策略/字幕优先防错位/引擎回退链/三引擎内部/分片补录/横评结论/参数速查/坑点汇总 | 改转录链任何环节前必读 |
-| `.trellis/spec/backend/ai-call-cache.md` | AI 调用/缓存边界：忽略缓存仅跳过读、成功仍写回；传不传 state 都守住正文后不重试；缓存建连失败告警降级 | 改 AI 调用、流式重试或缓存容错时 |
+| `.trellis/spec/backend/ai-call-cache.md` | AI/ASR v2 调用与缓存边界：忽略缓存仅跳过读、成功仍写回；传不传 state 都守住正文后不重试；缓存建连失败告警降级 | 改 AI 调用、流式重试或缓存容错或转录模型身份时 |
 | `docs/quality-audit-2026-10-07.md` | 质量检查证据、三项小修复、ASR 缓存参数遗漏复现与后续优化顺序 | 安排下一轮质量改进、修转录缓存时 |
 | `backend/services/web_search.py` | **联网检索唯一实现**（追问 + 深度研究共用）：智谱独立 Web Search API（`POST /api/paas/v4/web_search`，非 chat+tools 老姿势）优先 → DDGS 免 Key 兜底；`resolve_zhipu_key()` 三级兜底（env→config→DB bigmodel 模型）、`resolve_search_proxy()`（ddgs 不读 HTTP_PROXY 必须显式传）、`web_search_collect()` 返回 `SearchOutcome`（sources/text/provider/error，失败不静默） | 改联网搜索、追问引用来源、深度研究检索时 |
-| `backend/services/ai_cache.py` | **AI/转录结果缓存池读写单点**（表 `ai_cache`，2026-10-06）：`make_key`/`cache_get`/`cache_put`（只收成功非空结果，`AI_CACHE_MAX_ENTRIES` 淘汰最旧）+ 转录缓存 `lookup_transcription`/`store_transcription`（键=音频 sha256+引擎+语言+说话人分离，命中写回 `.srt`/`.txt` 约定路径）；开关 `config.AI_CACHE_ENABLED`（环境变量 `YT_AI_CACHE_ENABLED=0`） | 改缓存键要素、命中/淘汰策略，或排查"为什么秒出/没重新调 AI"时 |
+| `backend/services/ai_cache.py` | AI/ASR 缓存读写单点；失败告警降级、忽略缓存仍写回；ASR v2 身份含模型上下文，记录实际整体引擎 | 改缓存键、读写、故障边界时 |
 | `backend/services/` | 分段、摘要、导出、搜索等处理（`prompt_builder.py` 模块化提示词 9 维度含输出语言）。**`ai_processor.py` 是四个 AI 入口（总结/校正/打标签/思维导图）的兜底编排中心**：`_call_ai`（流式，失败返回 `[处理失败: ...]` 哨兵串而非抛异常，内置 AI 结果缓存——命中零 token、`bypass_cache=True` 跳过）、`_call_ai_with_fallback`（流式，**哨兵失败或零正文都换模型**，只在一字未吐时才换）、`run_with_fallback`（非流式，同样零正文换候选）、`is_call_failed`/`_strip_sentinel`（哨兵串判定，`''` 恒 False）、`ai_process`（跨批次记忆 `preferred_model`）、`correct_transcript_with_fallback` | 改 AI 调用、失败契约、缓存语义或换模型边界时 |
 | `backend/services/naming.py` | **文件名唯一实现**：`safe_basename`（只剔 Windows 非法字符，保留《》、，、- 与空格）、`export_basename`（标题→BV/YT id→`job_{id}` 兜底）、`extract_video_id`；导出 4 格式/批量 ZIP/下载素材全走它 | 改导出或下载素材的文件名时（勿再写第二份清洗逻辑） |
 | `backend/routers/jobs.py` | 任务核心域：上传/提交/列表/删除/清理/取消/重试/编辑结果/**处理队列快照 `GET /api/jobs/queue`（单段路径，必须注册在 `GET /{job_id}` 之前）** + 共享的 `normalize_url`/`extract_urls` | 改任务生命周期 API 或队列读取 |
@@ -51,7 +51,12 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `backend/socket_handlers.py` | 实时日志和进度事件 | 改前端实时反馈 |
 | `backend/scripts/cleanup_storage.py` | staged/orphan/export/media 清理 | 改清理策略；删除必须显式确认 |
 | `backend/scripts/export_openapi.py` + `contracts/` | 导出/存放 OpenAPI 契约快照（`openapi.json`，**78 端点**，2026-10-05 重导出——此前长期停在 66，ASR 管理/chat 会话/兜底环等新增端点均未回写） | 改后端 API 后**必须**重新导出；查全部端点契约时读它 |
-| `verify.py`（**仓库根**，不在 backend/） | 一键验证：`python verify.py [backend\|frontend\|all]` = backend pytest（用 `backend/venv/Scripts/python.exe`）+ frontend lint/vitest/vite build | 改完代码做全量验证，或想快速回归 |
+| `verify.py`（**仓库根**，不在 backend/） | 一键验证：`python verify.py [backend\|frontend\|all]` = Python ruff + backend pytest（用 `backend/venv/Scripts/python.exe`）+ frontend lint/vitest/build；无效目标失败 | 改完代码做全量验证，或想快速回归 |
+| `backend/requirements.in` / `requirements-dev.in` 及对应 `.txt` | 直接依赖意图/完整版本锁，Windows x64/Python 3.13；运行锁先于开发锁生成 | 改 Python 依赖或干净安装时 |
+| `backend/start.bat` / `.github/workflows/quality.yml` | 启动优先项目 venv、依赖失败停止；CI Windows Python 3.13 + Node 24 执行同一 verify | 改启动方式或自动检查时 |
+| `docs/dependency-locks.md` / `.trellis/spec/backend/quality-tooling.md` | 安装、再生成锁、验证退出码、告警及 lifespan 契约 | 改验证/依赖/启动工具时 |
+| `codegraph.json` | 支持的 exclude 配置，排除 backend/static 与历史任务归档 | 索引误定位到构建/研究产物时 |
+| `backend/tests/test_verify.py` / `test_lifespan.py` | 验证入口失败传播、真实 ASGI 启动恢复与 API 回归 | 改检查入口或启动恢复时 |
 | `frontend/src/App.vue` | **主题变量兜底**（`--app-*` 明/暗两套，运行时被皮肤层内联覆盖）、**背景与卡片材质层**（`body::before` 背景图 + **动态背景动画**：`html[data-bg-anim]` → `background-position` 漂移、`html[data-bg-paused="1"]` 暂停、`prefers-reduced-motion` 关闭；`body::after` **四层 scrim**、`.app-card`/`.wb-card` 玻璃三件套 + 常态投影 + `@supports`/`prefers-reduced-transparency` 降级、`.el-dialog`/`.el-drawer` 用 surface-2/3）、全局卡片与工作台通用类（`.log-panel`/`.row-more-btn`/`.cell-stack`）、**表格 fixed 列去 sticky 覆盖**、侧栏与滚动按钮 | 改主题兜底值、背景/卡片材质/动态背景、全局类或侧栏布局时 |
 | `frontend/src/stores/themeStore.js` | 主题状态**单一入口**：皮肤（`skin`/`skinId`，明暗由皮肤 `mode` 派生）、效果（`effects`）、主色（`accent`）、**背景媒体（`background`：`none`/`builtin`/`animated`/`image`）+ 图库（`library`/`usage`/`libraryReady`/`bgNotice`）**，各自持久化与 `:root` 注入；`applyVisuals()` 顺序＝皮肤 token → data-theme → 效果变量 → accent（**accent 最后写**）；`applyBackground()` 对 `image` 走「thumbUrl 占位 → 异步读 IndexedDB → objectURL」且带**竞态保护**（等待期间切换则丢弃结果）；**objectURL 全项目唯一创建点 + 唯一 revoke 点**；`initBackground()`＝探测图库 → 载列表 → `migrateLegacyBackground()`（旧 dataURL **write-then-clean** 迁移，幂等）→ 应用背景；IndexedDB 不可用时整体降级为 localStorage 旧路径并提示；`bindVisibilityPause()` 切 `data-bg-paused` 暂停动态背景；`setBackground` 是**替换**语义（不字段合并） | 改主题状态、背景存储/迁移/降级、换肤或皮肤导入导出时 |
 | `frontend/src/utils/skin.js` | 皮肤层核心：`DERIVE_RULES`（**palette → 60+ token 的表驱动派生规则表**，新增 token 只加一行）、`deriveFromPalette`/`composeTokens`（派生 → tokens 覆盖两段合成）、`resolveSkin(skinId, extra)`、`skinMode`、`skinForMode`（同 family 切明暗）、`writeTokens`/`removeTokens`/`allTokenNames` | 改 token 派生规则、皮肤合成或 token 注入时 |
@@ -82,7 +87,7 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 
 ## 服务与任务
 
-`main.py` 直接运行时使用 `SERVER_HOST=0.0.0.0`、`SERVER_PORT=7001`，挂载 `/ws/socket.io`，并提供 `/api/logs`、`/api/token-usage`、`/api/token-usage/history` 和 SPA 路由；其余任务 API 分散在 `backend/routers/`。全局 `MAX_CONCURRENT_JOBS` 默认 **1**（严格串行，单任务也排队逐个处理；设环境变量 `MAX_CONCURRENT_JOBS=2` 可放开），启动时会把中断任务标记为失败/可恢复状态。
+`main.py` 直接运行时使用 `SERVER_HOST=0.0.0.0`、`SERVER_PORT=7001`，挂载 `/ws/socket.io`，并提供 `/api/logs`、`/api/token-usage`、`/api/token-usage/history` 和 SPA 路由；其余任务 API 分散在 `backend/routers/`。全局 `MAX_CONCURRENT_JOBS` 默认 **2**（设环境变量 `MAX_CONCURRENT_JOBS=1` 才是严格串行），启动时会把中断任务标记为失败/可恢复状态。
 
 ```powershell
 cd backend
@@ -98,7 +103,7 @@ python main.py
 
 ## 当前状态
 
-- 质量检查（2026-10-07）：后端 968 / 前端 269 测试通过，前端 lint/build 通过。修复忽略缓存不更新 AI 结果、正文后断连重试/原因被 NameError 掩盖、缓存建连故障中断主流程；新增 8 条回归，其中 6 条修复前失败、修复后均通过。**待修**：ASR 缓存键遗漏 Whisper 档位/provider/model，同音频 base→medium 复现仍命中 base；临时勾「忽略缓存」。证据与改进顺序见质量报告。
+- 质量改进（2026-10-07）：**979 后端 / 269 前端测试、ruff/eslint/build 全绿**，干净锁定环境同样通过且零测试告警。AI 缓存刷新、流式断连、缓存故障与 ASR v2 模型身份均已修；新增 19 条回归（较初始 960）。依赖锁/Windows CI 已配置、lifespan 保留启动恢复、两项历史任务已归档、索引排除构建/归档。隔离 localhost 实测启动、队列、OpenAPI、SPA、CORS 通过。详见 `docs/quality-audit-2026-10-07.md`；业务改动需重启服务生效，本轮未重启/push。
 
 - 已实现：下载/导入、字幕/Whisper、任务并发、Socket.IO 进度、摘要（输出语言可选，默认中文）、导出、token 用量和受保护的存储清理。
 - 运行数据默认落在 `backend/data`；服务重启不会继续执行内存中的 Python 任务，但会处理启动时的中断记录。

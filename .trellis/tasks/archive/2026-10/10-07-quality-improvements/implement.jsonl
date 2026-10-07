@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "后端规范与质量门禁"}
+{"file": ".trellis/spec/backend/ai-call-cache.md", "reason": "AI/ASR缓存身份及故障边界"}
+{"file": ".trellis/spec/backend/transcription-chain.md", "reason": "免费优先和引擎回退契约"}
+{"file": ".trellis/spec/backend/quality-tooling.md", "reason": "依赖、CI、验证和启动规范"}
