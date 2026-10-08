@@ -14,6 +14,7 @@ YouTube Tool V2 - 追问聊天路由（SSE 流式）
 import asyncio
 import json
 import logging
+import os
 import uuid
 from pathlib import Path
 from typing import Optional, List, Dict, Literal
@@ -45,6 +46,14 @@ BROAD_QUERY_MAX = 120
 
 # 多选批量删除单次上限（防单个请求删除过量；超限提示分批）
 MAX_BATCH_DELETE = 200
+
+# 模型上下文预算：`_get_session_history(limit=30)` 只按**行数**截断，单条正文一字不截，
+# 长会话（15 轮 × 上万字符回答）会把 prompt 顶到模型窗口之外硬失败。故在行数之外再加字符预算：
+#   - 超预算 → 从**最旧整轮**开始丢（不半截丢轮，避免"有问无答"进上下文），最新一轮永远保留；
+#   - 单条超 HISTORY_MESSAGE_MAX → 打省略标记（与转录原文/结果同款 `_truncate` 标记）。
+# 环境变量可调；设 <=0 = 关闭字符预算（退回纯行数截断的旧行为）。
+HISTORY_MAX_CHARS = int(os.getenv("CHAT_HISTORY_MAX_CHARS", "24000"))
+HISTORY_MESSAGE_MAX = int(os.getenv("CHAT_HISTORY_MESSAGE_MAX", "16000"))
 
 
 class ChatMessage(BaseModel):
@@ -203,6 +212,73 @@ def _get_session_history(job_id, session_id, limit=30, before_id=None):
     positioned.sort(key=lambda t: (t[0], t[1], t[2]))
     kept = [r for _, _, _, r in positioned if r["role"] == "user" or r["is_active"] == 1]
     return [{"role": r["role"], "content": r["content"]} for r in kept[-limit:]]
+
+
+def _trim_history_by_budget(rows, max_chars=None, message_max=None):
+    """按字符预算裁剪模型上下文，返回 `(kept, meta)`（纯函数，便于单测）。
+
+    规则：
+      - 单条 > message_max → 用 `_truncate` 打省略标记（与转录原文/结果同款），计入 meta；
+      - 超预算 → 从**最旧整轮**开始丢，绝不半截丢轮（否则会留"有问无答"进上下文）；
+      - 最新一轮无论多长都保留（它就是用户刚问的那一轮，丢了等于失忆）；
+      - `max_chars <= 0` = 关闭预算（退回纯行数截断的旧行为）。
+    meta: budget / omitted_turns / omitted_chars / truncated_messages / kept_messages
+    """
+    # 预算默认值在**调用时**从模块常量取（写成参数默认值会在导入期定死，env/测试都改不动）
+    max_chars = HISTORY_MAX_CHARS if max_chars is None else max_chars
+    message_max = HISTORY_MESSAGE_MAX if message_max is None else message_max
+    zero_meta = {
+        "budget": max_chars, "omitted_turns": 0, "omitted_chars": 0,
+        "truncated_messages": 0, "kept_messages": len(rows),
+    }
+    if max_chars <= 0:
+        return list(rows), zero_meta
+
+    truncated = 0
+    normalized = []
+    for r in rows:
+        content = r.get("content") or ""
+        if message_max > 0 and len(content) > message_max:
+            content = _truncate(content, message_max)
+            truncated += 1
+        normalized.append({**r, "content": content})
+
+    # 切轮：每个 user 行开启一轮（前置无提问的孤儿行自成一轮，不会被误并）
+    units: List[List[Dict]] = []
+    for r in normalized:
+        if r.get("role") == "user" or not units:
+            units.append([])
+        units[-1].append(r)
+
+    kept_units: List[List[Dict]] = []
+    used = 0
+    for unit in reversed(units):
+        size = sum(len(m.get("content") or "") for m in unit)
+        if kept_units and used + size > max_chars:
+            break
+        kept_units.append(unit)
+        used += size
+    kept_units.reverse()
+
+    dropped = units[: len(units) - len(kept_units)]
+    meta = {
+        "budget": max_chars,
+        "omitted_turns": sum(1 for u in dropped if any(m.get("role") == "user" for m in u)),
+        "omitted_chars": sum(len(m.get("content") or "") for u in dropped for m in u),
+        "truncated_messages": truncated,
+        "kept_messages": sum(len(u) for u in kept_units),
+    }
+    return [m for u in kept_units for m in u], meta
+
+
+def _history_for_prompt(job_id, session_id, limit=30, before_id=None):
+    """模型上下文用历史（按轮 + 字符预算裁剪）：返回 `(messages, meta)`。
+
+    `_get_session_history` 的契约（签名/返回值/排序）保持不变——现有测试与调用方
+    直接消费它；预算只是外面加的一层。
+    """
+    rows = _get_session_history(job_id, session_id, limit=limit, before_id=before_id)
+    return _trim_history_by_budget(rows, max_chars=HISTORY_MAX_CHARS, message_max=HISTORY_MESSAGE_MAX)
 
 
 def _maybe_rename_session(job_id, session_id, question):
@@ -775,7 +851,8 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
         try:
             # 先取历史再插入新问题——否则历史里已含本条问题，
             # _build_messages 末尾再 append 一次会把问题发给模型两遍
-            history = _get_session_history(job_id, session_id)
+            # （_history_for_prompt = 取历史 + 上下文预算裁剪，meta 供前端显示"已精简"）
+            history, history_meta = _history_for_prompt(job_id, session_id)
             # 本轮发给模型的问题：新提问 = 用户输入；重新生成中间轮 = 该轮原提问
             ask = question
 
@@ -792,7 +869,9 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
                     return
                 prev = target["prev"]
                 variant_group = target["group"] or _gen_variant_group()
-                history = _get_session_history(job_id, session_id, before_id=target["user_id"])
+                history, history_meta = _history_for_prompt(
+                    job_id, session_id, before_id=target["user_id"],
+                )
                 ask = target["question"]
                 conn = get_connection()
                 try:
@@ -813,6 +892,14 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
 
             search_mode = _resolve_search_mode(msg)
             search_text = ""
+            # 上下文被精简过就如实告知（不是错误，是"模型看不到的那部分"的说明）
+            if history_meta.get("omitted_turns") or history_meta.get("truncated_messages"):
+                logger.info(
+                    f"[chat] 上下文精简 {job_id}/{session_id}: "
+                    f"省略 {history_meta['omitted_turns']} 轮 / {history_meta['omitted_chars']} 字符, "
+                    f"单条截断 {history_meta['truncated_messages']} 条"
+                )
+                yield _sse({"type": "context", **history_meta})
             if search_mode != "off":
                 # 检索词 = 本轮提问（重生成中间轮时即该轮提问）；
                 # 仅存量空提问行才回退用历史里最近一条用户消息

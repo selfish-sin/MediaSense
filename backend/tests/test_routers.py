@@ -1661,6 +1661,137 @@ class TestChatRegenAnyTurn:
         assert marks[self.a3]["is_active"] == 1                                       # 其它轮不动
 
 
+# ── 模型上下文预算（字符级裁剪） ──
+class TestChatContextBudget:
+    """`_get_session_history(limit=30)` 只按行数截断、单条不截：长会话会把 prompt 顶爆。
+    本类锁定字符预算契约：按**整轮**丢（不留"有问无答"）、最新轮必留、单条超限打标记、
+    裁剪后必须经 SSE `context` 事件如实告知前端。"""
+
+    @staticmethod
+    def _rows(*specs):
+        return [{"role": role, "content": content} for role, content in specs]
+
+    def test_within_budget_keeps_everything(self):
+        rows = self._rows(("user", "问一"), ("assistant", "答一"), ("user", "问二"), ("assistant", "答二"))
+        kept, meta = routers_chat._trim_history_by_budget(rows, max_chars=24000)
+
+        assert kept == rows
+        assert meta == {"budget": 24000, "omitted_turns": 0, "omitted_chars": 0,
+                        "truncated_messages": 0, "kept_messages": 4}
+
+    def test_over_budget_drops_oldest_turns_whole(self):
+        """★ 核心：超预算从最旧整轮丢，保留的是完整轮（不出现孤立的 assistant）"""
+        rows = self._rows(("user", "u" * 50), ("assistant", "a" * 50),
+                          ("user", "v" * 50), ("assistant", "b" * 50))
+
+        kept, meta = routers_chat._trim_history_by_budget(rows, max_chars=120)
+
+        assert [m["content"][0] for m in kept] == ["v", "b"]
+        assert [m["role"] for m in kept] == ["user", "assistant"]
+        assert meta["omitted_turns"] == 1 and meta["omitted_chars"] == 100
+        assert meta["kept_messages"] == 2
+
+    def test_budget_boundary_keeps_multiple_complete_turns(self):
+        rows = self._rows(("user", "1" * 40), ("assistant", "2" * 40),
+                          ("user", "3" * 40), ("assistant", "4" * 40),
+                          ("user", "5" * 40), ("assistant", "6" * 40))
+
+        kept, meta = routers_chat._trim_history_by_budget(rows, max_chars=160)
+
+        assert [m["content"][0] for m in kept] == ["3", "4", "5", "6"]
+        assert meta["omitted_turns"] == 1
+
+    def test_latest_turn_always_kept_even_when_alone_over_budget(self):
+        """最新一轮就是用户刚问的这轮，丢了等于失忆 → 无论如何保留"""
+        rows = self._rows(("user", "老" * 500), ("assistant", "旧" * 500),
+                          ("user", "新" * 500), ("assistant", "答" * 500))
+
+        kept, meta = routers_chat._trim_history_by_budget(rows, max_chars=100)
+
+        assert kept == rows[-2:]
+        assert meta["omitted_turns"] == 1
+
+    def test_single_huge_message_truncated_with_marker(self):
+        rows = self._rows(("user", "问"), ("assistant", "长" * 500))
+
+        kept, meta = routers_chat._trim_history_by_budget(rows, max_chars=10000, message_max=100)
+
+        assert meta["truncated_messages"] == 1
+        assert "内容较长，已截断" in kept[-1]["content"]
+        assert len(kept[-1]["content"]) < 500
+        assert rows[-1]["content"] == "长" * 500          # 不改动入参（调用方可能还在用）
+
+    def test_zero_budget_disables_char_trimming(self):
+        """max_chars<=0 = 关闭预算（退回纯行数截断的旧行为，可回退开关）"""
+        rows = self._rows(("user", "问" * 10), ("assistant", "答" * 10))
+
+        kept, meta = routers_chat._trim_history_by_budget(rows, max_chars=0)
+
+        assert kept == rows
+        assert meta["omitted_turns"] == 0 and meta["truncated_messages"] == 0
+
+    def test_history_for_prompt_wires_budget_and_reports_meta(self, monkeypatch):
+        """_history_for_prompt = 取历史 + 预算裁剪（_get_session_history 契约不变）"""
+        rows = self._rows(("user", "老" * 100), ("assistant", "旧" * 100),
+                          ("user", "新" * 10), ("assistant", "答" * 10))
+        monkeypatch.setattr("routers.chat._get_session_history", lambda *a, **k: rows)
+        monkeypatch.setattr(routers_chat, "HISTORY_MAX_CHARS", 50)
+
+        kept, meta = routers_chat._history_for_prompt("j1", "s1")
+
+        assert [m["content"][0] for m in kept] == ["新", "答"]
+        assert meta["budget"] == 50 and meta["omitted_turns"] == 1
+
+    # ---- SSE：被裁剪时必须如实告知（前端据此显示"已省略较早的 N 轮"提示行） ----
+
+    def _stub_stream(self, monkeypatch, history):
+        """短路 DB/模型/搜索，只观察 SSE 事件（同 TestChatRouter._stub_stream 姿势）"""
+        monkeypatch.setattr("routers.chat.get_job", lambda job_id: {
+            "id": job_id, "status": "completed", "result_text": "已有分析",
+            "files": {}, "model": "m1",
+        })
+        monkeypatch.setattr("routers.chat.get_model_by_key", lambda key: {
+            "key": "m1", "model_id": "m1",
+            "endpoint": "https://x.example.com/v1/chat/completions",
+            "api_key": "sk-x", "auth_type": "bearer",
+        })
+        monkeypatch.setattr("routers.chat._ensure_session", lambda *a, **k: None)
+        monkeypatch.setattr("routers.chat._get_session_history", lambda *a, **k: history)
+        monkeypatch.setattr("routers.chat._insert_chat", lambda *a, **k: 1)
+        monkeypatch.setattr("routers.chat._maybe_rename_session", lambda *a, **k: None)
+
+        def _boom(*a, **k):
+            raise RuntimeError("模型调用被测试短路")
+
+        monkeypatch.setattr("routers.chat.httpx.AsyncClient", _boom)
+
+        async def _not_disconnected(self):
+            return False
+
+        monkeypatch.setattr("starlette.requests.Request.is_disconnected", _not_disconnected)
+
+    def test_stream_emits_context_event_when_trimmed(self, client, monkeypatch):
+        """★ 回归锚点：历史被裁剪要经 SSE 透出（否则用户不知道模型"没看到"旧对话）"""
+        self._stub_stream(monkeypatch, self._rows(
+            ("user", "老问题" * 50), ("assistant", "老回答" * 50), ("user", "上一轮提问")))
+        monkeypatch.setattr(routers_chat, "HISTORY_MAX_CHARS", 20)
+
+        resp = client.post("/api/jobs/j1/chat/sessions/s1/stream", json={"content": "这次的问题"})
+
+        assert resp.status_code == 200
+        assert '"type": "context"' in resp.text
+        assert '"omitted_turns": 1' in resp.text
+        assert '"budget": 20' in resp.text
+
+    def test_stream_no_context_event_when_within_budget(self, client, monkeypatch):
+        self._stub_stream(monkeypatch, self._rows(("user", "上一轮提问"), ("assistant", "上一轮回答")))
+
+        resp = client.post("/api/jobs/j1/chat/sessions/s1/stream", json={"content": "这次的问题"})
+
+        assert resp.status_code == 200
+        assert '"type": "context"' not in resp.text
+
+
 # ── ASR 状态 ──
 class TestAsrStatusRouter:
     @pytest.fixture(autouse=True)
