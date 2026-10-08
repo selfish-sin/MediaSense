@@ -24,14 +24,17 @@ Key 解析两级兜底：环境变量 → config.py（gitignored，不入库）�
 设计约定：搜索只负责取回原始链接与摘要，**不调用任何 LLM 做总结**；
 总结交给用户自己选的回答模型（提示词里带上编号资料）。
 失败不静默：web_search_collect 返回的 SearchOutcome.error 承载可行动原因。
+**时间预算**：整条链共享 SEARCH_TOTAL_BUDGET（默认 25s），每级只拿剩余时间，
+耗尽即停并说明原因——不做"每级各自吃满超时"的串行白等。
 """
 import asyncio
 import importlib.util
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import List, Dict, NamedTuple, Optional
 
 import httpx
 
@@ -58,6 +61,12 @@ FIRECRAWL_TIMEOUT = 25.0
 # 经代理会 TLS 握手失败（auto 聚合可用）。故拆成「单请求超时」+「整体预算」两个阈值。
 DDGS_REQUEST_TIMEOUT = 10.0
 DDGS_TOTAL_TIMEOUT = 25.0
+
+# 整条链的**总预算**（秒）：四级串行 await，若每级都吃满自己的超时，最坏要 ~90s 用户干等。
+# 现在四级共享这一个预算——每级只拿到「剩余时间」，剩余不足 SEARCH_MIN_SLICE 就不再启动下一级，
+# 被跳过的级会写进 error（哪级没试、为什么），不静默。设 <=0 关闭预算（退回各级独立超时）。
+SEARCH_TOTAL_BUDGET = float(os.getenv("SEARCH_TOTAL_BUDGET_SECONDS", "25"))
+SEARCH_MIN_SLICE = float(os.getenv("SEARCH_MIN_SLICE_SECONDS", "3"))
 
 
 class SearchUnavailable(Exception):
@@ -399,92 +408,135 @@ def fmt_sources(sources: List[Dict[str, str]]) -> str:
     return "\n\n".join(lines)
 
 
+class _HttpProvider(NamedTuple):
+    """HTTP 型搜索后端声明（加一级 = 在这张表里加一行）。
+
+    函数以**模块内名字**声明、调用时再解析：导入时捕获函数对象会让测试打桩
+    （monkeypatch.setattr(web_search, "tavily_search", fake)）与运行时替换失效。
+    """
+
+    name: str          # 展示名；SearchOutcome.provider 取其小写
+    configured_name: str
+    search_name: str
+    timeout: float
+    fail_label: str    # 失败文案前缀，如 "Ollama 联网搜索失败"
+    zero_label: str    # 0 条结果文案
+    missing_note: str = ""  # 未配置 Key 时的可行动提示（空串 = 跳过且不写 error，避免噪音）
+
+
+_HTTP_PROVIDERS = (
+    _HttpProvider(
+        "Ollama", "ollama_configured", "ollama_search", OLLAMA_TIMEOUT,
+        "Ollama 联网搜索失败", "Ollama 联网搜索返回 0 条结果",
+        "未配置 Ollama 搜索 Key（可设环境变量 OLLAMA_SEARCH_API_KEY 或写入 config.py，"
+        "申请入口：ollama.com/settings/keys）",
+    ),
+    _HttpProvider(
+        "Tavily", "tavily_configured", "tavily_search", TAVILY_TIMEOUT,
+        "Tavily 搜索失败", "Tavily 返回 0 条结果",
+    ),
+    _HttpProvider(
+        "Firecrawl", "firecrawl_configured", "firecrawl_search", FIRECRAWL_TIMEOUT,
+        "Firecrawl 搜索失败", "Firecrawl 返回 0 条结果",
+    ),
+)
+
+
 async def web_search_collect(
     query: str,
     max_results: int = DEFAULT_RESULTS,
     snippet_limit: int = 500,
+    total_budget: float = SEARCH_TOTAL_BUDGET,
 ) -> SearchOutcome:
     """联网检索（追问 / 深度研究共用）：Ollama → Tavily → Firecrawl → DDGS。
 
     前三级未配 Key 自动跳过（跳过原因记入 error 汇总）；任何一级成功即返回。
+    **整条链共享 `total_budget` 秒**（<=0 关闭）：每级只拿到「剩余时间」作超时，
+    剩余不足 `SEARCH_MIN_SLICE` 即停止后续兜底并把原因写进 error——不做「每级各自
+    吃满超时」的串行白等（那是修复前最坏 ~90s 的来源）。
     无论成功失败都返回 SearchOutcome；失败原因写在 `error`（绝不静默返回空）。
     """
     query = (query or "").strip()
     if not query:
         return SearchOutcome(error="搜索关键词为空")
 
+    deadline = time.monotonic() + total_budget if total_budget and total_budget > 0 else None
     errors: List[str] = []
 
-    # ---- 1) Ollama（免费主路径）----
-    if ollama_configured():
-        try:
-            results = await ollama_search(query, max_results=max_results, snippet_limit=snippet_limit)
-            if results:
-                text = fmt_sources(results)
-                return SearchOutcome(sources=results, text=text, provider="ollama")
-            errors.append("Ollama 联网搜索返回 0 条结果")
-        except SearchUnavailable as exc:
-            errors.append(str(exc))
-        except Exception as exc:
-            msg = _short_error(exc)
-            errors.append(f"Ollama 联网搜索失败（{msg}）")
-            logger.warning(f"[web_search] Ollama 失败: {msg}")
-    else:
+    def _budget_block(name: str) -> bool:
+        """剩余预算不足以再启动一级 → 记原因并返回 True（调用方跳过该级）"""
+        if deadline is None:
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining >= SEARCH_MIN_SLICE:
+            return False
         errors.append(
-            "未配置 Ollama 搜索 Key（可设环境变量 OLLAMA_SEARCH_API_KEY 或写入 config.py，"
-            "申请入口：ollama.com/settings/keys）"
+            f"{name}：未尝试（联网检索总预算 {total_budget:.0f}s 已用尽，剩余 {max(remaining, 0):.1f}s）"
         )
+        return True
 
-    # ---- 2) Tavily ----
-    if tavily_configured():
+    def _budget_slice(default_timeout: float) -> "tuple[float, bool]":
+        """本级可用超时 = min(默认超时, 剩余预算)；第二个返回值表示是否被预算压过"""
+        if deadline is None:
+            return default_timeout, False
+        remaining = max(deadline - time.monotonic(), 0.0)
+        if remaining < default_timeout:
+            return remaining, True
+        return default_timeout, False
+
+    # ---- 1~3) Ollama → Tavily → Firecrawl ----
+    for provider in _HTTP_PROVIDERS:
+        configured = globals()[provider.configured_name]
+        if not configured():
+            if provider.missing_note:
+                errors.append(provider.missing_note)
+            continue
+        if _budget_block(provider.name):
+            continue
+        timeout, sliced = _budget_slice(provider.timeout)
+        search = globals()[provider.search_name]
         try:
-            results = await tavily_search(query, max_results=max_results, snippet_limit=snippet_limit)
-            if results:
-                text = fmt_sources(results)
-                logger.info(f"[web_search] Tavily 返回 {len(results)} 条来源")
-                return SearchOutcome(sources=results, text=text, provider="tavily")
-            errors.append("Tavily 返回 0 条结果")
+            results = await search(
+                query, max_results=max_results, snippet_limit=snippet_limit, timeout=timeout,
+            )
         except SearchUnavailable as exc:
             errors.append(str(exc))
         except Exception as exc:
             msg = _short_error(exc)
-            errors.append(f"Tavily 搜索失败（{msg}）")
-            logger.warning(f"[web_search] Tavily 失败: {msg}")
-
-    # ---- 3) Firecrawl ----
-    if firecrawl_configured():
-        try:
-            results = await firecrawl_search(query, max_results=max_results, snippet_limit=snippet_limit)
+            errors.append(f"{provider.fail_label}（{msg}）" + ("；受联网检索总预算限制" if sliced else ""))
+            logger.warning(f"[web_search] {provider.name} 失败: {msg}")
+        else:
             if results:
-                text = fmt_sources(results)
-                logger.info(f"[web_search] Firecrawl 返回 {len(results)} 条来源")
-                return SearchOutcome(sources=results, text=text, provider="firecrawl")
-            errors.append("Firecrawl 返回 0 条结果")
-        except SearchUnavailable as exc:
-            errors.append(str(exc))
-        except Exception as exc:
-            msg = _short_error(exc)
-            errors.append(f"Firecrawl 搜索失败（{msg}）")
-            logger.warning(f"[web_search] Firecrawl 失败: {msg}")
+                logger.info(f"[web_search] {provider.name} 返回 {len(results)} 条来源")
+                return SearchOutcome(
+                    sources=results, text=fmt_sources(results), provider=provider.name.lower(),
+                )
+            errors.append(provider.zero_label)
 
     # ---- 4) DDGS 兜底 ----
     if ddgs_available():
-        try:
-            results = await ddgs_search(query, max_results=max_results)
-            if results:
-                text = fmt_sources(results)
-                logger.info(f"[web_search] DDGS 兜底返回 {len(results)} 条来源")
-                return SearchOutcome(sources=results, text=text, provider="ddgs")
-            errors.append("DuckDuckGo 返回 0 条结果")
-        except asyncio.TimeoutError:
-            errors.append(
-                f"DuckDuckGo 兜底超时（{DDGS_TOTAL_TIMEOUT:.0f}s）；若本机需代理，"
-                "请在 config.py 设 PROXY 或设置 HTTPS_PROXY 环境变量"
-            )
-        except Exception as exc:
-            msg = _short_error(exc)
-            errors.append(f"DuckDuckGo 兜底失败（{msg}）")
-            logger.warning(f"[web_search] DDGS 兜底失败: {msg}")
+        if not _budget_block("DuckDuckGo 兜底"):
+            timeout, sliced = _budget_slice(DDGS_TOTAL_TIMEOUT)
+            try:
+                # ddgs_search 内部自带 DDGS_TOTAL_TIMEOUT；这里再套一层是为了让**总预算**说了算
+                results = await asyncio.wait_for(
+                    ddgs_search(query, max_results=max_results), timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                errors.append(
+                    f"DuckDuckGo 兜底超时（{timeout:.0f}s"
+                    + ("，受联网检索总预算限制" if sliced else "")
+                    + "）；若本机需代理，请在 config.py 设 PROXY 或设置 HTTPS_PROXY 环境变量"
+                )
+            except Exception as exc:
+                msg = _short_error(exc)
+                errors.append(f"DuckDuckGo 兜底失败（{msg}）")
+                logger.warning(f"[web_search] DDGS 兜底失败: {msg}")
+            else:
+                if results:
+                    logger.info(f"[web_search] DDGS 兜底返回 {len(results)} 条来源")
+                    return SearchOutcome(sources=results, text=fmt_sources(results), provider="ddgs")
+                errors.append("DuckDuckGo 返回 0 条结果")
     else:
         errors.append("DuckDuckGo 兜底不可用（未安装 ddgs 包）")
 
