@@ -2318,7 +2318,7 @@
           "export"
         ],
         "summary": "Export Docx",
-        "description": "导出为 Word 文档（python-docx）",
+        "description": "导出为 Word 文档（python-docx，渲染见 services/md_render.render_docx）",
         "operationId": "export_docx_api_export_docx_post",
         "requestBody": {
           "content": {
@@ -2358,7 +2358,7 @@
           "export"
         ],
         "summary": "Export Pdf",
-        "description": "导出为 PDF（优先级：weasyprint → fpdf2）",
+        "description": "导出为 PDF（渲染见 services/md_render.render_pdf：weasyprint 优先 → fpdf2 兜底）",
         "operationId": "export_pdf_api_export_pdf_post",
         "requestBody": {
           "content": {
@@ -3624,75 +3624,6 @@
               "default": 300,
               "title": "Lines"
             }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/search": {
-      "get": {
-        "tags": [
-          "search"
-        ],
-        "summary": "Web Search",
-        "description": "网页搜索 API",
-        "operationId": "web_search_api_search_get",
-        "parameters": [
-          {
-            "name": "q",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "description": "搜索关键词",
-              "title": "Q"
-            },
-            "description": "搜索关键词"
-          },
-          {
-            "name": "max_results",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 50,
-              "minimum": 1,
-              "description": "最大结果数",
-              "default": 5,
-              "title": "Max Results"
-            },
-            "description": "最大结果数"
-          },
-          {
-            "name": "format",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "description": "返回格式: json | context",
-              "default": "json",
-              "title": "Format"
-            },
-            "description": "返回格式: json | context"
           }
         ],
         "responses": {
