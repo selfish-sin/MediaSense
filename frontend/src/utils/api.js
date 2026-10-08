@@ -297,10 +297,8 @@ export const chatApi = {
   },
 }
 
-// ============ 网页搜索 API ============
-export const searchApi = {
-  search: (q, maxResults = 5, engine = 'pro') =>
-    api.get('/search', { params: { q, max_results: maxResults, engine } }),
-}
+// ★ 2026-10-08 删除 searchApi 与 /api/search：全前端零调用方，且后端该端点
+//   search_web() 失败时静默返回空列表（死按钮风险面）。联网检索现在只有一条路：
+//   追问面板的联网三态 → POST /api/jobs/{id}/chat/sessions/{sid}/stream（见 utils/api.js chatApi）。
 
 export default api

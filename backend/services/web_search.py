@@ -551,34 +551,10 @@ async def web_search_collect(
     return SearchOutcome(error=error)
 
 
-async def search_web(
-    query: str,
-    max_results: int = DEFAULT_RESULTS,
-) -> List[Dict[str, str]]:
-    """网页搜索（Ollama → Tavily → Firecrawl → DDGS）。
-
-    返回 [{title,url,snippet,media,date}, ...]；失败返回空列表（原因见日志，
-    需要可行动原因的调用方请直接用 web_search_collect）。
-    """
-    outcome = await web_search_collect(query, max_results=max_results)
-    return outcome.sources
-
-
-def format_search_context(results: List[Dict[str, str]]) -> str:
-    """将搜索结果格式化为 AI 可用的上下文文本"""
-    if not results:
-        return "（未搜索到相关结果）"
-
-    lines = ["# 网络搜索结果", ""]
-    for i, r in enumerate(results, 1):
-        lines.append(f"## {i}. {r.get('title', '来源')}")
-        if r.get("url"):
-            lines.append(f"URL: {r['url']}")
-        lines.append(f"摘要: {r.get('snippet', '')}")
-        if r.get("date"):
-            lines.append(f"日期: {r['date']}")
-        lines.append("")
-    return "\n".join(lines)
+# ★ 2026-10-08 删除 search_web() 与 format_search_context()：
+#   唯一调用者是已删除的 routers/search.py（/api/search，前端零调用的死端点），
+#   且 search_web() 失败静默返回空列表——正是上一轮点名的「死按钮风险面」。
+#   现存调用方（追问 / 深度研究）一律直接用 web_search_collect()，失败原因可行动。
 
 
 def describe_search_backends() -> Dict[str, Optional[str]]:

@@ -26,7 +26,6 @@ def app():
     from routers.download import router as download_router
     from routers.templates import router as templates_router
     from routers.chat import router as chat_router
-    from routers.search import router as search_router
 
     app.include_router(jobs_router, prefix="/api/jobs")
     app.include_router(jobs_ai_router, prefix="/api/jobs")
@@ -39,7 +38,7 @@ def app():
     app.include_router(download_router, prefix="/api/download")
     app.include_router(templates_router, prefix="/api/templates")
     app.include_router(chat_router, prefix="/api/jobs")
-    app.include_router(search_router, prefix="")
+    # ★ search_router 已随 /api/search 端点删除（2026-10-08）
     return app
 
 
@@ -999,14 +998,8 @@ class TestTemplatesRouter:
 
 
 # ── Search ──
-class TestSearchRouter:
-    def test_search(self, client):
-        mock_result = [{"title": "result", "url": "https://x.com", "snippet": "desc"}]
-        with patch("routers.search.search_web", return_value=mock_result):
-            with patch("routers.search.format_search_context", return_value="ctx"):
-                resp = client.get("/api/search?q=python")
-                assert resp.status_code == 200
-                assert resp.json()["success"] is True
+# ★ 2026-10-08 删除 TestSearchRouter 与 app fixture 里的 search_router 注册：
+#   /api/search 端点整体移除（前端零调用方 + search_web 失败静默）。
 
 
 # ── Export ──

@@ -230,8 +230,11 @@ from routers.bilibili import router as bilibili_router  # noqa: E402 — 路由�
 from routers.download import router as download_router  # noqa: E402 — 路由载入依赖前面的启动配置
 from routers.templates import router as templates_router  # noqa: E402 — 路由载入依赖前面的启动配置
 from routers.chat import router as chat_router  # noqa: E402 — 路由载入依赖前面的启动配置
-from routers.search import router as search_router  # noqa: E402 — 路由载入依赖前面的启动配置
 from routers.storage_cleanup import router as storage_cleanup_router  # noqa: E402 — 路由载入依赖前面的启动配置
+# ★ 2026-10-08 删除 routers/search.py 与 /api/search：前端零调用方，search_web()
+#   失败静默返回空列表（死按钮风险面）。联网检索的真链路是 services/web_search
+#   的 web_search_collect()，由追问（routers/chat.py）与深度研究直接消费，
+#   失败原因经 SSE 显式透出、不静默。
 # ★ 格式转换已外包到独立工具，converter router 已删除（清理函数迁至 services.format_converter）
 
 app.include_router(jobs_router,   prefix="/api/jobs",      tags=["jobs"])
@@ -286,7 +289,6 @@ async def get_logs(lines: int = 300):
     """返回后端日志文件最近 N 行（尾部窗口；不返回全文件行数——
     前端以旧窗口末行为锚点做尾部同步，见 useBackendLogs.fetchLogs）"""
     return {"lines": _read_log_tail(lines)}
-app.include_router(search_router,  prefix="",             tags=["search"])
 
 
 # ============ Token 统计接口（直接挂在 main，不单独建 router） ============

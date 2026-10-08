@@ -327,14 +327,9 @@ class TestWebSearchCollect:
         assert "0 条结果" in outcome.error
         assert "DuckDuckGo 兜底失败" in outcome.error
 
-    @pytest.mark.asyncio
-    async def test_search_web_delegates_and_swallows_to_list(self, monkeypatch):
-        """search_web 保持既有签名（routers/search.py 复用）：成功给 list，失败给 []"""
-        monkeypatch.setenv("OLLAMA_SEARCH_API_KEY", "sk-x")
-        monkeypatch.setattr(web_search.httpx, "AsyncClient",
-                            lambda **kw: _fake_client(200, OLLAMA_OK))
-
-        assert len(await web_search.search_web("q")) == 2
+    # 2026-10-08：原 test_search_web_delegates_and_swallows_to_list 随 search_web() 删除
+    #   一并移除（它守的正是「失败静默返回空列表」这个被点名的行为）。
+    # web_search_collect() 的成功/失败语义由本文件上方的 TestWebSearchCollect 覆盖。
 
 
 class TestDescribeSearchBackends:
