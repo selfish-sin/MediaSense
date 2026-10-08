@@ -1,0 +1,1 @@
+function e(e){return String(e??``).replace(/\s+/g,` `).trim()}function t(t,n=60){if(!t||t.status!==`failed`)return``;let r=e(t.error),i=Number(n)>0?Number(n):60;return r?r.length<=i?r:`${r.slice(0,i)}…`:`失败（无错误详情）`}function n(t){return!t||t.status!==`failed`?``:e(t.error)}export{n,t};
