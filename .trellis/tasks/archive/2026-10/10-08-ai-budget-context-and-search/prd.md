@@ -39,11 +39,11 @@
 
 ## Acceptance Criteria
 
-- [ ] 检索总预算：单级慢/失败时总耗时 ≤ 预算 + 单级最小粒度；错误文案说明被截断
-- [ ] 聊天上下文：超预算时丢最旧整轮、最新一轮完整保留；meta 计数准确；未超预算时行为与改前逐字节一致
-- [ ] `context` 事件只在真的裁剪时发出；前端提示行可读且不误导（不是错误）
-- [ ] 既有 1060 后端 / 289 前端用例全绿（`_get_session_history` 契约未变）
-- [ ] 门禁：pytest / vitest / lint / build 全绿
+- [x] 检索总预算：单级慢/失败时总耗时 ≤ 预算 + 单级最小粒度；错误文案说明被截断
+- [x] 聊天上下文：超预算时丢最旧整轮、最新一轮完整保留；meta 计数准确；未超预算时行为与改前逐字节一致
+- [x] `context` 事件只在真的裁剪时发出；前端提示行可读且不误导（不是错误）
+- [x] 既有用例全绿（后端 1075 / 前端 293；`_get_session_history` 契约未变）
+- [x] 门禁：pytest / vitest / lint / build 全绿
 
 ## 测试
 
@@ -60,3 +60,22 @@
 
 - 明确不做：不引入 token 计费/分词（字符预算已足够解决问题且与既有量纲一致）；不改模型上下文内容排序（上一任务刚锁定）；
   不做按模型的差异化窗口（模型表没有 context 字段，先不做契约扩张）。
+- 提示行只在本次流式回答时显示，**刷新后不保留**（`context` 事件与 `search` 状态同款不落库）；要长期可见需先设计持久化字段。
+- 提示行位置：渲染在回答正文之下、来源入口与追问建议之上（同 search 状态气泡），不是消息顶部。
+
+## 验收证据（2026-10-08）
+
+- **门禁**：`python verify.py all` → ruff + pytest（1075）+ eslint + vitest（293）+ build 全绿；`ALL CHECKS PASSED`。
+- **OpenAPI 零 diff**：重导 `backend/scripts/export_openapi.py` 仍为 `paths=80`，`contracts/openapi.json` 无改动
+  （本次只新增 SSE 事件类型与内部纯函数，未动 REST 契约）。
+- **密钥接入实测**：Tavily / Firecrawl Key 只写入 gitignored `backend/config.py`（不入库、不进文档）；
+  `describe_search_backends()` 现为 ollama/tavily/firecrawl 全 configured + ddgs available。
+- **检索真实链路**：`web_search_collect("中医 附子 用法 用量")` → `provider="ollama"`、4 条来源、1.8s（远在 25s 预算内）；
+  `total_budget=0.5` → 四级全部"未尝试（总预算已用尽，剩余 0.5s）"，总耗时 0.0s（不再串行白等）。
+- **上下文真实链路**：临时造 job/session（历史 2 轮 × 18006 字符 > 24000 预算）→ 真实服务流式追问：
+  SSE `{"type":"context","budget":24000,"omitted_turns":1,"omitted_chars":18012,"kept_messages":2}` →
+  `search` ok（provider=ollama，5 条来源）→ 模型正常作答；测试行已清理（残留 0）。
+- **浏览器 UI**：结果页追问面板实测回答下方出现提示行「已省略较早的 1 轮对话（超出上下文预算 24k 字符），仅最新轮次完整参与提问」，
+  虚线 chip + 剪刀图标，不与正文/来源/追问建议重叠。
+- **踩坑**：运行中的 7001 服务启动于 10:53，而代码 11:17/11:24 才改 → 浏览器会测到旧行为；
+  必须 `taskkill` + 重启（无 `--reload`）并用 `netstat` + 接口响应双验证后再验收。
