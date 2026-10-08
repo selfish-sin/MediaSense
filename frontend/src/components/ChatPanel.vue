@@ -356,6 +356,7 @@ import { chatApi } from '../utils/api'
 import { copyText } from '../utils/clipboard'
 import { buildAiText, buildConversationMarkdown, contextTrimLabel, formatChatTime, SEARCH_MODES, searchStateLabel } from '../utils/chatExport'
 import { buildChatTurns } from '../utils/chatTurns'
+import { loadChatPrefs, saveChatPrefs } from '../utils/chatPrefs'
 import { isDialogCancel } from '../utils/errorNotice'
 import { useMarkdownListCache } from '../composables/useMarkdownRender'
 import { useModelStore } from '../stores/modelStore'
@@ -375,9 +376,15 @@ const { htmlOf } = useMarkdownListCache(
 )
 const input = ref('')
 const streaming = ref(false)
-// 联网三态：off 关闭 / strict 严格依据材料 / broad 广泛收集（见 utils/chatExport SEARCH_MODES）
-const searchMode = ref('off')
-const showThinking = ref(false)
+// ★ 联网三态与思考开关是**跨会话偏好**，不是临时状态：2026-10-08 起从 localStorage 起步
+//   （utils/chatPrefs.js，读失败/非法值回退 off/false），改动即存，刷新与切任务都保持。
+//   联网三态：off 关闭 / strict 严格依据材料 / broad 广泛收集（见 utils/chatExport SEARCH_MODES）
+const initialPrefs = loadChatPrefs()
+const searchMode = ref(initialPrefs.searchMode)
+const showThinking = ref(initialPrefs.showThinking)
+watch([searchMode, showThinking], ([mode, thinking]) => {
+  saveChatPrefs({ searchMode: mode, showThinking: thinking })
+})
 const selectedModel = ref('')
 const scrollRef = ref(null)
 const nearBottom = ref(true)
