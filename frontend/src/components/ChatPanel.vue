@@ -192,6 +192,12 @@
                     <span class="cp-dot" />{{ msg.thinking ? '思考中' : '生成中' }}
                   </div>
 
+                  <!-- 上下文精简提示：模型这次看不到被省略的旧对话，得让用户知道（不是错误） -->
+                  <div v-if="contextTrimLabel(msg.contextTrim)" class="cp-context-note">
+                    <el-icon :size="12"><Scissors /></el-icon>
+                    <span>{{ contextTrimLabel(msg.contextTrim) }}</span>
+                  </div>
+
                   <!-- 联网检索状态 / 来源入口：有来源即可点击展开（历史消息 search 事件不落库，
                        故条件不能只看 msg.search，否则历史来源永远没有展开入口） -->
                   <button
@@ -343,12 +349,12 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import {
   MessageCircle, Plus, Pencil, Trash2, ArrowDown, ArrowUp, Sparkles,
   Search, Copy, ChevronDown, ChevronLeft, ChevronRight, Globe, Square,
-  MoreVertical, RefreshCw, Download, ListChecks, Check,
+  MoreVertical, RefreshCw, Download, ListChecks, Check, Scissors,
 } from 'lucide-vue-next'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { chatApi } from '../utils/api'
 import { copyText } from '../utils/clipboard'
-import { buildAiText, buildConversationMarkdown, formatChatTime, SEARCH_MODES, searchStateLabel } from '../utils/chatExport'
+import { buildAiText, buildConversationMarkdown, contextTrimLabel, formatChatTime, SEARCH_MODES, searchStateLabel } from '../utils/chatExport'
 import { buildChatTurns } from '../utils/chatTurns'
 import { isDialogCancel } from '../utils/errorNotice'
 import { useMarkdownListCache } from '../composables/useMarkdownRender'
@@ -647,6 +653,7 @@ function normalizeChatRow(m) {
     token_usage: m.token_usage || null,
     created_at: m.created_at || '',
     search: null,
+    contextTrim: null,
     variant_group: m.variant_group || '',
     is_active: m.is_active ? 1 : 0,
   }
@@ -681,7 +688,7 @@ function switchVariant(msg, delta) {
   const idx = variantIndex(msg)
   const next = list[(idx + delta + list.length) % list.length]
   if (!next || next.id === msg.id) return
-  // 本地整套切换（内容/思考/来源/token/时间），持久化异步跟随（失败提示但不阻塞浏览）
+  // 本地整套切换（内容/思考/来源/token/时间/精简提示），持久化异步跟随（失败提示但不阻塞浏览）
   Object.assign(msg, {
     id: next.id,
     content: next.content || '',
@@ -690,6 +697,7 @@ function switchVariant(msg, delta) {
     token_usage: next.token_usage || null,
     created_at: next.created_at || '',
     search: null,
+    contextTrim: next.contextTrim || null,
   })
   chatApi.activateVariant(props.jobId, next.id).catch((e) => {
     ElMessage.warning('切换未保存: ' + (e?.message || '未知错误'))
@@ -795,6 +803,8 @@ async function onSend(overrideContent) {
           assistant.thinking += ev.delta || ''
         } else if (ev.type === 'content') {
           assistant.content += ev.delta || ''
+        } else if (ev.type === 'context') {
+          setContextTrim(assistant, ev)
         } else if (ev.type === 'search') {
           setSearchState(assistant, ev)
         } else if (ev.type === 'sources') {
@@ -895,6 +905,19 @@ function searchLabel(state) {
   return searchStateLabel(state)
 }
 
+// 上下文精简信息（SSE context 事件）同样写响应式代理：模板要立刻显示"已省略 N 轮"
+function setContextTrim(assistant, ev) {
+  const state = {
+    omitted_turns: ev.omitted_turns || 0,
+    omitted_chars: ev.omitted_chars || 0,
+    truncated_messages: ev.truncated_messages || 0,
+    budget: ev.budget || 0,
+  }
+  const live = messages.value.find((m) => m.id === assistant.id)
+  if (live) live.contextTrim = state
+  else assistant.contextTrim = state
+}
+
 // ===== 复制（格式化见 utils/chatExport.js 纯函数；复制反馈走 utils/clipboard 单点） =====
 
 function msgTime(msg) {
@@ -988,6 +1011,8 @@ async function onRegenerate(userMsg) {
           answer.thinking += ev.delta || ''
         } else if (ev.type === 'content') {
           answer.content += ev.delta || ''
+        } else if (ev.type === 'context') {
+          setContextTrim(answer, ev)
         } else if (ev.type === 'search') {
           setSearchState(answer, ev)
         } else if (ev.type === 'sources') {
@@ -1511,6 +1536,27 @@ watch(
 @keyframes cp-pulse {
   0%, 100% { opacity: 0.25; transform: scale(0.85); }
   50% { opacity: 1; transform: scale(1); }
+}
+
+/* ---- 上下文精简提示（不是错误，是被省略内容的事实说明） ---- */
+.cp-context-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 2px 0 6px;
+  padding: 3px 9px;
+  border-radius: 8px;
+  border: 1px dashed var(--app-chip-border, var(--app-border));
+  background: var(--app-chip-bg, transparent);
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.cp-context-note .el-icon {
+  flex-shrink: 0;
+  color: var(--app-text-placeholder, var(--app-text-secondary));
 }
 
 /* ---- 联网检索状态行 ---- */

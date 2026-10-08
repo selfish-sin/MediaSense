@@ -7,6 +7,7 @@ import {
   SEARCH_MODES,
   searchProviderName,
   searchStateLabel,
+  contextTrimLabel,
 } from '../utils/chatExport'
 
 describe('parseChatTime', () => {
@@ -121,5 +122,31 @@ describe('searchStateLabel（联网三态文案）', () => {
       '联网检索失败：未配置 Ollama 搜索 Key（已改用模型自身知识回答）',
     )
     expect(searchStateLabel(null)).toBe('')
+  })
+})
+
+describe('contextTrimLabel（上下文精简提示行）', () => {
+  it('无精简信息不显示（null/全零都返回空串）', () => {
+    expect(contextTrimLabel(null)).toBe('')
+    expect(contextTrimLabel({ budget: 24000, omitted_turns: 0, truncated_messages: 0 })).toBe('')
+  })
+
+  it('省略轮次带上预算与「仅最新轮完整」说明', () => {
+    const label = contextTrimLabel({ budget: 24000, omitted_turns: 3, truncated_messages: 0 })
+    expect(label).toContain('已省略较早的 3 轮对话')
+    expect(label).toContain('24k 字符')
+    expect(label).toContain('仅最新轮次完整参与提问')
+  })
+
+  it('单条截断与轮次省略可同时出现', () => {
+    const label = contextTrimLabel({ budget: 8000, omitted_turns: 1, truncated_messages: 2 })
+    expect(label).toContain('已省略较早的 1 轮对话')
+    expect(label).toContain('2 条过长消息已精简')
+  })
+
+  it('预算字段缺失时不编造数字', () => {
+    const label = contextTrimLabel({ omitted_turns: 1 })
+    expect(label).toContain('已省略较早的 1 轮对话')
+    expect(label).not.toContain('字符')
   })
 })

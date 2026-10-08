@@ -60,6 +60,24 @@ export function searchStateLabel(state) {
   return `联网检索失败：${state.message}（已改用模型自身知识回答）`
 }
 
+/**
+ * 上下文精简提示文案（SSE `context` 事件）。
+ * 不是错误：模型这次看不到被省略的旧对话，用户得知道，否则会以为"它忘了"。
+ * @param {null|{omitted_turns?:number, omitted_chars?:number, truncated_messages?:number, budget?:number}} info
+ */
+export function contextTrimLabel(info) {
+  if (!info) return ''
+  const turns = info.omitted_turns || 0
+  const truncated = info.truncated_messages || 0
+  if (!turns && !truncated) return ''
+  const budget = info.budget ? `${Math.round(info.budget / 1000)}k 字符` : ''
+  const parts = []
+  if (turns) parts.push(`已省略较早的 ${turns} 轮对话`)
+  if (truncated) parts.push(`${truncated} 条过长消息已精简`)
+  const reason = budget ? `（超出上下文预算 ${budget}）` : ''
+  return `${parts.join('、')}${reason}，仅最新轮次完整参与提问`
+}
+
 function sourceLine(source, index) {
   const title = source?.title || source?.url || '来源'
   const url = source?.url ? ` — ${source.url}` : ''
