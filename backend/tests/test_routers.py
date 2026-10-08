@@ -1791,6 +1791,67 @@ class TestChatContextBudget:
         assert resp.status_code == 200
         assert '"type": "context"' not in resp.text
 
+    # ── 模型超时（2026-10-08 并入预算体系） ──
+
+    def test_timeout_defaults_align_with_batch_stream(self):
+        """追问默认超时必须与批量流式（ai_processor 的 600s）对齐，不能再是 180s"""
+        import services.ai_processor as ai_processor
+
+        assert routers_chat.CHAT_MODEL_TIMEOUT == 600.0
+        assert routers_chat.CHAT_MODEL_CONNECT_TIMEOUT == 15.0
+        assert routers_chat.HTTPX_TIMEOUT.read == 600.0
+        assert routers_chat.HTTPX_TIMEOUT.connect == 15.0
+        # 批量侧的 600s 就在同一个仓库里，别让两边悄悄漂开
+        assert "timeout=600.0" in Path(ai_processor.__file__).read_text(encoding="utf-8")
+
+    def test_env_float_fallbacks(self, monkeypatch):
+        """非法/非正 env 值必须回退默认并 warn，不能让服务起不来"""
+        monkeypatch.setenv("CHAT_MODEL_TIMEOUT_SECONDS", "not-a-number")
+        assert routers_chat._env_float("CHAT_MODEL_TIMEOUT_SECONDS", 600.0) == 600.0
+        monkeypatch.setenv("CHAT_MODEL_TIMEOUT_SECONDS", "0")
+        assert routers_chat._env_float("CHAT_MODEL_TIMEOUT_SECONDS", 600.0) == 600.0
+        monkeypatch.setenv("CHAT_MODEL_TIMEOUT_SECONDS", "-5")
+        assert routers_chat._env_float("CHAT_MODEL_TIMEOUT_SECONDS", 600.0) == 600.0
+        monkeypatch.setenv("CHAT_MODEL_TIMEOUT_SECONDS", "900")
+        assert routers_chat._env_float("CHAT_MODEL_TIMEOUT_SECONDS", 600.0) == 900.0
+        monkeypatch.delenv("CHAT_MODEL_TIMEOUT_SECONDS", raising=False)
+        assert routers_chat._env_float("CHAT_MODEL_TIMEOUT_SECONDS", 600.0) == 600.0
+
+    def test_timeout_message_is_actionable(self):
+        """超时文案必须点明秒数 + 给可行动建议（不能只回一句 timeout）"""
+        import httpx as _httpx
+
+        msg = routers_chat._model_timeout_message(_httpx.ReadTimeout("read timed out"))
+        assert "600 秒" in msg
+        assert "CHAT_MODEL_TIMEOUT_SECONDS" in msg
+        assert "换" in msg
+
+        connect_msg = routers_chat._model_timeout_message(_httpx.ConnectTimeout("connect timed out"))
+        assert "连接" in connect_msg and "15" in connect_msg
+
+        pool_msg = routers_chat._model_timeout_message(_httpx.PoolTimeout("pool"))
+        assert "排队" in pool_msg
+
+    def test_stream_timeout_emits_actionable_error(self, client, monkeypatch):
+        """★ 回归锚点：模型超时时 SSE error 必须是人话，不是 str(ReadTimeout)"""
+        import httpx as _httpx
+
+        self._stub_stream(monkeypatch, self._rows(("user", "上一轮提问"), ("assistant", "上一轮回答")))
+
+        def _timeout(*a, **k):
+            raise _httpx.ReadTimeout("read timed out")
+
+        monkeypatch.setattr("routers.chat.httpx.AsyncClient", _timeout)
+
+        resp = client.post("/api/jobs/j1/chat/sessions/s1/stream", json={"content": "这次的问题"})
+
+        assert resp.status_code == 200
+        assert '"type": "error"' in resp.text
+        assert "600 秒内没有返回内容" in resp.text
+        assert "read timed out" not in resp.text, "不能再把裸异常串当错误文案"
+        # 超时也要收尾（前端据此清 loading 态）
+        assert '"type": "done"' in resp.text
+
 
 # ── ASR 状态 ──
 class TestAsrStatusRouter:

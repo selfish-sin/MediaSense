@@ -34,7 +34,47 @@ from config import DEFAULT_MODEL
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-HTTPX_TIMEOUT = httpx.Timeout(180.0, connect=15.0)
+# ★ 模型调用超时（2026-10-08 并入预算体系）：
+#   此前追问写死 httpx.Timeout(180.0)，而批量总结流式是 asyncio.wait_for(..., timeout=600)
+#   （services/ai_processor.py）——同一个模型在批里跑得完、在追问里被断，是「莫名其妙失败」
+#   的一大类成因，且 180s 到点时错误文案只是一句无信息量的 timeout。
+#   现在默认值与批量对齐（600s），两项均可 env 调整：
+#     CHAT_MODEL_TIMEOUT_SECONDS        总/读超时（默认 600，与批量流式一致）
+#     CHAT_MODEL_CONNECT_TIMEOUT_SECONDS 连接超时（默认 15，快速失败，不占长预算）
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name, "")
+    try:
+        value = float(raw)
+    except ValueError:
+        if raw:
+            logger.warning(f"{name}={raw!r} 不是数字，回退默认 {default}")
+        return default
+    if value <= 0:
+        logger.warning(f"{name}={value} 必须为正数，回退默认 {default}")
+        return default
+    return value
+
+
+CHAT_MODEL_TIMEOUT = _env_float("CHAT_MODEL_TIMEOUT_SECONDS", 600.0)
+CHAT_MODEL_CONNECT_TIMEOUT = _env_float("CHAT_MODEL_CONNECT_TIMEOUT_SECONDS", 15.0)
+
+HTTPX_TIMEOUT = httpx.Timeout(CHAT_MODEL_TIMEOUT, connect=CHAT_MODEL_CONNECT_TIMEOUT)
+
+
+def _model_timeout_message(exc: Exception) -> str:
+    """超时文案必须点明「多久没等到」并给出可行动建议（否则用户只能干瞪眼）"""
+    seconds = int(CHAT_MODEL_TIMEOUT)
+    if isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError, ConnectionError)):
+        return (
+            f"连接模型服务超时（{CHAT_MODEL_CONNECT_TIMEOUT:.0f} 秒内没连上）：请检查模型地址、网络或代理设置。"
+        )
+    if isinstance(exc, httpx.PoolTimeout):
+        return "模型请求排队超时：连接池已满，请稍后重试。"
+    return (
+        f"模型 {seconds} 秒内没有返回内容，回答已中断。"
+        f"可尝试：换一个更快的模型（设置页切换默认模型）、缩短提问或减少引用材料长度；"
+        f"若确实需要更长时间，可把环境变量 CHAT_MODEL_TIMEOUT_SECONDS 调大（当前 {seconds} 秒）。"
+    )
 
 DEFAULT_SESSION_TITLE = "新对话"
 SESSION_TITLE_MAX = 24
@@ -1008,6 +1048,35 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
                 variant_count = len(_variant_rows(job_id, session_id, variant_group))
             if not disconnected:
                 yield _sse({"type": "sources", "sources": sources})
+                yield _sse({
+                    "type": "done",
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "assistant_id": assistant_id,
+                    "token_usage": {"input": in_tok, "output": out_tok},
+                    "variant_group": variant_group,
+                    "variant_count": variant_count,
+                })
+        except (httpx.TimeoutException, asyncio.TimeoutError) as e:
+            # ★ 超时单独成句：通用分支只回 str(e)，对用户等于「莫名其妙失败」
+            logger.warning(f"追问模型超时 job={job_id} session={session_id}: {type(e).__name__}: {e}")
+            message = _model_timeout_message(e)
+            try:
+                assistant_id = _insert_chat(
+                    job_id, session_id, "assistant", "(回答超时)",
+                    thinking="".join(thinking_text) or None,
+                    sources=sources,
+                    token_usage={"input": in_tok, "output": out_tok},
+                    variant_group=variant_group,
+                    is_active=1,
+                )
+            except Exception:
+                assistant_id = None
+            if variant_group and assistant_id:
+                variant_count = len(_variant_rows(job_id, session_id, variant_group))
+            if not await request.is_disconnected():
+                yield _sse({"type": "sources", "sources": sources})
+                yield _sse({"type": "error", "message": message})
                 yield _sse({
                     "type": "done",
                     "session_id": session_id,
