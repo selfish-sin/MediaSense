@@ -165,6 +165,13 @@ ASR 缓存、依赖/验证/lifespan 规范回写，测试基线刷新为本轮�
 
 ### 新发现：强制重试的输入备份保护（优先处理）
 
+> **更正（2026-10-08）**：本项已修复，原文的"尚未修复"不再成立。修复见 commit `55480ab`
+> "fix(jobs): abort forced retry when input backup fails or fails verification"：
+> `backend/routers/jobs.py` 现在在 `shutil.rmtree(job_dir)` **之前**完成备份与大小校验，
+> 备份抛异常或校验不过都直接返回可行动错误（"已取消强制重试：未删除任何文件"），
+> 不再出现"备份失败→照删"。回归测试：`backend/tests/test_routers.py:294`（备份失败中止）
+> 与 `:320`（备份校验不通过中止）。本节其余内容保留为当时的审查记录。
+
 `backend/routers/jobs.py:466` 的 `retry_job(force=True)` 在输入备份 `shutil.copy2` 失败时，
 只将 backup_path 设为 None，仍继续 `shutil.rmtree(job_dir)`。如果 input_file 位于 job_dir 内，
 原素材可能被删除且没有可恢复副本。一次强制重试还会把成功备份恢复到 job_dir 并更新 input_file，
