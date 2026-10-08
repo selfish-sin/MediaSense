@@ -69,6 +69,11 @@ SEARCH_TOTAL_BUDGET = float(os.getenv("SEARCH_TOTAL_BUDGET_SECONDS", "25"))
 SEARCH_MIN_SLICE = float(os.getenv("SEARCH_MIN_SLICE_SECONDS", "3"))
 
 
+def _fmt_sec(seconds: float) -> str:
+    """秒数文案：整数不拖小数尾巴，非整数保留一位（0.5 → "0.5"，25.0 → "25"）"""
+    return f"{seconds:.1f}".rstrip("0").rstrip(".")
+
+
 class SearchUnavailable(Exception):
     """搜索后端不可用（未配置 Key 等），文案面向用户可行动。"""
 
@@ -471,7 +476,8 @@ async def web_search_collect(
         if remaining >= SEARCH_MIN_SLICE:
             return False
         errors.append(
-            f"{name}：未尝试（联网检索总预算 {total_budget:.0f}s 已用尽，剩余 {max(remaining, 0):.1f}s）"
+            f"{name}：未尝试（联网检索总预算 {_fmt_sec(total_budget)}s 已用尽，"
+            f"剩余 {max(remaining, 0):.1f}s）"
         )
         return True
 
@@ -524,7 +530,7 @@ async def web_search_collect(
                 )
             except asyncio.TimeoutError:
                 errors.append(
-                    f"DuckDuckGo 兜底超时（{timeout:.0f}s"
+                    f"DuckDuckGo 兜底超时（{_fmt_sec(timeout)}s"
                     + ("，受联网检索总预算限制" if sliced else "")
                     + "）；若本机需代理，请在 config.py 设 PROXY 或设置 HTTPS_PROXY 环境变量"
                 )
