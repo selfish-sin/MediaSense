@@ -11,6 +11,7 @@ import {
   getJobActionModel,
 } from '../utils/jobActions'
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
+import { failureLabel, failureTitle } from '../utils/jobFailure'
 import { isDialogCancel } from '../utils/errorNotice'
 import { useContainerWidth } from '../composables/useContainerWidth'
 import { HISTORY_COLUMN_BREAKPOINTS, resolveTableLayout } from '../utils/tableLayout'
@@ -508,6 +509,16 @@ onMounted(() => {
             </el-tag>
           </template>
         </el-table-column>
+        <!-- 失败原因内联：不必点进详情才知道为什么失败（error 早就在列表接口里，见 jobFailure.js） -->
+        <el-table-column label="失败原因" min-width="200" class-name="failure-col">
+          <template #default="{ row }">
+            <span
+              v-if="failureLabel(row)"
+              class="failure-reason"
+              :title="failureTitle(row) || failureLabel(row)"
+            >{{ failureLabel(row) }}</span>
+          </template>
+        </el-table-column>
         <el-table-column v-if="layout === 'full'" prop="model" label="模型" min-width="120" show-overflow-tooltip />
         <el-table-column v-if="layout === 'full'" label="创建时间" min-width="150">
           <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
@@ -623,5 +634,19 @@ onMounted(() => {
 }
 :root[data-theme="dark"] .batch-toolbar__count {
   color: var(--app-accent-1, #38bdf8);
+}
+
+/* ========== 失败原因列 ========== */
+/* 只在失败任务渲染一行；非失败任务单元格留空（见 jobFailure.js） */
+.failure-reason {
+  display: inline-block;
+  max-width: 100%;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-color-danger);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: help;
 }
 </style>

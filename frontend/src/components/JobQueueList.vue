@@ -7,6 +7,7 @@
  */
 import { computed } from 'vue'
 import { jobStatusLabel, jobStatusTagType } from '../utils/jobStatus'
+import { failureLabel, failureTitle } from '../utils/jobFailure'
 
 const props = defineProps({
   queue: { type: Object, default: null },
@@ -65,6 +66,12 @@ function itemLabel(item) {
         <span class="queue-name" :title="itemLabel(item)" @click="emit('select', item.id)">
           {{ itemLabel(item) }}
         </span>
+        <!-- 失败原因内联一行：队列快照本就带 error（_QUEUE_COLUMNS），不必点进详情 -->
+        <span
+          v-if="failureLabel(item)"
+          class="queue-failure"
+          :title="failureTitle(item) || failureLabel(item)"
+        >{{ failureLabel(item) }}</span>
         <el-tag size="small" :type="jobStatusTagType(runningStatus(item))" effect="dark">
           {{ jobStatusLabel(runningStatus(item)) }}
         </el-tag>
@@ -153,5 +160,17 @@ function itemLabel(item) {
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
+}
+/* 失败原因内联：任务名让出宽度，失败行也只占一行（悬停看全文） */
+.queue-failure {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
+  font-size: 12px;
+  color: var(--el-color-danger);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: help;
 }
 </style>
