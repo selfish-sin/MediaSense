@@ -77,6 +77,53 @@ class TestRecipes:
         for r in RECIPES:
             assert r["dimensions"].get("speech_fix") == "balanced", r["key"]
 
+    def test_process_inventory_recipe(self):
+        """过程盘点预设：记录员人设 + 描述性规则 + 过程盘点结构；不挂任何评价型模块"""
+        r = next(x for x in RECIPES if x["key"] == "process_inventory")
+        assert r["dimensions"]["role"] == "recorder"
+        assert r["dimensions"]["rules"] == "descriptive"
+        assert r["dimensions"]["output"] == "process_ledger"
+        # 不注入认知框架（mode）与类型预设（content_type）空模板，避免引入额外判断口径
+        assert r["dimensions"]["mode"] == "general"
+        assert r["dimensions"]["content_type"] == "general"
+        assert r["dimensions"]["tone"] == "新闻客观"
+
+    def test_descriptive_rule_allows_reasons_bans_judgement(self):
+        """用户要求（2026-10-10）：可以分析并说明「为什么会这么说」，但不评述
+        两条边界必须同时写死：理由还原有授权、好坏对错有禁令"""
+        tpl = _get_module_template("rules", "descriptive")
+        # 授权侧：理由、前提、推进关系、暗示
+        for kw in ("为什么这么说", "理由", "前提", "推进关系", "暗示"):
+            assert kw in tpl, kw
+        # 禁令侧：评价、外部标尺
+        assert "不做评价" in tpl
+        assert "不引外部标尺" in tpl
+        # 关键：不许讲理由 ≠ 不许讲评价，两条不能互相吞掉
+        assert "不等于不许讲理由" in tpl
+        # 正向加工范围写清，否则「不评述」会退化成什么都不做
+        for kw in ("整理", "简化"):
+            assert kw in tpl
+
+    def test_process_ledger_output_has_no_evaluation_slot(self):
+        """过程盘点结构：留「依据与为什么这么说」的位置，且不设评价栏"""
+        tpl = _get_module_template("output", "process_ledger")
+        assert "依据与为什么这么说" in tpl
+        assert "不设评价" in tpl
+        # 只拦「作为输出栏位的评价标题」；禁令声明句里点名这些词是必要的
+        for banned in ("## 整体评价", "## 优点", "## 不足", "## 改进建议"):
+            assert banned not in tpl, banned
+
+    def test_process_inventory_prompt_builds_clean(self):
+        """装配后：记录员人设与描述性纪律落地，且全文不出现评价栏"""
+        with patch("services.prompt_builder._load_module_overrides", return_value={}):
+            r = next(x for x in RECIPES if x["key"] == "process_inventory")
+            prompt = build_modular_prompt(r["dimensions"], "素材内容")
+        assert "忠实记录员" in prompt
+        assert "只描述·不评述" not in prompt  # 模块名不进正文，只进模板正文
+        assert "为什么这么说" in prompt
+        assert "过程盘点" in prompt
+        assert "整体评价" not in prompt
+
     def test_tcm_recipe_and_role_module(self):
         """中医预设：专用角色模块 + 原貌保留与辨析补注型维度组合"""
         r = next(x for x in RECIPES if x["key"] == "tcm_lecture")
