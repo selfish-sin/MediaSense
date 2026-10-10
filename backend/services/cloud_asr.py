@@ -394,6 +394,9 @@ def plan_cuts(total_duration: float, silence_midpoints: List[float]) -> List[flo
 
 
 def _ffmpeg_bin() -> str:
+    # 自带优先、PATH 兜底：与其他模块一致，避免系统 ffmpeg 被卸载/换版本后行为漂移
+    if os.path.exists(_FFMPEG_BIN):
+        return _FFMPEG_BIN
     return shutil.which('ffmpeg') or _FFMPEG_BIN
 
 

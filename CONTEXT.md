@@ -55,7 +55,8 @@ URL/文件 -> downloader -> subtitle 优先或 Whisper
 | `backend/scripts/eval_quality.py` + `eval_metrics.py` | **真实内容质量评测**：转录引擎横评（CER 近似/术语/剂量命中/耗时/降级落点）+ 摘要模型横评（钉死单模型不走兜底环；术语保留/剂量保留/无出处数字代理幻觉/token 成本，summary 全文落 results.json）。指南 `eval/README.md`，样本 `eval/samples/`，报告 `eval/reports/`（不入库） | 做引擎/模型选型横评或改评测指标时（真实跑批需自备音频+参考文本+术语清单；付费档 cloud 仅显式列入 --engines 才调用） |
 | `verify.py`（**仓库根**，不在 backend/） | 一键验证：`python verify.py [backend\|frontend\|all]` = Python ruff + backend pytest（用 `backend/venv/Scripts/python.exe`）+ frontend lint/vitest/build；无效目标失败 | 改完代码做全量验证，或想快速回归 |
 | `backend/requirements.in` / `requirements-dev.in` 及对应 `.txt` | 直接依赖意图/完整版本锁，Windows x64/Python 3.13；运行锁先于开发锁生成 | 改 Python 依赖或干净安装时 |
-| `backend/start.bat` / `.github/workflows/quality.yml` | 启动优先项目 venv、依赖失败停止；CI Windows Python 3.13 + Node 24 执行同一 verify | 改启动方式或自动检查时 |
+| `backend/start.bat` / `restart.bat` / `.github/workflows/quality.yml` | **启动只用项目自带解释器，不 fallback 系统 PATH**：`start.bat` 强制 `backend\venv\Scripts\python.exe`，缺失即报错退出（附重建提示）；`restart.bat` 用 `%~dp0` 定位、同样只认 venv（2026-10-10 去掉写死的 `D:\` 绝对路径）；ffmpeg 一律 `bin/` 自带（`cloud_asr._ffmpeg_bin()` 自带优先、PATH 仅兜底）。CI Windows Python 3.13 + Node 24 执行同一 verify | 改启动方式或自动检查时 |
+| `.python/`（项目根，gitignored） | **项目自带 CPython 3.13.14**（uv 下载到项目内，20MB）。两个 venv 的 `pyvenv.cfg` 均指向它 → 系统/其他应用卸载自己的 Python 不再影响本项目。踩过的坑：venv 原由外部托管解释器创建，该解释器被清理后 venv 空壳无法自举（`did not find executable`），**同 cp313 ABI 可原地改 `pyvenv.cfg` 的 home/executable 复活，不需重装依赖**；旧配置留 `pyvenv.cfg.bak` | 重建/迁移 venv，或启动报「未找到 Python」时 |
 | `docs/dependency-locks.md` / `.trellis/spec/backend/quality-tooling.md` | 安装、再生成锁、验证退出码、告警及 lifespan 契约 | 改验证/依赖/启动工具时 |
 | `codegraph.json` | 支持的 exclude 配置，排除 backend/static 与历史任务归档 | 索引误定位到构建/研究产物时 |
 | `backend/tests/test_verify.py` / `test_lifespan.py` | 验证入口失败传播、真实 ASGI 启动恢复与 API 回归 | 改检查入口或启动恢复时 |

@@ -14,6 +14,10 @@ build/
 venv/
 .venv/
 env/
+.venv-lock-check/
+
+# 项目自带解释器（完全独立，不依赖系统/其他应用管理的 Python）
+.python/
 
 # Database files (不进 Git)
 backend/data/*.db

@@ -7,13 +7,19 @@ echo.
 
 cd /d "%~dp0"
 
-set PYTHON=python
-if exist "%~dp0venv\Scripts\python.exe" set PYTHON="%~dp0venv\Scripts\python.exe"
+set PYTHON=%~dp0venv\Scripts\python.exe
+if not exist "%PYTHON%" (
+    echo [x] 未找到项目虚拟环境: %PYTHON%
+    echo     本项目自带 Python，不依赖系统 PATH，请先重建 venv。
+    pause
+    exit /b 1
+)
 
 echo [1] 检查 Python...
 %PYTHON% --version >nul 2>&1
 if errorlevel 1 (
-    echo Python 未找到: %PYTHON%
+    echo Python 不可用: %PYTHON%
+    echo 提示：venv 依赖的底层解释器若被删除，需重建 venv（参见 CONTEXT.md）。
     pause
     exit /b 1
 )
