@@ -53,6 +53,37 @@ class TestRecipes:
     def test_recipes_not_empty(self):
         assert len(RECIPES) > 0
 
+    def test_recipes_ordered_by_real_usage(self):
+        """配方顺序 = 历史真实使用频次降序（2026-10-11 按 340 个任务统计重排）
+        统计口径：忽略 language/speech_fix（后加的恒定默认值，历史任务常缺键），其余维度全等；
+        手搭的同家族变体（如 research 深度 + 学术批判框架）归并到最接近的配方。
+        实测频次：通用默认 146 / 深度批判 43(+30 手搭) / 中医 24(+17) / 课程 31 / 其余 ≤1。
+        最高频的默认组合原先没有任何配方入口（配方栏第 1 位是仅用 1 次的速看），
+        故新增 general_summary 代表该默认档并置于首位。"""
+        assert [r["key"] for r in RECIPES] == [
+            "general_summary",     # 146 次：默认通用总结（原先无入口）
+            "deep_research",       # 43 次 + 30 次手搭变体
+            "tcm_lecture",         # 24 次 + 17 次手搭变体
+            "course_notes",        # 31 次手搭近似组合
+            "quick_watch",         # 1 次
+            "process_inventory",   # 1 次
+            "insight_digest",      # 0 次但为用户明确需求，排 0 组首位
+            "news_brief",
+            "tutorial_steps",
+            "talk_digest",
+        ]
+
+    def test_general_summary_recipe_is_app_default(self):
+        """通用总结配方 = 应用默认维度组合（用户最高频的实际用法）"""
+        assert next(r for r in RECIPES if r["key"] == "general_summary")["dimensions"] \
+            == get_default_dimensions()
+
+    def test_recipe_names_are_self_explanatory(self):
+        """配方名要能看出产出什么：带 emoji 前缀 + 关键限定词，长度不强制四字"""
+        for r in RECIPES:
+            assert r["name"].split(" ", 1)[1], r["key"]  # emoji 后必须有中文名
+            assert len(r["desc"]) >= 10, r["key"]          # 描述要说清适用场景
+
     def test_each_recipe_has_dimensions(self):
         for r in RECIPES:
             assert "key" in r
