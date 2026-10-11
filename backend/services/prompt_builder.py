@@ -1,14 +1,16 @@
 """
 MediaSense - 模块化提示词构建引擎
-9 维度可组合：角色 + 认知模式 + 内容类型 + 认知规则 + 深度 + 输出格式 + 语气 + 字数 + 输出语言
+9 维度可组合：角色 + 内容类型 + 认知模式 + 分析立场 + 深度 + 输出形态 + 语气 + 字数 + 口误纠错
+输出语言固定简体中文（2026-10-11 起不再是可配置维度，纪律直接拼进 prompt）
 支持 DB 覆盖（prompt_module_overrides 表）和完全自定义（full_override）
 """
 from typing import Dict, List, Optional
 
 # ============ 维度元数据（供前端渲染选择器） ============
 # 每个维度包含若干模块，每个模块: {key, name, desc, template}
+# 物理定义顺序为历史遗留；下方按 DIMENSION_ORDER 重排后导出为 PROMPT_DIMENSIONS
 
-PROMPT_DIMENSIONS = {
+_DIMENSION_DEFS = {
     # ────────────── 1. 角色 ──────────────
     "role": {
         "label": "角色",
@@ -40,18 +42,6 @@ PROMPT_DIMENSIONS = {
                 "template": "你是一位受过系统学术训练的研究员，擅长人文社科领域的文本分析。你注重论证结构的梳理、核心概念的辨析、以及观点之间逻辑关系的把握。你会标注信息的来源层级（原文明确陈述 / 合理推断 / 缺乏依据），但不会过度学术化。",
             },
             {
-                "key": "tech",
-                "name": "技术审稿人",
-                "desc": "注重可操作性和技术细节",
-                "template": "你是一位技术审稿人，擅长从实操角度审视内容。你关注步骤的可执行性、技术细节的准确性、以及潜在的操作风险。你倾向于把抽象描述转化为具体步骤，并指出哪些是必须的、哪些是可选的。",
-            },
-            {
-                "key": "journalist",
-                "name": "新闻编辑",
-                "desc": "事实优先，区分事实与观点",
-                "template": "你是一位新闻编辑，习惯用 5W1H 框架快速提取核心事实。你严格区分事实陈述、推测、评论和宣传话术，对信息来源的可靠性敏感。你的表达简洁客观，避免主观渲染。",
-            },
-            {
                 "key": "creative",
                 "name": "创意写手",
                 "desc": "生动有趣，善于捕捉亮点",
@@ -66,10 +56,10 @@ PROMPT_DIMENSIONS = {
         ],
     },
 
-    # ────────────── 2. 认知规则 ──────────────
+    # ────────────── 4. 分析立场（原「认知规则」；维度键 rules 保持不变以兼容历史数据） ──────────────
     "rules": {
-        "label": "认知规则",
-        "desc": "分析的深度和原则，决定 AI 如何思考内容",
+        "label": "分析立场",
+        "desc": "分析的深度和原则，决定 AI 以什么立场处理内容",
         "default": "standard",
         "modules": [
             {
@@ -135,17 +125,17 @@ PROMPT_DIMENSIONS = {
         ],
     },
 
-    # ────────────── 3. 输出格式 ──────────────
+    # ────────────── 6. 输出形态（原「输出格式」；维度键 output 保持不变以兼容历史数据） ──────────────
     "output": {
-        "label": "输出格式",
+        "label": "输出形态",
         "desc": "总结的结构和呈现方式",
         "default": "summary",
         "modules": [
             {
                 "key": "summary",
                 "name": "综合摘要",
-                "desc": "结构化摘要，含核心主题和要点",
-                "template": """【输出格式】
+                "desc": "结构化摘要：核心主题、主要内容、关键细节；条目分明处可用短列表",
+                "template": """【输出形态】
 按以下结构输出（各部分按需调整，不要硬凑）：
 
 ## 核心主题
@@ -158,23 +148,14 @@ PROMPT_DIMENSIONS = {
 补充重要的数据、案例、引用或操作细节。
 
 ## 一句话总结
-用一句话收束。""",},
-            {
-                "key": "bullets",
-                "name": "要点列表",
-                "desc": "精炼的要点清单",
-                "template": """【输出格式】
-以要点列表为主，每条不超过 2 句话：
-- 第一条：视频讲的是什么（1 句话）
-- 后续条目：按重要性或时间顺序列出关键要点
-- 最后一条：值得记住的一句话
+用一句话收束。
 
-要求精炼，不要展开论述。关键处可标注 [MM:SS]。""",},
+呈现方式随内容取舍：条目分明、信息密集的内容可直接用短列表分点（每条不超过 2 句），不必强行成段；内容有推进关系、需要连贯说明的则以段落写透。关键处可标注 [MM:SS]。""",},
             {
                 "key": "qa",
                 "name": "问答对",
                 "desc": "以问答形式组织内容",
-                "template": """【输出格式】
+                "template": """【输出形态】
 以问答形式呈现，提出 6-10 个问题并作答：
 - 问题应覆盖视频的核心内容，而非细枝末节
 - 答案基于视频内容，简洁准确
@@ -185,7 +166,7 @@ PROMPT_DIMENSIONS = {
                 "key": "timeline",
                 "name": "时间线",
                 "desc": "按时间/逻辑顺序串联",
-                "template": """【输出格式】
+                "template": """【输出形态】
 按视频的展开顺序（时间线或逻辑线）梳理：
 
 ## 内容走向
@@ -203,7 +184,7 @@ PROMPT_DIMENSIONS = {
                 "key": "chapters",
                 "name": "章节分析",
                 "desc": "按内容板块逐段分析",
-                "template": """【输出格式】
+                "template": """【输出形态】
 按内容的逻辑板块分章节（不是机械的时间分段，而是按话题/论点切换）：
 
 ## 整体综述
@@ -228,7 +209,7 @@ PROMPT_DIMENSIONS = {
                 "key": "process_ledger",
                 "name": "过程盘点表",
                 "desc": "按发生顺序盘点，讲了什么/为什么这么说/推进到哪，不设评价栏",
-                "template": """【输出格式】
+                "template": """【输出形态】
 只输出以下三块，不设评价、感想、优点、不足、改进建议等任何主观栏目：
 
 ## 一、这段视频里发生了什么
@@ -249,7 +230,7 @@ PROMPT_DIMENSIONS = {
                 "key": "viewpoints",
                 "name": "观点梳理",
                 "desc": "按观点推进组织：主张 → 凭什么 → 值得取的地方 → 必要时一句提醒",
-                "template": """【输出格式】
+                "template": """【输出形态】
 按讲者的观点而不是话题顺序组织，先给主张，再给支撑，逐条推进：
 
 ## 核心主张
@@ -269,32 +250,10 @@ PROMPT_DIMENSIONS = {
 
 ## 一句话收获
 用一句话收住这条视频最值得带走的东西。""",},
-    {
-                "key": "comparison",
-                "name": "对比表格",
-                "desc": "以表格对比不同观点/方案",
-                "template": """【输出格式】
-如果视频涉及多个观点、方案或对象的对比，用表格呈现：
-
-## 对比维度
-| 维度 | 观点A | 观点B | ... |
-|------|-------|-------|-----|
-| ... | ... | ... | ... |
-
-## 补充说明
-表格之外的背景信息和重要细节。
-
-如果视频内容不适合表格对比，改为分类要点列表。""",},
-            {
-                "key": "freeform",
-                "name": "自由格式",
-                "desc": "AI 根据内容自行决定结构",
-                "template": """【输出格式】
-根据视频内容的性质，自行选择最合适的呈现结构。不拘泥于固定模板，以让读者高效获取信息为原则。可以用标题、列表、表格等 Markdown 元素。""",},
         ],
     },
 
-    # ────────────── 4. 内容类型 ──────────────
+    # ────────────── 2. 内容类型 ──────────────
     "content_type": {
         "label": "内容类型",
         "desc": "针对不同类型视频的理解方式",
@@ -305,41 +264,6 @@ PROMPT_DIMENSIONS = {
                 "name": "通用视频",
                 "desc": "不做类型预设",
                 "template": "",  # 空模板，不添加额外约束
-            },
-            {
-                "key": "tutorial",
-                "name": "教程/操作",
-                "desc": "提取可执行步骤",
-                "template": """【内容理解】
-这是一个教程或操作演示类视频。请特别关注：
-- 最终目标是什么
-- 需要哪些工具、环境或前置条件
-- 具体操作步骤（按顺序，区分必须和可选）
-- 常见问题和注意事项
-目标：让读者不看视频也能独立完成操作。""",
-            },
-            {
-                "key": "news",
-                "name": "新闻资讯",
-                "desc": "5W1H 分离事实与观点",
-                "template": """【内容理解】
-这是新闻或资讯类内容。请特别关注：
-- 5W1H：谁、什么事、何时、何地、为什么、如何
-- 区分已确认事实、相关方声称、分析推测、评论观点
-- 注意信息来源的可靠性
-- 标注尚未证实或存在争议的部分""",
-            },
-            {
-                "key": "interview",
-                "name": "访谈/对话",
-                "desc": "区分不同发言者的立场",
-                "template": """【内容理解】
-这是访谈或对话类内容。请特别关注：
-- 区分不同发言者及其立场
-- 提炼每位发言者的核心观点
-- 标注观点之间的交锋、共识或分歧
-- 保留有价值的原话引用
-- 不要把不同人的观点混为一谈""",
             },
             {
                 "key": "lecture",
@@ -379,95 +303,54 @@ PROMPT_DIMENSIONS = {
 - 研究的边界与局限：作者承认了什么、回避了什么
 目标：产出一份可作为学术笔记/读书报告直接使用的整理稿。""",
             },
-            {
-                "key": "argument",
-                "name": "论述观点整理",
-                "desc": "专注论述整理：论点、论据、论证",
-                "template": """【内容理解】
-这是论述或观点表达类内容。请专注论述整理，关注：
-- 核心论点（作者试图主张什么）与分论点
-- 论据类型：事实数据、权威引用、逻辑推理、类比、案例
-- 论证结构：归纳/演绎/类比，前提与结论如何衔接
-- 对反驳的处理：作者如何回应可能的质疑
-- 立场与预设：作者的立场、前提假设、可能的偏见
-- 概念的滑移或偷换（如有）
-目标：把"说了什么、凭什么这么说、说得成不成立"梳理清楚。""",
-            },
-            {
-                "key": "event",
-                "name": "事件叙事整理",
-                "desc": "侧重事件整理：经过、因果、影响",
-                "template": """【内容理解】
-这是围绕特定事件/经历展开的内容。请侧重事件整理，关注：
-- 事件要素：时间、地点、人物、起因
-- 发展经过：按时间/因果顺序还原完整链条
-- 关键节点与转折：什么改变了走向
-- 各方角色：谁做了什么、动机是什么
-- 结果与影响：事件的直接后果、后续发展、各方反应
-- 叙事中的主观视角：讲述者立场对事件的取舍
-目标：让读者不看视频也能完整复述事件的来龙去脉。""",
-            },
-            {
-                "key": "storytelling",
-                "name": "故事/纪实",
-                "desc": "还原叙事结构与人物弧光",
-                "template": """【内容理解】
-这是故事讲述或纪实类内容。请特别关注：
-- 叙事结构：起承转合、冲突的建立与解决
-- 人物：角色关系、动机、性格弧光（如何变化）
-- 场景与氛围：关键场景的细节和情绪
-- 主题：故事在讲什么更深层的东西
-- 讲述技巧：悬念、伏笔、呼应
-目标：还原故事的骨架，让人理解它为什么打动人。""",
-            },
         ],
     },
 
-    # ────────────── 5. 深度 ──────────────
+    # ────────────── 5. 深度（只管分析粒度；篇幅下限由「字数」维度控制，两者不合并） ──────────────
     "depth": {
         "label": "深度",
-        "desc": "分析的细粒度，影响篇幅和详略",
+        "desc": "分析到什么粒度，决定讲多深",
         "default": "standard",
         "modules": [
             {
                 "key": "quick",
-                "name": "快速浏览",
-                "desc": "500字以内，只抓核心",
+                "name": "速览",
+                "desc": "只回答值不值得看：一句话结论 + 几条最关键的看点",
                 "template": """【深度要求】
-快速浏览模式：只提取最核心的信息，帮助用户在 30 秒内决定是否值得深入看。
-- 聚焦"视频讲什么"和"值不值得看"
-- 不展开细节和论证
-- 总字数控制在 500 字以内""",
+速览模式：只回答"值不值得看"，帮用户快速判断，不做完整总结。
+- 一句话结论：这条视频讲什么、值不值得看
+- 最关键的几条看点：只挑最有信息量的，不铺开
+- 不展开论证、不复述细节、不做结构分析""",
             },
             {
                 "key": "standard",
                 "name": "标准总结",
-                "desc": "3000字左右，平衡详略",
+                "desc": "覆盖全部主要要点，重要细节保留、次要省略",
                 "template": """【深度要求】
 标准总结模式：在信息完整性和简洁性之间取得平衡。
 - 覆盖视频的所有主要要点，但不逐句复述
 - 重要细节保留，次要细节省略
-- 篇幅适中，不堆砌也不遗漏""",
+- 不堆砌也不遗漏""",
             },
             {
                 "key": "deep",
                 "name": "深度拆解",
-                "desc": "10000字+，详尽分析",
+                "desc": "不遗漏任何有信息量的内容，讲清凭什么这么说",
                 "template": """【深度要求】
-深度拆解模式：尽可能详尽地分析内容。
+深度拆解模式：尽可能详尽地分析内容，把"凭什么这么说"讲透。
 - 不遗漏任何有信息量的观点、论据、案例
-- 对关键段落可以做较详细的展开
+- 对关键段落做较详细的展开，讲清依据、前提与推理过程
 - 标注时间戳方便回看原文
 - 适合需要反复研读的场景""",
             },
             {
                 "key": "research",
-                "name": "深度研究",
-                "desc": "提取主题→逐主题深度扩展→研究博文",
+                "name": "主题研究",
+                "desc": "从内容提炼主题、换角度重新组织，不逐段复述",
                 "template": """【深度要求】
-深度研究模式：基于视频内容做主题式深度扩展，输出结构化研究博文。
-- 从内容中提取 3-8 个值得展开的研究主题
-- 每个主题 800-1500 字深度分析，围绕视频给出的论据、案例展开
+主题研究模式：不按视频原有顺序走，而是从内容里提炼主题，换角度重新组织成研究型文章。
+- 从内容中提取 3-8 个值得展开的主题
+- 每个主题围绕视频给出的论据、案例做深入展开
 - 包含背景脉络、不同观点、延伸思考
 - 扩展论述只能基于视频内容本身，不得虚构外部资料、数据来源或“搜索结果”
 - 适合需要深度学习的学术场景""",
@@ -475,7 +358,7 @@ PROMPT_DIMENSIONS = {
         ],
     },
 
-    # ────────────── 6. 语气（复用 prompts.py 的 TONE_DESCS） ──────────────
+    # ────────────── 7. 语气（复用 prompts.py 的 TONE_DESCS；口语化/正式商务已删档，常量表保留供历史任务兜底） ──────────────
     "tone": {
         "label": "语气",
         "desc": "总结的表达风格",
@@ -483,13 +366,11 @@ PROMPT_DIMENSIONS = {
         "modules": [
             {"key": "学术严谨", "name": "学术严谨", "desc": "术语精确、论证严密"},
             {"key": "通俗科普", "name": "通俗科普", "desc": "用日常比喻帮助理解"},
-            {"key": "口语化", "name": "口语化", "desc": "自然口语，像跟同学讨论"},
             {"key": "新闻客观", "name": "新闻客观", "desc": "事实优先、立场标注"},
-            {"key": "正式商务", "name": "正式商务", "desc": "结构清晰、结论明确"},
         ],
     },
 
-    # ────────────── 7. 字数（复用 prompts.py 的 WORD_COUNT_DESCS） ──────────────
+    # ────────────── 8. 字数（复用 prompts.py 的 WORD_COUNT_DESCS；篇幅硬性下限由这里控制） ──────────────
     "word_count": {
         "label": "字数",
         "desc": "总结的字数控制",
@@ -504,21 +385,9 @@ PROMPT_DIMENSIONS = {
         ],
     },
 
-    # ────────────── 8. 输出语言（复用 prompts.py 的 LANGUAGE_DESCS；默认中文，外文素材翻译呈现） ──────────────
-    "language": {
-        "label": "输出语言",
-        "desc": "总结的输出语言",
-        "default": "简体中文",
-        "modules": [
-            {"key": "简体中文", "name": "简体中文", "desc": "外文素材翻译成中文呈现"},
-            {"key": "繁体中文", "name": "繁体中文", "desc": "繁体中文输出"},
-            {"key": "英语", "name": "英语", "desc": "英文输出"},
-            {"key": "跟随素材", "name": "跟随素材", "desc": "素材什么语言就输出什么语言"},
-        ],
-    },
-
-    # ────────────── 8. 模式（通用 / 社科深度特化） ──────────────
+    # ────────────── 3. 认知模式（通用 / 社科深度特化 / 中医特化） ──────────────
     # 控制整体认知框架：通用=精简忠实提取；社科深度特化=注入旧15种提示词的精华
+    # 注：「输出语言」维度已于 2026-10-11 删除（固定简体中文，纪律在 build_modular_prompt 中硬编码）
     "mode": {
         "label": "认知模式",
         "desc": "整体认知框架（通用精简 / 社科深度特化 / 中医特化）",
@@ -586,10 +455,15 @@ PROMPT_DIMENSIONS = {
     },
 }
 
+# 维度展示顺序（UI/API 单一事实源；前端 frontend/src/utils/recipes.js 的 DIMENSION_KEYS 与此一致）
+# 顺序即合理性：先定人设与内容类型 → 认知框架与立场 → 分析粒度 → 输出形态 → 语气 → 字数 → 纠错纪律。
+# dict 物理定义顺序为历史遗留，此处统一重排，保证 API 返回顺序与声明一致。
+DIMENSION_ORDER = ["role", "content_type", "mode", "rules", "depth", "output", "tone", "word_count", "speech_fix"]
+PROMPT_DIMENSIONS = {k: _DIMENSION_DEFS[k] for k in DIMENSION_ORDER}
 
-# ============ 预设配方（一键填充所有维度；统一钉 language=简体中文，应用即回默认简中） ============
-# 精简原则：维度模块（内容类型/输出格式等）保持全量可选，配方只保留高频组合；
-# 被裁组合的内容类型（学术整理/论述/事件/故事/娱乐/对比）仍可在维度选择器手动搭配。
+
+# ============ 预设配方（一键填充所有维度；输出语言已固定简体中文，不再作为维度出现在配方里） ============
+# 精简原则：维度模块保持全量可选，配方只保留高频组合（2026-10-11 按 340 个任务实测使用次数裁剪）。
 RECIPES = [
 
 {
@@ -605,7 +479,6 @@ RECIPES = [
             "depth": "standard",
             "tone": "学术严谨",
             "word_count": "3000",
-            "language": "简体中文",
             "speech_fix": "balanced",
         },
     },
@@ -622,7 +495,6 @@ RECIPES = [
             "depth": "deep",
             "tone": "学术严谨",
             "word_count": "10000",
-            "language": "简体中文",
             "speech_fix": "balanced",
         },
     },
@@ -639,7 +511,6 @@ RECIPES = [
             "depth": "deep",
             "tone": "学术严谨",
             "word_count": "10000",
-            "language": "简体中文",
             "speech_fix": "balanced",
         },
     },
@@ -656,7 +527,6 @@ RECIPES = [
             "depth": "deep",
             "tone": "学术严谨",
             "word_count": "10000",
-            "language": "简体中文",
             "speech_fix": "balanced",
         },
     },
@@ -668,12 +538,11 @@ RECIPES = [
             "role": "general",
             "mode": "general",
             "rules": "standard",
-            "output": "bullets",
+            "output": "summary",
             "content_type": "general",
             "depth": "quick",
-            "tone": "口语化",
+            "tone": "新闻客观",
             "word_count": "500",
-            "language": "简体中文",
             "speech_fix": "balanced",
         },
     },
@@ -690,7 +559,6 @@ RECIPES = [
             "depth": "standard",
             "tone": "新闻客观",
             "word_count": "3000",
-            "language": "简体中文",
             "speech_fix": "balanced",
         },
     },
@@ -705,60 +573,8 @@ RECIPES = [
             "output": "viewpoints",
             "content_type": "general",
             "depth": "standard",
-            "tone": "口语化",
-            "word_count": "3000",
-            "language": "简体中文",
-            "speech_fix": "balanced",
-        },
-    },
-{
-        "key": "news_brief",
-        "name": "📰 新闻要点",
-        "desc": "5W1H 提取新闻核心事实，分清事实与观点",
-        "dimensions": {
-            "role": "journalist",
-            "mode": "general",
-            "rules": "standard",
-            "output": "summary",
-            "content_type": "news",
-            "depth": "standard",
             "tone": "新闻客观",
             "word_count": "3000",
-            "language": "简体中文",
-            "speech_fix": "balanced",
-        },
-    },
-{
-        "key": "tutorial_steps",
-        "name": "🔧 教程步骤拆解",
-        "desc": "提取可复现的操作步骤、工具与前置条件",
-        "dimensions": {
-            "role": "tech",
-            "mode": "general",
-            "rules": "standard",
-            "output": "bullets",
-            "content_type": "tutorial",
-            "depth": "standard",
-            "tone": "通俗科普",
-            "word_count": "3000",
-            "language": "简体中文",
-            "speech_fix": "balanced",
-        },
-    },
-{
-        "key": "talk_digest",
-        "name": "🎙️ 对话观点整理",
-        "desc": "分清每位发言者的立场与分歧，不混为一谈",
-        "dimensions": {
-            "role": "general",
-            "mode": "general",
-            "rules": "standard",
-            "output": "qa",
-            "content_type": "interview",
-            "depth": "standard",
-            "tone": "口语化",
-            "word_count": "3000",
-            "language": "简体中文",
             "speech_fix": "balanced",
         },
     },
@@ -879,9 +695,13 @@ def _get_word_count_desc(word_count: str) -> str:
     return WORD_COUNT_DESCS.get(word_count, f"请务必输出至少{word_count}字，宁多勿少，绝对不允许少于{word_count}字。")
 
 
-def _get_language_desc(language: str) -> str:
+def _output_language_discipline() -> str:
+    """
+    输出语言纪律（2026-10-11 起固定简体中文，不再是可配置维度）。
+    文本仍从 prompts.LANGUAGE_DESCS 取，避免同一条纪律出现两份定义。
+    """
     from services.prompts import LANGUAGE_DESCS
-    return LANGUAGE_DESCS.get(language, "")
+    return LANGUAGE_DESCS.get("简体中文", "")
 
 
 # ============ 核心：拼装完整 prompt ============
@@ -889,8 +709,9 @@ def build_modular_prompt(dimensions: Dict[str, str], content: str,
                          custom_prompt: str = "",
                          full_override: str = "") -> str:
     """
-    根据 10 维选择拼装完整 prompt
-    dimensions: {role, rules, output, content_type, depth, tone, word_count, mode, language, speech_fix}
+    根据 9 维选择拼装完整 prompt
+    dimensions: {role, content_type, mode, rules, depth, output, tone, word_count, speech_fix}
+                （历史任务携带的 language / 已删档位键被忽略，安全降级不报错）
     content: 待总结的转录文本
     custom_prompt: 用户维度级自定义指令（作为额外指引追加）
     full_override: 完全自定义提示词（非空时直接覆盖一切维度拼装，仅注入 content）
@@ -911,64 +732,64 @@ def build_modular_prompt(dimensions: Dict[str, str], content: str,
     # 加载 DB 覆盖（一次性加载，避免多次查询）
     overrides = _load_module_overrides()
 
-    # 收集各维度模块文本（跳过空模板）
+    # 收集各维度模块文本（跳过空模板）；段序与 DIMENSION_ORDER 保持一致
     sections = []
 
     # 1. 角色
-    role_tpl = _get_module_template("role", dims["role"], overrides)
+    role_tpl = _get_module_template("role", dims.get("role", ""), overrides)
     if role_tpl:
         sections.append(role_tpl)
 
-    # 2. 认知模式（社科深度特化注入四层认知+置信度标注）
-    mode_tpl = _get_module_template("mode", dims["mode"], overrides)
-    if mode_tpl:
-        sections.append(mode_tpl)
-
-    # 3. 内容类型
-    ct_tpl = _get_module_template("content_type", dims["content_type"], overrides)
+    # 2. 内容类型
+    ct_tpl = _get_module_template("content_type", dims.get("content_type", ""), overrides)
     if ct_tpl:
         sections.append(ct_tpl)
 
-    # 4. 认知规则
-    rules_tpl = _get_module_template("rules", dims["rules"], overrides)
+    # 3. 认知模式（社科深度特化注入四层认知+置信度标注）
+    mode_tpl = _get_module_template("mode", dims.get("mode", ""), overrides)
+    if mode_tpl:
+        sections.append(mode_tpl)
+
+    # 4. 分析立场（原认知规则）
+    rules_tpl = _get_module_template("rules", dims.get("rules", ""), overrides)
     if rules_tpl:
         sections.append(rules_tpl)
 
-    # 4.5 转录纠错纪律（单模块维度；模板为空或值未知时不追加）
+    # 5. 深度（分析粒度；篇幅下限由「字数」维度控制）
+    depth_tpl = _get_module_template("depth", dims.get("depth", ""), overrides)
+    if depth_tpl:
+        sections.append(depth_tpl)
+
+    # 6. 输出形态（原输出格式）
+    output_tpl = _get_module_template("output", dims.get("output", ""), overrides)
+    if output_tpl:
+        sections.append(output_tpl)
+
+    # 7. 转录纠错纪律（单模块维度；模板为空或值未知时不追加）
     sf_tpl = _get_module_template("speech_fix", dims.get("speech_fix", ""), overrides)
     if sf_tpl:
         sections.append(sf_tpl)
 
-    # 5. 深度
-    depth_tpl = _get_module_template("depth", dims["depth"], overrides)
-    if depth_tpl:
-        sections.append(depth_tpl)
-
-    # 6. 输出格式
-    output_tpl = _get_module_template("output", dims["output"], overrides)
-    if output_tpl:
-        sections.append(output_tpl)
-
-    # 7. 维度级自定义指令（如果有）
+    # 8. 维度级自定义指令（如果有）
     if custom_prompt and custom_prompt.strip():
         sections.append(f"【自定义指引】\n{custom_prompt.strip()}")
 
-    # 8. 语气 + 字数 + 输出语言
-    tone_desc = _get_tone_desc(dims["tone"])
-    word_count_desc = _get_word_count_desc(dims["word_count"])
-    lang_desc = _get_language_desc(dims.get("language", ""))
+    # 9. 语气 + 字数 + 输出语言（语言固定简体中文，已不是可配置维度）
+    tone_desc = _get_tone_desc(dims.get("tone", "学术严谨"))
+    word_count_desc = _get_word_count_desc(dims.get("word_count", "3000"))
+    lang_desc = _output_language_discipline()
     option_block = ""
     if tone_desc:
         option_block += f"语气：{tone_desc}。\n"
     if word_count_desc:
         option_block += word_count_desc
-    # 输出语言固定拼在字数之后（产品默认中文；选"跟随素材"时也明确写出）
+    # 输出语言固定拼在字数之后（外文素材也用中文呈现）
     if lang_desc:
         option_block += f"\n输出语言：{lang_desc}。"
     if option_block:
         sections.append(option_block.strip())
 
-    # 8. 内容（直接注入到 prompt 中）
+    # 10. 内容（直接注入到 prompt 中）
     if content:
         sections.append(f"【待处理内容】\n{content}")
     else:
