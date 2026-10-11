@@ -1,7 +1,7 @@
 <script setup>
 /**
- * 模块化提示词 9 维度选择器
- * 用法：v-model="dimensions" 双向绑定 { role, content_type, mode, rules, depth, output, tone, word_count, speech_fix }
+ * 模块化提示词 8 维度选择器
+ * 用法：v-model="dimensions" 双向绑定 { role, mode, rules, output, content_type, depth, tone, word_count }
  *
  * 特性：
  * 1. 高对比度按钮样式（深色背景白字）
@@ -37,7 +37,7 @@ const selected = computed({
   set: (v) => emit('update:modelValue', v),
 })
 
-// 维度列表（顺序与键集统一由 utils/recipes.js 的 DIMENSION_KEYS 决定）
+// 维度列表（带顺序，mode 放在 rules 之前）
 const dimensionKeys = DIMENSION_KEYS
 
 const dimensionList = computed(() => {
@@ -184,7 +184,7 @@ async function loadPreview() {
 
     <el-divider v-if="showRecipes && settings.recipes?.length" style="margin: 10px 0 8px;" />
 
-    <!-- 9 维度选择器 -->
+    <!-- 8 维度选择器 -->
     <div v-for="dim in dimensionList" :key="dim.key" class="dim-row">
       <div class="dim-header">
         <span class="dim-label">{{ dim.label }}</span>

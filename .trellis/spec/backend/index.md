@@ -112,27 +112,6 @@
 - **磁盘名与下载名解耦**：磁盘落盘名附唯一后缀（job_id 短码/时间戳）防互相覆盖，
   `FileResponse(filename=...)` 用可读名。磁盘名不进 `FileResponse`。
 
-### 提示词维度（2026-10-11 定稿，勿回退）
-
-系统是 **9 维模块化提示词**（角色/内容类型/认知模式/分析立场/深度/输出形态/语气/字数/口误纠错），
-单一实现在 `services/prompt_builder.py`：
-
-- **`DIMENSION_ORDER` 是顺序单一事实源**：dict 的物理定义顺序是历史遗留（`_DIMENSION_DEFS`），
-  导出时按 `DIMENSION_ORDER` 重排为 `PROMPT_DIMENSIONS`；API 顺序与 `build_modular_prompt` 的**段序**
-  都以它为准。改顺序＝改这一个常量 + `build_modular_prompt` 里的 append 顺序（两处必须一致）。
-- **`build_modular_prompt` 是硬编码拼装**：新增维度只往 `PROMPT_DIMENSIONS` 加定义、不加拼装代码 =
-  模板永不落地（本项目踩过）。加/删维度要同步 4 处：`_DIMENSION_DEFS`/`DIMENSION_ORDER`、
-  前端 `utils/recipes.js` 的 `DIMENSION_KEYS`、`settingsStore.selectedDimensions` 初值、拼装段序。
-- **输出语言不是维度**：固定简体中文，纪律由 `_output_language_discipline()`（复用
-  `prompts.LANGUAGE_DESCS["简体中文"]`，避免两份文案）拼在字数之后。**不能把这段纪律一起删掉**——
-  否则外文素材会被模型用英文回答。用户选择历史的 `language` 键必须被忽略（有测试锁定）。
-- **取维度值一律 `.get(key, "")`，禁止 `dims["key"]` 直接索引**：历史任务的残留键（`language`、
-  `comparison`、`mode=custom` 等）属正常现象，惰性忽略即可，索引会 KeyError 把一个正常重跑打成失败。
-- **`prompts.py` 的 `TONE_DESCS`/`WORD_COUNT_DESCS`/`LANGUAGE_DESCS` 是旧路径（`build_prompt_vars`）
-  与历史任务兜底共用常量：删维度档位时不要连带删常量**（否则历史任务重跑落到"使用X语气"的兜底文案）。
-- 裁剪档位/配方属于需求变更，必须先在 `test_prompt_builder.py` 更新锁（维度数、顺序、档位集合、
-  配方顺序），并同步 `CONTEXT.md` 的 9 维说明。
-
 ## Quality Check
 
 - [ ] 仓库根 `backend/venv/Scripts/python.exe verify.py backend` 全绿（ruff + pytest；2026-10-07 基线 979；必须用已安装开发锁的环境）
