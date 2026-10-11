@@ -1,7 +1,7 @@
 <script setup>
 /**
  * 模块化提示词 8 维度选择器
- * 用法：v-model="dimensions" 双向绑定 { role, mode, rules, output, content_type, depth, tone }
+ * 用法：v-model="dimensions" 双向绑定 { role, mode, rules, output, content_type, depth, tone, word_count }
  *
  * 特性：
  * 1. 高对比度按钮样式（深色背景白字）

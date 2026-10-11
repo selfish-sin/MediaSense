@@ -6,14 +6,14 @@ from unittest.mock import patch, MagicMock
 from services.prompt_builder import (
     PROMPT_DIMENSIONS, RECIPES,
     get_default_dimensions, _load_module_overrides, _get_module_template,
-    get_dimensions_with_overrides, _get_tone_desc,
+    get_dimensions_with_overrides, _get_tone_desc, _get_word_count_desc,
     build_modular_prompt, dimensions_to_legacy_summary_type,
 )
 
 
 class TestDimensions:
-    def test_has_9_dims(self):
-        assert len(PROMPT_DIMENSIONS) == 9
+    def test_has_10_dims(self):
+        assert len(PROMPT_DIMENSIONS) == 10
 
     def test_each_dim_has_required_fields(self):
         for dim_key, dim_cfg in PROMPT_DIMENSIONS.items():
@@ -32,7 +32,7 @@ class TestDimensions:
 
     def test_get_default_dimensions(self):
         defaults = get_default_dimensions()
-        assert len(defaults) == 9
+        assert len(defaults) == 10
         for dim_key, dim_cfg in PROMPT_DIMENSIONS.items():
             assert defaults[dim_key] == dim_cfg["default"]
 
@@ -44,6 +44,7 @@ class TestDimensions:
         assert d["output"] == "summary"
         assert d["depth"] == "standard"
         assert d["tone"] == "学术严谨"
+        assert d["word_count"] == "3000"
         assert d["language"] == "简体中文"
         assert d["speech_fix"] == "balanced"
 
@@ -57,7 +58,7 @@ class TestRecipes:
             assert "key" in r
             assert "name" in r
             assert "dimensions" in r
-            assert len(r["dimensions"]) == 9
+            assert len(r["dimensions"]) == 10
 
     def test_recipe_dimensions_valid(self):
         for r in RECIPES:
@@ -132,8 +133,9 @@ class TestRecipes:
         # 不注入认知框架（mode）与类型预设（content_type）空模板，避免引入额外判断口径
         assert r["dimensions"]["mode"] == "general"
         assert r["dimensions"]["content_type"] == "general"
-        # 篇幅克制：standard 档（3000 字），避免触发 ai_process 分批（分批=串行长请求，无汇总阶段）
+        # 篇幅克制：standard + 3000 字，避免触发 ai_process 分批（分批=串行长请求，无汇总阶段）
         assert r["dimensions"]["depth"] == "standard"
+        assert r["dimensions"]["word_count"] == "3000"
         assert "critical" not in r["dimensions"].values()
 
     def test_affirmative_rule_allows_praise_and_natural_limits(self):
@@ -263,7 +265,7 @@ class TestGetDimensionsWithOverrides:
     def test_returns_all_dims(self):
         with patch("services.prompt_builder._load_override_rows", return_value=[]):
             result = get_dimensions_with_overrides()
-            assert len(result) == 9
+            assert len(result) == 10
 
     def test_marks_customized(self):
         with patch("services.prompt_builder._load_override_rows",
@@ -308,47 +310,23 @@ class TestGetDimensionsWithOverrides:
         assert not any(m.get("is_custom") for m in result["role"]["modules"])
 
 
-class TestToneDesc:
+class TestToneAndWordCount:
     def test_get_tone_desc_known(self):
         assert "学术严谨" in _get_tone_desc("学术严谨")
 
     def test_get_tone_desc_unknown(self):
         assert "科幻风" in _get_tone_desc("科幻风")
 
+    def test_get_word_count_desc_known(self):
+        desc = _get_word_count_desc("3000")
+        assert "3000" in desc
 
-class TestDepthHoldsWordBudget:
-    """2026-10-11：word_count 维度并入 depth——篇幅只由 depth 一处决定，不得再有第二个旋钮"""
+    def test_get_word_count_desc_unlimited(self):
+        assert _get_word_count_desc("不限") == ""
 
-    def test_word_count_dimension_removed(self):
-        assert "word_count" not in PROMPT_DIMENSIONS
-        assert "word_count" not in get_default_dimensions()
-
-    def test_each_depth_module_declares_word_budget(self):
-        for m in PROMPT_DIMENSIONS["depth"]["modules"]:
-            tpl = m.get("template") or ""
-            assert any(k in tpl for k in ("字", "篇幅")), m["key"]
-
-    def test_depth_budgets_match_old_word_count_tiers(self):
-        """quick/standard/deep/research 分别承接原 500 / 3000 / 10000 / 不限 四档"""
-        tpls = {m["key"]: m["template"] for m in PROMPT_DIMENSIONS["depth"]["modules"]}
-        assert "500 字以内" in tpls["quick"]
-        assert "3000 字" in tpls["standard"]
-        assert "10000 字以上" in tpls["deep"]
-        assert "篇幅不设上限" in tpls["research"]
-
-    def test_recipes_carry_no_word_count_key(self):
-        for r in RECIPES:
-            assert "word_count" not in r["dimensions"], r["key"]
-
-    def test_no_conflicting_budget_in_prompt(self):
-        """回归：depth=quick 时提示词里不得再出现"至少3000字"这类冲突要求"""
-        dims = get_default_dimensions()
-        dims["depth"] = "quick"
-        with patch("services.prompt_builder._load_module_overrides", return_value={}):
-            prompt = build_modular_prompt(dims, "素材内容")
-        assert "500 字以内" in prompt
-        assert "宁多勿少" not in prompt
-        assert "至少3000字" not in prompt
+    def test_get_word_count_desc_unknown(self):
+        desc = _get_word_count_desc("7000")
+        assert "7000" in desc
 
 
 class TestBuildModularPrompt:

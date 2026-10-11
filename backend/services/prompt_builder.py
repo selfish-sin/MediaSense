@@ -1,7 +1,7 @@
 """
 MediaSense - 模块化提示词构建引擎
-9 维度可组合：角色 + 认知模式 + 内容类型 + 认知规则 + 深度与篇幅 + 输出格式 + 语气 + 输出语言 + 口误纠错
-（篇幅字数已并入 depth 维度，见该维度注释；支持 DB 覆盖 prompt_module_overrides 表和完全自定义 full_override）
+9 维度可组合：角色 + 认知模式 + 内容类型 + 认知规则 + 深度 + 输出格式 + 语气 + 字数 + 输出语言
+支持 DB 覆盖（prompt_module_overrides 表）和完全自定义（full_override）
 """
 from typing import Dict, List, Optional
 
@@ -424,12 +424,9 @@ PROMPT_DIMENSIONS = {
     },
 
     # ────────────── 5. 深度 ──────────────
-    # ★ 篇幅唯一旋钮：2026-10-11 起原独立的 word_count 维度并入本维度（各档自带明确字数），
-    #   原因：两个旋钮控制同一件事，可自相矛盾（实测 quick+3000 会同时要求「500字以内」与
-    #   「至少3000字」），且历史 80% 的任务两者档位一一对应、从未提供独立价值。
     "depth": {
-        "label": "深度与篇幅",
-        "desc": "分析的细粒度与篇幅（字数已含在各档内，不再单选）",
+        "label": "深度",
+        "desc": "分析的细粒度，影响篇幅和详略",
         "default": "standard",
         "modules": [
             {
@@ -450,31 +447,28 @@ PROMPT_DIMENSIONS = {
 标准总结模式：在信息完整性和简洁性之间取得平衡。
 - 覆盖视频的所有主要要点，但不逐句复述
 - 重要细节保留，次要细节省略
-- 篇幅适中，不堆砌也不遗漏
-- 总字数 3000 字左右""",
+- 篇幅适中，不堆砌也不遗漏""",
             },
             {
                 "key": "deep",
                 "name": "深度拆解",
-                "desc": "10000字以上，详尽分析",
+                "desc": "10000字+，详尽分析",
                 "template": """【深度要求】
 深度拆解模式：尽可能详尽地分析内容。
 - 不遗漏任何有信息量的观点、论据、案例
 - 对关键段落可以做较详细的展开
 - 标注时间戳方便回看原文
-- 适合需要反复研读的场景
-- 总字数 10000 字以上""",
+- 适合需要反复研读的场景""",
             },
             {
                 "key": "research",
                 "name": "深度研究",
-                "desc": "提取主题→逐主题深度扩展→研究博文，篇幅不限",
+                "desc": "提取主题→逐主题深度扩展→研究博文",
                 "template": """【深度要求】
 深度研究模式：基于视频内容做主题式深度扩展，输出结构化研究博文。
 - 从内容中提取 3-8 个值得展开的研究主题
 - 每个主题 800-1500 字深度分析，围绕视频给出的论据、案例展开
 - 包含背景脉络、不同观点、延伸思考
-- 整体篇幅不设上限
 - 扩展论述只能基于视频内容本身，不得虚构外部资料、数据来源或“搜索结果”
 - 适合需要深度学习的学术场景""",
             },
@@ -492,6 +486,21 @@ PROMPT_DIMENSIONS = {
             {"key": "口语化", "name": "口语化", "desc": "自然口语，像跟同学讨论"},
             {"key": "新闻客观", "name": "新闻客观", "desc": "事实优先、立场标注"},
             {"key": "正式商务", "name": "正式商务", "desc": "结构清晰、结论明确"},
+        ],
+    },
+
+    # ────────────── 7. 字数（复用 prompts.py 的 WORD_COUNT_DESCS） ──────────────
+    "word_count": {
+        "label": "字数",
+        "desc": "总结的字数控制",
+        "default": "3000",
+        "modules": [
+            {"key": "不限", "name": "不限", "desc": "按内容需要自由发挥"},
+            {"key": "500", "name": "500字", "desc": "极简"},
+            {"key": "3000", "name": "3000字", "desc": "标准"},
+            {"key": "5000", "name": "5000字", "desc": "详细"},
+            {"key": "10000", "name": "10000字", "desc": "深度"},
+            {"key": "20000", "name": "20000字", "desc": "极详尽"},
         ],
     },
 
@@ -594,6 +603,7 @@ RECIPES = [
             "content_type": "general",
             "depth": "quick",
             "tone": "口语化",
+            "word_count": "500",
             "language": "简体中文",
             "speech_fix": "balanced",
         },
@@ -610,6 +620,7 @@ RECIPES = [
             "content_type": "general",
             "depth": "standard",
             "tone": "新闻客观",
+            "word_count": "3000",
             "language": "简体中文",
             "speech_fix": "balanced",
         },
@@ -626,6 +637,7 @@ RECIPES = [
             "content_type": "general",
             "depth": "standard",
             "tone": "口语化",
+            "word_count": "3000",
             "language": "简体中文",
             "speech_fix": "balanced",
         },
@@ -642,6 +654,7 @@ RECIPES = [
             "content_type": "news",
             "depth": "standard",
             "tone": "新闻客观",
+            "word_count": "3000",
             "language": "简体中文",
             "speech_fix": "balanced",
         },
@@ -658,6 +671,7 @@ RECIPES = [
             "content_type": "tutorial",
             "depth": "standard",
             "tone": "通俗科普",
+            "word_count": "3000",
             "language": "简体中文",
             "speech_fix": "balanced",
         },
@@ -674,6 +688,7 @@ RECIPES = [
             "content_type": "interview",
             "depth": "standard",
             "tone": "口语化",
+            "word_count": "3000",
             "language": "简体中文",
             "speech_fix": "balanced",
         },
@@ -690,6 +705,7 @@ RECIPES = [
             "content_type": "lecture",
             "depth": "deep",
             "tone": "学术严谨",
+            "word_count": "10000",
             "language": "简体中文",
             "speech_fix": "balanced",
         },
@@ -706,6 +722,7 @@ RECIPES = [
             "content_type": "general",
             "depth": "deep",
             "tone": "学术严谨",
+            "word_count": "10000",
             "language": "简体中文",
             "speech_fix": "balanced",
         },
@@ -722,6 +739,7 @@ RECIPES = [
             "content_type": "lecture",
             "depth": "deep",
             "tone": "学术严谨",
+            "word_count": "10000",
             "language": "简体中文",
             "speech_fix": "balanced",
         },
@@ -832,10 +850,15 @@ def get_dimensions_with_overrides() -> dict:
     return result
 
 
-# ============ 语气 / 输出语言描述（复用 prompts.py 的映射） ============
+# ============ 语气和字数描述（复用 prompts.py 的映射） ============
 def _get_tone_desc(tone: str) -> str:
     from services.prompts import TONE_DESCS
     return TONE_DESCS.get(tone, f"使用{tone}语气")
+
+
+def _get_word_count_desc(word_count: str) -> str:
+    from services.prompts import WORD_COUNT_DESCS
+    return WORD_COUNT_DESCS.get(word_count, f"请务必输出至少{word_count}字，宁多勿少，绝对不允许少于{word_count}字。")
 
 
 def _get_language_desc(language: str) -> str:
@@ -848,10 +871,8 @@ def build_modular_prompt(dimensions: Dict[str, str], content: str,
                          custom_prompt: str = "",
                          full_override: str = "") -> str:
     """
-    根据 9 维选择拼装完整 prompt
-    dimensions: {role, rules, output, content_type, depth, tone, mode, language, speech_fix}
-    ★ 历史任务的 dimensions 里可能仍带 word_count 键（篇幅已于 2026-10-11 并入 depth），
-      多余键被忽略，不影响拼装。
+    根据 10 维选择拼装完整 prompt
+    dimensions: {role, rules, output, content_type, depth, tone, word_count, mode, language, speech_fix}
     content: 待总结的转录文本
     custom_prompt: 用户维度级自定义指令（作为额外指引追加）
     full_override: 完全自定义提示词（非空时直接覆盖一切维度拼装，仅注入 content）
@@ -914,12 +935,16 @@ def build_modular_prompt(dimensions: Dict[str, str], content: str,
     if custom_prompt and custom_prompt.strip():
         sections.append(f"【自定义指引】\n{custom_prompt.strip()}")
 
-    # 8. 语气 + 输出语言
+    # 8. 语气 + 字数 + 输出语言
     tone_desc = _get_tone_desc(dims["tone"])
+    word_count_desc = _get_word_count_desc(dims["word_count"])
     lang_desc = _get_language_desc(dims.get("language", ""))
     option_block = ""
     if tone_desc:
         option_block += f"语气：{tone_desc}。\n"
+    if word_count_desc:
+        option_block += word_count_desc
+    # 输出语言固定拼在字数之后（产品默认中文；选"跟随素材"时也明确写出）
     if lang_desc:
         option_block += f"\n输出语言：{lang_desc}。"
     if option_block:

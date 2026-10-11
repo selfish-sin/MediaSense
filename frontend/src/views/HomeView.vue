@@ -87,10 +87,9 @@ function isLegacyModelSelection(key) {
 // ── 转录引擎提示文案（engineHint/speakerDiarizationDesc/transcribeLanguageHint）
 //    随高级选项卡迁至 components/HomeAdvancedOptions.vue（2026-09-12 slice-2） ──
 
-// 深度/篇幅档位决定推荐模型（2026-10-11：原按 word_count 字数判断，字数已并入 depth）
-watch(() => settings.selectedDimensions.depth, (depth) => {
+watch(() => settings.selectedDimensions.word_count, (wordCount) => {
   if (!modelTouched.value && isLegacyModelSelection(settings.selectedModel)) {
-    settings.selectedModel = settings.recommendModel(depth)
+    settings.selectedModel = settings.recommendModel(wordCount)
   }
 }, { immediate: true })
 

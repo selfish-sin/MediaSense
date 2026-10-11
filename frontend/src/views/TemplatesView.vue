@@ -84,7 +84,7 @@ function isCustomRecipe() {
 }
 
 // ============ 维度树 ============
-const dimensionKeys = ['role', 'mode', 'content_type', 'rules', 'depth', 'output', 'tone']
+const dimensionKeys = ['role', 'mode', 'content_type', 'rules', 'depth', 'output', 'tone', 'word_count']
 
 const dimensionList = computed(() => {
   const dims = settings.promptDimensions || {}

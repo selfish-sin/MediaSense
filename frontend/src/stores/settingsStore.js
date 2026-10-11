@@ -30,15 +30,16 @@ export const useSettingsStore = defineStore('settings', () => {
     }
     return out
   })
-  // 当前选择的 9 个维度值（key → module_key）
+  // 当前选择的 8 个维度值（key → module_key）
   const selectedDimensions = ref({
     role: 'general',
     mode: 'general',          // ★ 第 8 维度：通用 / 社科深度特化
     rules: 'standard',
     output: 'summary',
     content_type: 'general',
-    depth: 'standard',        // ★ 深度与篇幅（2026-10-11 起字数随档位，原 word_count 维度已并入）
+    depth: 'standard',
     tone: '学术严谨',
+    word_count: '3000',
     language: '简体中文',      // ★ 第 9 维度：输出语言（外文素材默认翻译成中文呈现）
   })
   // ★ 维度级自定义文本（dimKey → 自定义文本，作为追加指引）
@@ -51,17 +52,18 @@ export const useSettingsStore = defineStore('settings', () => {
   const summaryTypes = ref([])          // 旧：15种类型（保留 ref 避免别处引用报错，但会留空）
   const summaryOptions = ref({})        // 旧：选项配置
   const selectedModel = ref('glm-4.5-air')
-  // 推荐模型：篇幅大 → 用更快的模型（2026-10-11 起按 depth 档位判断，字数并入 depth）
-  function recommendModel(depth) {
-    if (depth === 'deep' || depth === 'research') return 'deepseek-v4-flash'
+  function recommendModel(wordCount) {
+    const n = parseInt(wordCount) || 0
+    if (n >= 5000) return 'deepseek-v4-flash'
     return 'glm-4.5-air'
   }
   const selectedSummaryType = ref('summary')  // 兼容旧字段
 
-  // 高级选项（保留转录相关 + 提示词覆盖；tone/format/purpose 改从 dimensions 派生）
+  // 高级选项（保留转录相关 + 提示词覆盖；word_count/tone/format/purpose 改从 dimensions 派生）
   const advancedOptions = ref({
     // 模块化提示词维度直接嵌在 advancedOptions 中，便于 handleSubmit 一次性提交
     dimensions: { ...selectedDimensions.value },
+    word_count: '3000',  // 兼容字段（从 dimensions.word_count 派生）
     tone: '学术严谨',     // 兼容字段
     format: 'Markdown',
     purpose: '学习笔记',
@@ -131,6 +133,7 @@ export const useSettingsStore = defineStore('settings', () => {
         // 同步到 advancedOptions.dimensions
         advancedOptions.value.dimensions = { ...res.defaults }
         // 派生兼容字段
+        advancedOptions.value.word_count = res.defaults.word_count || '3000'
         advancedOptions.value.tone = res.defaults.tone || '学术严谨'
       }
     } catch (err) {
@@ -173,6 +176,7 @@ export const useSettingsStore = defineStore('settings', () => {
     // 同步到 advancedOptions
     advancedOptions.value.dimensions = { ...selectedDimensions.value }
     // 派生兼容字段
+    if (dimKey === 'word_count') advancedOptions.value.word_count = moduleKey
     if (dimKey === 'tone') advancedOptions.value.tone = moduleKey
   }
 
@@ -210,6 +214,7 @@ export const useSettingsStore = defineStore('settings', () => {
       // ★ merge 而非整体替换：配方未定义的维度保留当前值；内置配方已含 language=简体中文（应用即回默认简中）
       selectedDimensions.value = { ...selectedDimensions.value, ...recipe.dimensions }
       advancedOptions.value.dimensions = { ...selectedDimensions.value }
+      advancedOptions.value.word_count = recipe.dimensions.word_count || '3000'
       advancedOptions.value.tone = recipe.dimensions.tone || '学术严谨'
     }
   }
