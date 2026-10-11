@@ -496,7 +496,8 @@ class TestOutputLanguageFixed:
 class TestPromptTextRestored:
     """2026-10-11 回退锁：用户要求提示词正文与档位保持原样、不做合并。
     本类断言就是"别再擅自改提示词"的红线——确需改动时必须先说明需求并同步更新本类。
-    （唯一经授权的正文改动：输出模块段落标题同步为【输出形态】，见下条用例。）"""
+    到目前为止仅两处经用户逐条授权的正文改动：①输出模块段落标题同步为【输出形态】；
+    ②depth 四档去掉写死的字数（避免与「字数」维度冲突）。"""
 
     def test_all_baseline_modules_present(self):
         """曾误删的 13 个档位必须都在（角色 2 / 内容类型 6 / 输出 3 / 语气 2）"""
@@ -513,11 +514,21 @@ class TestPromptTextRestored:
         for dim_key, keys in expected.items():
             assert {m["key"] for m in PROMPT_DIMENSIONS[dim_key]["modules"]} == keys, dim_key
 
-    def test_depth_templates_keep_original_word_counts(self):
-        """depth 四档文案保持原样（含写死的字数），未被改写"""
-        assert "总字数控制在 500 字以内" in _get_module_template("depth", "quick")
-        assert "3000字左右" in PROMPT_DIMENSIONS["depth"]["modules"][1]["desc"]
-        assert "10000字+" in PROMPT_DIMENSIONS["depth"]["modules"][2]["desc"]
+    def test_depth_has_no_hardcoded_word_counts(self):
+        """depth 只管分析粒度，不写死字数（2026-10-11 用户要求：模板里写死字数会与「字数」维度
+        的真实下限冲突，篇幅一律由 word_count 维度控制）"""
+        banned = ("500字", "500 字", "3000字", "3000 字", "10000字", "10000 字", "800-1500")
+        for m in PROMPT_DIMENSIONS["depth"]["modules"]:
+            blob = m["desc"] + m["template"]
+            for b in banned:
+                assert b not in blob, f"depth={m['key']} 仍写死字数：{b}"
+
+    def test_deep_research_recipe_uses_chapters(self):
+        """「🧠 深度批判分析」输出形态 = 章节分析（2026-10-11 用户拍板的配方层调整，未动提示词正文）"""
+        r = next(x for x in RECIPES if x["key"] == "deep_research")
+        assert r["dimensions"]["output"] == "chapters"
+        assert r["dimensions"]["rules"] == "critical"
+        assert r["dimensions"]["depth"] == "deep"
 
     def test_output_section_headers_match_dimension_name(self):
         """输出模块的段落标题与维度展示名一致（2026-10-11 用户明确授权同步为【输出形态】；
