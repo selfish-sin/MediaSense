@@ -4,7 +4,7 @@ prompt_builder 模块化提示词引擎测试
 from unittest.mock import patch, MagicMock
 
 from services.prompt_builder import (
-    PROMPT_DIMENSIONS, RECIPES,
+    PROMPT_DIMENSIONS, RECIPES, DIMENSION_ORDER,
     get_default_dimensions, _load_module_overrides, _get_module_template,
     get_dimensions_with_overrides, _get_tone_desc, _get_word_count_desc,
     build_modular_prompt, dimensions_to_legacy_summary_type,
@@ -12,8 +12,27 @@ from services.prompt_builder import (
 
 
 class TestDimensions:
-    def test_has_10_dims(self):
-        assert len(PROMPT_DIMENSIONS) == 10
+    def test_has_9_dims(self):
+        """2026-10-11：删「输出语言」维度后 10 → 9（语言固定简体中文，纪律硬编码进 prompt）"""
+        assert len(PROMPT_DIMENSIONS) == 9
+
+    def test_dimension_order_is_declared_order(self):
+        """展示顺序 = DIMENSION_ORDER（前端 DIMENSION_KEYS 与之对齐）；
+        注意它只决定展示顺序，**不影响 build_modular_prompt 的段序**"""
+        assert list(PROMPT_DIMENSIONS) == DIMENSION_ORDER
+        assert DIMENSION_ORDER == [
+            "role", "content_type", "mode", "rules",
+            "depth", "output", "tone", "word_count", "speech_fix",
+        ]
+
+    def test_language_dimension_removed(self):
+        """输出语言不再是可配置维度：外文素材也固定中文呈现"""
+        assert "language" not in PROMPT_DIMENSIONS
+
+    def test_dimension_labels_renamed(self):
+        """改名说清用途：认知规则→分析立场、输出格式→输出形态（维度 key 不变，历史数据兼容）"""
+        assert PROMPT_DIMENSIONS["rules"]["label"] == "分析立场"
+        assert PROMPT_DIMENSIONS["output"]["label"] == "输出形态"
 
     def test_each_dim_has_required_fields(self):
         for dim_key, dim_cfg in PROMPT_DIMENSIONS.items():
@@ -32,7 +51,7 @@ class TestDimensions:
 
     def test_get_default_dimensions(self):
         defaults = get_default_dimensions()
-        assert len(defaults) == 10
+        assert len(defaults) == 9
         for dim_key, dim_cfg in PROMPT_DIMENSIONS.items():
             assert defaults[dim_key] == dim_cfg["default"]
 
@@ -45,8 +64,8 @@ class TestDimensions:
         assert d["depth"] == "standard"
         assert d["tone"] == "学术严谨"
         assert d["word_count"] == "3000"
-        assert d["language"] == "简体中文"
         assert d["speech_fix"] == "balanced"
+        assert "language" not in d
 
 
 class TestRecipes:
@@ -89,7 +108,7 @@ class TestRecipes:
             assert "key" in r
             assert "name" in r
             assert "dimensions" in r
-            assert len(r["dimensions"]) == 10
+            assert len(r["dimensions"]) == 9
 
     def test_recipe_dimensions_valid(self):
         for r in RECIPES:
@@ -98,10 +117,10 @@ class TestRecipes:
                 valid_keys = [m["key"] for m in PROMPT_DIMENSIONS[dim_key]["modules"]]
                 assert val in valid_keys, f"Recipe {r['key']}: {dim_key}={val} not in {valid_keys}"
 
-    def test_recipes_pin_language_simplified_chinese(self):
-        """内置配方统一钉输出语言=简体中文：应用配方即回到默认简中"""
+    def test_recipes_no_language_key(self):
+        """输出语言已不是维度：配方里不得再出现 language 键（否则又变成可配的）"""
         for r in RECIPES:
-            assert r["dimensions"].get("language") == "简体中文", r["key"]
+            assert "language" not in r["dimensions"], r["key"]
 
     def test_recipes_pin_speech_fix_balanced(self):
         """内置配方统一钉口误纠错=按上下文纠错：口误残留是常态问题，配方应用即启用"""
@@ -296,7 +315,8 @@ class TestGetDimensionsWithOverrides:
     def test_returns_all_dims(self):
         with patch("services.prompt_builder._load_override_rows", return_value=[]):
             result = get_dimensions_with_overrides()
-            assert len(result) == 10
+            assert len(result) == 9
+            assert list(result) == DIMENSION_ORDER
 
     def test_marks_customized(self):
         with patch("services.prompt_builder._load_override_rows",
@@ -449,27 +469,23 @@ class TestDimensionsToLegacy:
         assert dimensions_to_legacy_summary_type({"depth": "standard"}) == "summary"
 
 
-# ============ 输出语言维度（2026-09-12 删翻译功能后新增，替代原注入机制） ============
+# ============ 输出语言：2026-10-11 起固定简体中文，不再是可配置维度 ============
 
 
-class TestLanguageOption:
-    def test_default_prompt_contains_chinese(self):
-        """默认输出语言=简体中文，拼在字数之后（外文素材→中文呈现）"""
+class TestOutputLanguageFixed:
+    def test_default_prompt_contains_chinese_discipline(self):
+        """默认拼装必带简体中文纪律，位置在语气之后（与删除维度前逐字节一致）"""
         prompt = build_modular_prompt({}, "素材内容")
         assert "输出语言：" in prompt
         assert "简体中文" in prompt
-        # 顺序：输出语言行在字数要求之后
         assert prompt.index("输出语言：") > prompt.index("语气：")
 
-    def test_custom_language(self):
-        """选择其他语言时提示词跟随变化"""
+    def test_language_key_from_history_is_ignored(self):
+        """历史任务的 language 键被忽略：改不成英语，仍固定简体中文"""
         prompt = build_modular_prompt({"language": "英语"}, "素材内容")
-        assert "输出一律使用英语" in prompt
-
-    def test_unknown_language_omits_line(self):
-        """历史任务/未知值优雅降级：不写语言行"""
-        prompt = build_modular_prompt({"language": "不存在"}, "素材内容")
-        assert "输出语言：" not in prompt
+        assert "输出一律使用英语" not in prompt
+        assert "输出语言：" in prompt
+        assert "简体中文" in prompt
 
     def test_full_override_no_language_block(self):
         """full_override 完全接管提示词，无选项块"""
@@ -477,9 +493,47 @@ class TestLanguageOption:
         assert "输出语言：" not in prompt
 
 
+class TestPromptTextRestored:
+    """2026-10-11 回退锁：用户要求提示词正文与档位保持原样、不做合并。
+    本类断言就是"别再擅自改提示词"的红线——确需改动时必须先说明需求并同步更新本类。"""
+
+    def test_all_baseline_modules_present(self):
+        """曾误删的 13 个档位必须都在（角色 2 / 内容类型 6 / 输出 3 / 语气 2）"""
+        expected = {
+            "role": {"general", "appreciator", "recorder", "academic",
+                     "tech", "journalist", "creative", "tcm"},
+            "content_type": {"general", "tutorial", "news", "interview", "lecture",
+                             "entertainment", "academic_study", "argument",
+                             "event", "storytelling"},
+            "output": {"summary", "bullets", "qa", "timeline", "chapters",
+                       "process_ledger", "viewpoints", "comparison", "freeform"},
+            "tone": {"学术严谨", "通俗科普", "口语化", "新闻客观", "正式商务"},
+        }
+        for dim_key, keys in expected.items():
+            assert {m["key"] for m in PROMPT_DIMENSIONS[dim_key]["modules"]} == keys, dim_key
+
+    def test_depth_templates_keep_original_word_counts(self):
+        """depth 四档文案保持原样（含写死的字数），未被改写"""
+        assert "总字数控制在 500 字以内" in _get_module_template("depth", "quick")
+        assert "3000字左右" in PROMPT_DIMENSIONS["depth"]["modules"][1]["desc"]
+        assert "10000字+" in PROMPT_DIMENSIONS["depth"]["modules"][2]["desc"]
+
+    def test_output_section_headers_keep_original_name(self):
+        """输出模块的段落标题仍是【输出格式】——改的只是维度展示名「输出形态」，没动提示词正文"""
+        for key in ("summary", "qa", "timeline", "chapters", "process_ledger", "viewpoints"):
+            assert _get_module_template("output", key).startswith("【输出格式】"), key
+
+    def test_summary_not_merged_with_bullets(self):
+        """「要点列表」独立存在，摘要模板里没有那段合并说明"""
+        tpl = _get_module_template("output", "summary")
+        assert "短列表" not in tpl
+        assert "## 核心主题" in tpl
+        assert "以要点列表为主" in _get_module_template("output", "bullets")
+
+
 class TestSpeechFix:
     def test_default_prompt_contains_discipline(self):
-        """默认含转录纠错纪律（单模块维度默认启用）：位置在认知规则之后、深度之前"""
+        """默认含转录纠错纪律（单模块维度默认启用）：位置在「分析立场」之后、深度之前"""
         prompt = build_modular_prompt({}, "素材内容")
         assert "【转录纠错纪律】" in prompt
         # 拼装顺序：规则（【分析原则】）→ 纠错纪律 → 深度（【深度要求】）→ 内容

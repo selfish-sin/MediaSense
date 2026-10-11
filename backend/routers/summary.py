@@ -1,6 +1,6 @@
 """
 MediaSense - 模块化提示词路由
-8 维度可组合提示词系统：dimensions + recipes + prompt-preview + 模块覆盖 CRUD
+9 维度可组合提示词系统：dimensions + recipes + prompt-preview + 模块覆盖 CRUD
 """
 import logging
 from fastapi import APIRouter, HTTPException

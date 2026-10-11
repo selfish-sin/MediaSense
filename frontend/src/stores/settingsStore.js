@@ -3,8 +3,8 @@ import { ref, computed } from 'vue'
 import { summaryApi, asrApi } from '../utils/api'
 
 export const useSettingsStore = defineStore('settings', () => {
-  // ============ 模块化提示词系统（8 维度） ============
-  const promptDimensions = ref({})      // 8 维度的模块定义（从后端加载，含 DB 覆盖）
+  // ============ 模块化提示词系统（9 维度） ============
+  const promptDimensions = ref({})      // 9 维度的模块定义（从后端加载，含 DB 覆盖）
   // ★ 预设配方 = 后端 RECIPES + 前端本地自定义配方（localStorage 持久化，不改后端）
   const backendRecipes = ref([])        // 后端返回的内置配方（只读）
   const USER_RECIPES_KEY = 'yt_tool_user_recipes'
@@ -30,17 +30,18 @@ export const useSettingsStore = defineStore('settings', () => {
     }
     return out
   })
-  // 当前选择的 8 个维度值（key → module_key）
+  // 当前选择的 9 个维度值（key → module_key）；键集/顺序与 utils/recipes.js 的 DIMENSION_KEYS 一致
+  // 注：这只是首屏占位，loadDeepConfig() 会用后端 defaults 整体覆盖
   const selectedDimensions = ref({
     role: 'general',
-    mode: 'general',          // ★ 第 8 维度：通用 / 社科深度特化
-    rules: 'standard',
-    output: 'summary',
     content_type: 'general',
+    mode: 'general',          // 认知模式：通用 / 社科深度特化 / 中医特化
+    rules: 'standard',        // 分析立场（原「认知规则」）
     depth: 'standard',
+    output: 'summary',        // 输出形态（原「输出格式」）
     tone: '学术严谨',
     word_count: '3000',
-    language: '简体中文',      // ★ 第 9 维度：输出语言（外文素材默认翻译成中文呈现）
+    speech_fix: 'balanced',   // 口误与转写纠错
   })
   // ★ 维度级自定义文本（dimKey → 自定义文本，作为追加指引）
   const customDimensions = ref({})
@@ -211,7 +212,7 @@ export const useSettingsStore = defineStore('settings', () => {
   // 应用预设配方
   function applyRecipe(recipe) {
     if (recipe?.dimensions) {
-      // ★ merge 而非整体替换：配方未定义的维度保留当前值；内置配方已含 language=简体中文（应用即回默认简中）
+      // ★ merge 而非整体替换：配方未定义的维度保留当前值（内置配方含全部 9 维）
       selectedDimensions.value = { ...selectedDimensions.value, ...recipe.dimensions }
       advancedOptions.value.dimensions = { ...selectedDimensions.value }
       advancedOptions.value.word_count = recipe.dimensions.word_count || '3000'

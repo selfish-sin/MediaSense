@@ -2,9 +2,13 @@
  * 维度配方工具（SplitPromptPanel 与 DimensionSelector 共用）
  */
 
-// 维度列表（带顺序：mode 放在 rules 之前；language 在 word_count 之后；speech_fix 追加在末尾）
+// 维度列表（顺序即 UI 展示顺序，与后端 prompt_builder.DIMENSION_ORDER 一一对应，改动必须两边同步）
+// 顺序逻辑：人设与内容类型 → 认知框架与立场 → 分析粒度 → 输出形态 → 语气 → 字数 → 纠错纪律
+// 2026-10-11：删「输出语言」（固定简体中文，纪律硬编码进 prompt），10 → 9 维；「认知规则」改名
+// 「分析立场」、「输出格式」改名「输出形态」（维度 key 不变，历史任务数据兼容）。
+// 注意：这里只决定展示顺序与名称，提示词正文与拼装段序保持原样。
 // matchRecipeKey 只比较配方定义过的维度——配方未定义的维度不影响高亮，新增维度不会让已有配方失效
-export const DIMENSION_KEYS = ['role', 'mode', 'content_type', 'rules', 'depth', 'output', 'tone', 'word_count', 'language', 'speech_fix']
+export const DIMENSION_KEYS = ['role', 'content_type', 'mode', 'rules', 'depth', 'output', 'tone', 'word_count', 'speech_fix']
 
 /**
  * 返回与给定维度选择完全一致的预设配方 key；无匹配返回 ''

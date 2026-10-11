@@ -935,7 +935,17 @@ class TestSummaryRouter:
     def test_get_dimensions(self, client):
         resp = client.get("/api/summary/dimensions")
         assert resp.status_code == 200
-        assert len(resp.json()["dimensions"]) == 10
+        dims = resp.json()["dimensions"]
+        # 2026-10-11：删「输出语言」后 9 维，返回顺序 = DIMENSION_ORDER（展示顺序）
+        assert len(dims) == 9
+        assert list(dims) == [
+            "role", "content_type", "mode", "rules",
+            "depth", "output", "tone", "word_count", "speech_fix",
+        ]
+        assert "language" not in dims
+        # 改名生效（维度 key 不变，历史数据仍兼容）
+        assert dims["rules"]["label"] == "分析立场"
+        assert dims["output"]["label"] == "输出形态"
         # 口误纠错维度：单模块 + 默认启用
         sf = resp.json()["dimensions"]["speech_fix"]
         assert [m["key"] for m in sf["modules"]] == ["balanced"]

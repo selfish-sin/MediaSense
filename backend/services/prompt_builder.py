@@ -1,14 +1,16 @@
 """
 MediaSense - 模块化提示词构建引擎
-9 维度可组合：角色 + 认知模式 + 内容类型 + 认知规则 + 深度 + 输出格式 + 语气 + 字数 + 输出语言
+9 维度可组合：角色 + 内容类型 + 认知模式 + 分析立场 + 深度 + 输出形态 + 语气 + 字数 + 口误纠错
+输出语言固定简体中文（2026-10-11 起不再是可配置维度，纪律直接拼进 prompt）
 支持 DB 覆盖（prompt_module_overrides 表）和完全自定义（full_override）
 """
 from typing import Dict, List, Optional
 
 # ============ 维度元数据（供前端渲染选择器） ============
 # 每个维度包含若干模块，每个模块: {key, name, desc, template}
+# 物理定义顺序为历史遗留；下方按 DIMENSION_ORDER 重排后导出为 PROMPT_DIMENSIONS
 
-PROMPT_DIMENSIONS = {
+_DIMENSION_DEFS = {
     # ────────────── 1. 角色 ──────────────
     "role": {
         "label": "角色",
@@ -66,9 +68,9 @@ PROMPT_DIMENSIONS = {
         ],
     },
 
-    # ────────────── 2. 认知规则 ──────────────
+    # ────────────── 2. 分析立场（维度键 rules 保持不变，以兼容历史任务数据） ──────────────
     "rules": {
-        "label": "认知规则",
+        "label": "分析立场",
         "desc": "分析的深度和原则，决定 AI 如何思考内容",
         "default": "standard",
         "modules": [
@@ -135,9 +137,9 @@ PROMPT_DIMENSIONS = {
         ],
     },
 
-    # ────────────── 3. 输出格式 ──────────────
+    # ────────────── 3. 输出形态（维度键 output 保持不变，以兼容历史任务数据） ──────────────
     "output": {
-        "label": "输出格式",
+        "label": "输出形态",
         "desc": "总结的结构和呈现方式",
         "default": "summary",
         "modules": [
@@ -504,20 +506,8 @@ PROMPT_DIMENSIONS = {
         ],
     },
 
-    # ────────────── 8. 输出语言（复用 prompts.py 的 LANGUAGE_DESCS；默认中文，外文素材翻译呈现） ──────────────
-    "language": {
-        "label": "输出语言",
-        "desc": "总结的输出语言",
-        "default": "简体中文",
-        "modules": [
-            {"key": "简体中文", "name": "简体中文", "desc": "外文素材翻译成中文呈现"},
-            {"key": "繁体中文", "name": "繁体中文", "desc": "繁体中文输出"},
-            {"key": "英语", "name": "英语", "desc": "英文输出"},
-            {"key": "跟随素材", "name": "跟随素材", "desc": "素材什么语言就输出什么语言"},
-        ],
-    },
-
     # ────────────── 8. 模式（通用 / 社科深度特化） ──────────────
+    # 注：「输出语言」维度已于 2026-10-11 删除——输出固定简体中文，纪律在 build_modular_prompt 里硬编码
     # 控制整体认知框架：通用=精简忠实提取；社科深度特化=注入旧15种提示词的精华
     "mode": {
         "label": "认知模式",
@@ -586,8 +576,16 @@ PROMPT_DIMENSIONS = {
     },
 }
 
+# 维度展示顺序（前端选择器 与 /summary/dimensions 返回顺序的单一事实源；
+# 与前端 frontend/src/utils/recipes.js 的 DIMENSION_KEYS 必须一一对应，改动两边同步）
+# 顺序逻辑：人设与内容类型 → 认知框架与立场 → 分析粒度 → 输出形态 → 语气 → 字数 → 纠错纪律。
+# 注意：本顺序只决定「展示顺序」，**不影响提示词内部的段落拼装顺序**——build_modular_prompt
+# 保持原段序不动，避免改变模型实际读到的文本结构。
+DIMENSION_ORDER = ["role", "content_type", "mode", "rules", "depth", "output", "tone", "word_count", "speech_fix"]
+PROMPT_DIMENSIONS = {k: _DIMENSION_DEFS[k] for k in DIMENSION_ORDER}
 
-# ============ 预设配方（一键填充所有维度；统一钉 language=简体中文，应用即回默认简中） ============
+
+# ============ 预设配方（一键填充所有维度；输出语言已固定简体中文，不再作为维度出现在配方里） ============
 # 精简原则：维度模块（内容类型/输出格式等）保持全量可选，配方只保留高频组合；
 # 被裁组合的内容类型（学术整理/论述/事件/故事/娱乐/对比）仍可在维度选择器手动搭配。
 RECIPES = [
@@ -605,7 +603,6 @@ RECIPES = [
             "depth": "standard",
             "tone": "学术严谨",
             "word_count": "3000",
-            "language": "简体中文",
             "speech_fix": "balanced",
         },
     },
@@ -622,7 +619,6 @@ RECIPES = [
             "depth": "deep",
             "tone": "学术严谨",
             "word_count": "10000",
-            "language": "简体中文",
             "speech_fix": "balanced",
         },
     },
@@ -639,7 +635,6 @@ RECIPES = [
             "depth": "deep",
             "tone": "学术严谨",
             "word_count": "10000",
-            "language": "简体中文",
             "speech_fix": "balanced",
         },
     },
@@ -656,7 +651,6 @@ RECIPES = [
             "depth": "deep",
             "tone": "学术严谨",
             "word_count": "10000",
-            "language": "简体中文",
             "speech_fix": "balanced",
         },
     },
@@ -673,7 +667,6 @@ RECIPES = [
             "depth": "quick",
             "tone": "口语化",
             "word_count": "500",
-            "language": "简体中文",
             "speech_fix": "balanced",
         },
     },
@@ -690,7 +683,6 @@ RECIPES = [
             "depth": "standard",
             "tone": "新闻客观",
             "word_count": "3000",
-            "language": "简体中文",
             "speech_fix": "balanced",
         },
     },
@@ -707,7 +699,6 @@ RECIPES = [
             "depth": "standard",
             "tone": "口语化",
             "word_count": "3000",
-            "language": "简体中文",
             "speech_fix": "balanced",
         },
     },
@@ -724,7 +715,6 @@ RECIPES = [
             "depth": "standard",
             "tone": "新闻客观",
             "word_count": "3000",
-            "language": "简体中文",
             "speech_fix": "balanced",
         },
     },
@@ -741,7 +731,6 @@ RECIPES = [
             "depth": "standard",
             "tone": "通俗科普",
             "word_count": "3000",
-            "language": "简体中文",
             "speech_fix": "balanced",
         },
     },
@@ -758,7 +747,6 @@ RECIPES = [
             "depth": "standard",
             "tone": "口语化",
             "word_count": "3000",
-            "language": "简体中文",
             "speech_fix": "balanced",
         },
     },
@@ -879,9 +867,13 @@ def _get_word_count_desc(word_count: str) -> str:
     return WORD_COUNT_DESCS.get(word_count, f"请务必输出至少{word_count}字，宁多勿少，绝对不允许少于{word_count}字。")
 
 
-def _get_language_desc(language: str) -> str:
+def _output_language_discipline() -> str:
+    """
+    输出语言纪律（2026-10-11 起固定简体中文，不再是可配置维度）。
+    文本仍从 prompts.LANGUAGE_DESCS 取，避免同一条纪律出现两份定义。
+    """
     from services.prompts import LANGUAGE_DESCS
-    return LANGUAGE_DESCS.get(language, "")
+    return LANGUAGE_DESCS.get("简体中文", "")
 
 
 # ============ 核心：拼装完整 prompt ============
@@ -956,13 +948,13 @@ def build_modular_prompt(dimensions: Dict[str, str], content: str,
     # 8. 语气 + 字数 + 输出语言
     tone_desc = _get_tone_desc(dims["tone"])
     word_count_desc = _get_word_count_desc(dims["word_count"])
-    lang_desc = _get_language_desc(dims.get("language", ""))
+    lang_desc = _output_language_discipline()
     option_block = ""
     if tone_desc:
         option_block += f"语气：{tone_desc}。\n"
     if word_count_desc:
         option_block += word_count_desc
-    # 输出语言固定拼在字数之后（产品默认中文；选"跟随素材"时也明确写出）
+    # 输出语言固定拼在字数之后（固定简体中文，外文素材也翻译成中文呈现）
     if lang_desc:
         option_block += f"\n输出语言：{lang_desc}。"
     if option_block:
