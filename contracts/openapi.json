@@ -897,7 +897,7 @@
           "jobs-ai"
         ],
         "summary": "Generate Job Mindmap",
-        "description": "对已完成的任务生成 markmap 思维导图",
+        "description": "对已完成的任务生成 markmap 思维导图\n\n★ 2026-10-11：body 可带 version —— 历史详情页正在查看 vN 时，思维导图必须基于 vN，\n  否则页面停在 v1、导图却是 v2 的结构（与导出同一个毛病）。\n  不传 version = 基于当前最新版，行为与原来完全一致。",
         "operationId": "generate_job_mindmap_api_jobs__job_id__mindmap_post",
         "parameters": [
           {
@@ -4058,6 +4058,18 @@
             "title": "Include Title",
             "description": "是否包含标题",
             "default": true
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version",
+            "description": "总结版本号；缺省导出当前最新版"
           }
         },
         "type": "object",
