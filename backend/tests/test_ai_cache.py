@@ -220,6 +220,70 @@ class TestCallAiCache:
         assert (i2, o2) == (0, 0)
 
 
+# ---------------------------------------------------------------- 平台字幕缓存
+
+class TestSubtitleCache:
+    """op='subtitle'（2026-10-11）：键 = 视频标识 + 语言，**不含音频哈希**（命中时不需音频）。"""
+
+    def test_key_stable_and_distinct(self):
+        k = ai_cache.subtitle_key('bilibili:BV1xx411c7mD', 'zh')
+        assert k == ai_cache.subtitle_key('bilibili:BV1xx411c7mD', 'zh')
+        assert k != ai_cache.subtitle_key('bilibili:BV1xx411c7mD', 'en')
+        assert k != ai_cache.subtitle_key('bilibili:BV1xx411c7mE', 'zh')
+        assert k != ai_cache.subtitle_key('youtube:test', 'zh')
+
+    def test_store_lookup_roundtrip_writes_files(self, cache_on, tmp_path):
+        """存 SRT/TXT → 换任务目录命中时写回该目录的约定路径。"""
+        srt = tmp_path / 'sub.srt'
+        srt.write_text('1\n00:00:00,000 --> 00:00:06,000\n字幕正文\n', encoding='utf-8')
+        txt = tmp_path / 'sub.txt'
+        txt.write_text('[00:00 - 00:06] 字幕正文\n', encoding='utf-8')
+        assert ai_cache.store_subtitle('bilibili:BV1roundtrip', 'zh', str(srt), str(txt),
+                                       title='视频标题', subtitle_from='bilibili')
+
+        out = tmp_path / 'job2'
+        hit = ai_cache.lookup_subtitle('bilibili:BV1roundtrip', 'zh', out)
+        assert hit is not None
+        assert hit['title'] == '视频标题'
+        assert hit['subtitle_from'] == 'bilibili'
+        assert Path(hit['srt_path']).parent == out
+        assert Path(hit['srt_path']).read_text(encoding='utf-8') == srt.read_text(encoding='utf-8')
+        assert Path(hit['txt_path']).read_text(encoding='utf-8') == txt.read_text(encoding='utf-8')
+
+    def test_id_or_language_change_misses(self, cache_on, tmp_path):
+        srt = tmp_path / 'm.srt'
+        srt.write_text('s', encoding='utf-8')
+        txt = tmp_path / 'm.txt'
+        txt.write_text('t', encoding='utf-8')
+        ai_cache.store_subtitle('bilibili:BV1miss', 'zh', str(srt), str(txt))
+        assert ai_cache.lookup_subtitle('bilibili:BV1miss', 'en', tmp_path) is None
+        assert ai_cache.lookup_subtitle('bilibili:BV1other', 'zh', tmp_path) is None
+
+    def test_empty_content_not_stored(self, cache_on, tmp_path):
+        srt = tmp_path / 'e.srt'
+        srt.write_text('   \n', encoding='utf-8')
+        txt = tmp_path / 'e.txt'
+        txt.write_text('\n', encoding='utf-8')
+        assert ai_cache.store_subtitle('bilibili:BV1empty', 'zh', str(srt), str(txt)) is False
+        assert ai_cache.lookup_subtitle('bilibili:BV1empty', 'zh', tmp_path) is None
+
+    def test_empty_normalized_id_skipped(self, cache_on, tmp_path):
+        assert ai_cache.lookup_subtitle('', 'zh', tmp_path) is None
+
+    def test_unreadable_source_files_not_stored(self, cache_on, tmp_path):
+        assert ai_cache.store_subtitle('bilibili:BV1nofile', 'zh',
+                                       str(tmp_path / 'nope.srt'), str(tmp_path / 'nope.txt')) is False
+
+    def test_disabled_toggle(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(config, 'AI_CACHE_ENABLED', False)
+        srt = tmp_path / 'd.srt'
+        srt.write_text('s', encoding='utf-8')
+        txt = tmp_path / 'd.txt'
+        txt.write_text('t', encoding='utf-8')
+        assert ai_cache.store_subtitle('bilibili:BV1off', 'zh', str(srt), str(txt)) is False
+        assert ai_cache.lookup_subtitle('bilibili:BV1off', 'zh', tmp_path) is None
+
+
 class TestAiBypassRefresh:
     @pytest.mark.asyncio
     @pytest.mark.parametrize('streaming', [True, False])
