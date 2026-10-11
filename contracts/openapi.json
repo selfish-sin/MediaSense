@@ -1399,7 +1399,7 @@
           "models"
         ],
         "summary": "Test Model",
-        "description": "测试模型连接",
+        "description": "测试模型连接（真实发一次最小请求；失败给类别 + 修法，不是一句「连接失败」）",
         "operationId": "test_model_api_models_test_post",
         "requestBody": {
           "content": {
@@ -1427,6 +1427,26 @@
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
                 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/models/health-check": {
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Health Check Models",
+        "description": "一键体检：并发探测**全部** LLM 模型，把每个模型的连通性与失败修法一次列清。\n\n与 POST /test 共用 `_probe_model`，区别只在批量并发（默认 4 路，单个 20s 超时）。\n故意不放在 GET：会真实消耗各服务商额度，且与 /test 同一 POST 约定。\n密钥为空或已被 **** 污染的模型不发请求，直接标 no_key（与 list_models 的 key_broken 同口径）。",
+        "operationId": "health_check_models_api_models_health_check_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
               }
             }
           }
