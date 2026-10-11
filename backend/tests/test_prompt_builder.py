@@ -495,7 +495,8 @@ class TestOutputLanguageFixed:
 
 class TestPromptTextRestored:
     """2026-10-11 回退锁：用户要求提示词正文与档位保持原样、不做合并。
-    本类断言就是"别再擅自改提示词"的红线——确需改动时必须先说明需求并同步更新本类。"""
+    本类断言就是"别再擅自改提示词"的红线——确需改动时必须先说明需求并同步更新本类。
+    （唯一经授权的正文改动：输出模块段落标题同步为【输出形态】，见下条用例。）"""
 
     def test_all_baseline_modules_present(self):
         """曾误删的 13 个档位必须都在（角色 2 / 内容类型 6 / 输出 3 / 语气 2）"""
@@ -518,10 +519,12 @@ class TestPromptTextRestored:
         assert "3000字左右" in PROMPT_DIMENSIONS["depth"]["modules"][1]["desc"]
         assert "10000字+" in PROMPT_DIMENSIONS["depth"]["modules"][2]["desc"]
 
-    def test_output_section_headers_keep_original_name(self):
-        """输出模块的段落标题仍是【输出格式】——改的只是维度展示名「输出形态」，没动提示词正文"""
-        for key in ("summary", "qa", "timeline", "chapters", "process_ledger", "viewpoints"):
-            assert _get_module_template("output", key).startswith("【输出格式】"), key
+    def test_output_section_headers_match_dimension_name(self):
+        """输出模块的段落标题与维度展示名一致（2026-10-11 用户明确授权同步为【输出形态】；
+        此前正文仍是【输出格式】，是"只改展示名未动正文"的过渡状态）"""
+        for key in ("summary", "bullets", "qa", "timeline", "chapters",
+                    "process_ledger", "viewpoints", "comparison", "freeform"):
+            assert _get_module_template("output", key).startswith("【输出形态】"), key
 
     def test_summary_not_merged_with_bullets(self):
         """「要点列表」独立存在，摘要模板里没有那段合并说明"""
