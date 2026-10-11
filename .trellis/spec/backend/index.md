@@ -128,7 +128,10 @@
   键被忽略（有测试锁定）。
 - **不要顺手删"0 次使用"的档位**：实测使用次数只作参考，删档位/裁配方属需求变更，必须单独确认，
   并同步 `test_prompt_builder.py` 的档位锁与 `TestPromptTextRestored`（13 个档位 + depth 原字数
-  文案 + 输出段落标题【输出格式】 + 摘要不与要点列表合并）。
+  文案 + 摘要不与要点列表合并）。
+- **改名要连正文标题一起改**：维度展示名与模块模板里的段落标题必须一致（2026-10-11「输出格式→
+  输出形态」曾在正文留下不一致，后经用户授权同步了 output 的 9 个模块标题；回归锁
+  `test_output_section_headers_match_dimension_name` 锁定此一致性）。
 - **改维度要同步 4 处**：`_DIMENSION_DEFS`/`DIMENSION_ORDER`、前端 `DIMENSION_KEYS`、
   `settingsStore.selectedDimensions`、`build_modular_prompt`（段序，非明确需求不动）。
 - **`prompts.py` 的 `TONE_DESCS`/`WORD_COUNT_DESCS`/`LANGUAGE_DESCS` 是旧路径（`build_prompt_vars`）

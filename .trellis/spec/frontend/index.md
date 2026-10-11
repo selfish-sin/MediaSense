@@ -75,9 +75,9 @@
 ### 提示词维度（2026-10-11 固化）
 
 - **`utils/recipes.js` 的 `DIMENSION_KEYS` 是前端维度展示顺序的单一事实源**，必须与后端
-  `prompt_builder.DIMENSION_ORDER` 一一对应；`DimensionSelector` 读它渲染选择器。
-  **禁止在页面里再抄一份维度列表**——`TemplatesView` 自己抄了一份 8 键版本且已过时
-  （缺 `language`/`speech_fix`），表现为"模板中心里某些维度凭空消失"（既有问题，尚未修）。
+  `prompt_builder.DIMENSION_ORDER` 一一对应；`DimensionSelector` 与 `TemplatesView` 的维度树都读它。
+  **禁止在页面里再抄一份维度列表**——`TemplatesView` 曾自己抄了一份 8 键版本且悄悄过时
+  （缺 `speech_fix`），表现为"模板中心里「口误与转写纠错」维度凭空消失"（已于 2026-10-11 改为读共享常量）。
 - 维度的 `label`/`desc`/`modules` 一律来自 `/api/summary/dimensions`（模板中心按 key 动态渲染），
   前端不硬编码档位名——后端改档位/改名时前端应零改动。
 - 配方列表来自 `/api/summary/recipes`，**数组顺序即展示顺序**；本地自定义配方（`usr_*`）与之合并去重。
