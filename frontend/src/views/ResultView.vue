@@ -45,6 +45,9 @@ const summaryHistory = ref([])
 const activeVersion = ref(0)  // 0 = 最新（job.result_text），其他 = 历史版本号
 // 当前激活版本的结果文本（非当前版本时从 history 加载）
 const activeVersionResult = ref(null)
+// ★ 切版本时的加载态：正文最长 2 万多字，拉取 + markdown 渲染有一帧空窗。
+//   旧实现加载期间回落显示最新版，页面看着"点了没反应"——用户因此以为版本切换是坏的。
+const versionLoading = ref(false)
 
 // 追问聊天逻辑已抽离到 ChatPanel 组件（SSE 流式 / 思考过程 / 引用源 / 编辑重发）
 
@@ -152,16 +155,26 @@ async function switchToVersion(version) {
     // 切回最新版（job.result_text）
     activeVersion.value = 0
     activeVersionResult.value = null
+    versionLoading.value = false
+    resetSearch()
     return
   }
   if (version === job.value?.summary_version && job.value?.result_text) {
     // 就是当前最新版
     activeVersion.value = 0
     activeVersionResult.value = null
+    versionLoading.value = false
+    resetSearch()
     return
   }
+  if (version === activeVersion.value && activeVersionResult.value) return  // 已加载过，不重复拉
   activeVersion.value = version
   activeVersionResult.value = null  // 先清空，避免短暂显示旧版本数据
+  versionLoading.value = true
+  // 思维导图是基于**某个版本正文**生成的：切版本后旧导图已对不上，标记为需重生成
+  mindmapReady.value = false
+  // 搜索命中位置是按正文逐字算的下标，换版本后旧下标会指向别的文字 → 清掉重来
+  resetSearch()
   // 从后端加载该版本的全文
   try {
     const res = await jobsApi.getSummaryVersion(route.params.jobId, version)
@@ -175,8 +188,21 @@ async function switchToVersion(version) {
   } catch (err) {
     ElMessage.error('加载版本失败: ' + err.message)
     activeVersion.value = 0
+  } finally {
+    versionLoading.value = false
   }
 }
+
+// 换版本后清掉旧的搜索高亮（命中下标是按旧正文算的，留着会跳错位置）
+function resetSearch() {
+  searchMatches.value = []
+  currentMatch.value = 0
+  if (searchText.value.trim()) doSearch()
+}
+
+// ★ 当前查看的版本号（0 = 最新版）。导出/思维导图都要跟它走：
+//   页面停在 v1 就导出 v1，否则用户看到的和拿到的不是同一份。
+const currentVersionNo = computed(() => activeVersion.value || 0)
 
 function goBack() {
   router.back()
@@ -195,6 +221,8 @@ function handleResummarize(model) {
   activeVersion.value = 0
   streamingThinking.value = ''
   activeVersionResult.value = null
+  versionLoading.value = false
+  resetSearch()
   isStreaming.value = true
   streamingText.value = ''
 
@@ -273,6 +301,7 @@ watch(() => route.params.jobId, (newId, oldId) => {
   if (newId && newId !== oldId) {
     activeVersion.value = 0
     activeVersionResult.value = null
+    versionLoading.value = false
     isStreaming.value = false
     streamingText.value = ''
     streamingThinking.value = ''
@@ -298,12 +327,14 @@ onBeforeUnmount(() => {
 // 追问聊天逻辑已迁移至 ChatPanel 组件
 
 // ============ 导出 ============
+// ★ 传当前查看的版本号：页面停在 v1 就导出 v1。此前不传版本，后端永远取 jobs.result_text，
+//   用户看到的正文是 v1、下载到的却是 v2，且文档信息里的模型/标签也是 v2 的。
 async function handleExport(format) {
   if (!job.value) return
   try {
-    const res = await exportApi[format](job.value.id)
+    const res = await exportApi[format](job.value.id, currentVersionNo.value || undefined)
     if (res.success !== false) {
-      ElMessage.success('导出成功')
+      ElMessage.success(activeVersion.value > 0 ? `已导出 v${activeVersion.value}` : '导出成功')
     }
   } catch (err) {
     ElMessage.error(err.message)
@@ -454,7 +485,7 @@ async function generateMindmap() {
   mindmapLoading.value = true
   mindmapReady.value = false
   try {
-    const res = await jobsApi.generateMindmap(route.params.jobId)
+    const res = await jobsApi.generateMindmap(route.params.jobId, undefined, currentVersionNo.value || undefined)
     if (!res?.data?.mindmap_md) {
       ElMessage.warning('思维导图生成失败：返回内容为空')
       mindmapLoading.value = false
@@ -652,13 +683,23 @@ async function copyTranscript() {
       <AiCallChain :chain="job.ai_call_chain" />
     </el-card>
 
-    <!-- ★ 历史版本面板（从后端加载） -->
+    <!-- ★ 历史版本面板（从后端加载）。
+         单版本任务不再假装"有版本可切"——原先只列一个 chip，点了等于没点，
+         用户会以为版本切换坏了。现在直接说清"重新总结才会产生新版本"。 -->
     <el-card v-if="summaryHistory.length > 0" class="app-card" shadow="never">
-      <div style="font-size: 13px; color: var(--app-text-secondary); margin-bottom: 8px;">
-        历史版本 ({{ summaryHistory.length }})
-        <el-button v-if="activeVersion > 0" size="small" text type="primary" @click="switchToVersion(0)" style="margin-left: 8px;">
+      <div style="font-size: 13px; color: var(--app-text-secondary); margin-bottom: 8px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+        <span v-if="summaryHistory.length > 1">历史版本 ({{ summaryHistory.length }})</span>
+        <span v-else>当前仅 1 个版本</span>
+        <!-- 正在看哪一版：正文、复制、导出、思维导图都以它为准 -->
+        <el-tag size="small" :type="activeVersion > 0 ? 'warning' : 'success'" effect="plain">
+          正在查看：{{ activeVersion > 0 ? `v${activeVersion}（历史版本）` : `v${job?.summary_version || 1}（最新版）` }}
+        </el-tag>
+        <el-button v-if="activeVersion > 0" size="small" text type="primary" @click="switchToVersion(0)">
           返回最新版
         </el-button>
+      </div>
+      <div v-if="summaryHistory.length === 1" style="font-size: 12px; color: var(--app-text-placeholder);">
+        用「重新总结」换模型再生成一次，这里就会出现可对比的新版本。
       </div>
       <div style="display: flex; flex-wrap: wrap; gap: 6px;">
         <div
@@ -670,6 +711,7 @@ async function copyTranscript() {
         >
           <span style="font-weight: 500;">v{{ item.version }}</span>
           <el-tag v-if="item.version === 1" size="small" type="success" effect="plain" style="margin: 0 4px; font-size: 10px;">基础</el-tag>
+          <el-tag v-if="item.version === job?.summary_version" size="small" type="info" effect="plain" style="margin: 0 4px; font-size: 10px;">最新</el-tag>
           <span style="font-size: 11px; color: var(--app-text-secondary);">{{ item.summary_type }}</span>
           <span style="font-size: 10px; color: var(--app-text-placeholder); margin-left: 4px;">{{ formatTime(item.created_at) }}</span>
           <span style="font-size: 10px; color: var(--app-text-secondary); margin-left: 4px;">{{ item.char_count }}字</span>
@@ -743,6 +785,10 @@ async function copyTranscript() {
           <el-button size="small" @click="handleExport('txt')">TXT</el-button>
           <el-button size="small" type="primary" plain @click="handlePreviewHtml" :disabled="!displayResult">预览</el-button>
         </el-button-group>
+        <!-- 导出的是"当前查看的版本"，不是永远最新版：说清楚，免得导完发现不是眼前这份 -->
+        <span v-if="activeVersion > 0" style="font-size: 11px; color: var(--app-text-secondary);">
+          导出/导图将按 v{{ activeVersion }} 生成
+        </span>
       </div>
 
       <!-- 结果内容 -->
@@ -843,9 +889,16 @@ async function copyTranscript() {
         <div
           v-else-if="resultTab === 'summary'"
           class="markdown-body"
-          v-html="renderedResult"
-          style="line-height: 1.8; font-size: 14px;"
-        />
+          style="line-height: 1.8; font-size: 14px; position: relative; min-height: 80px;"
+        >
+          <!-- 切版本加载态：正文最长 2 万多字，拉取+渲染有空窗，
+               不给反馈就会被读成"点了版本正文没更新" -->
+          <div v-if="versionLoading" style="display: flex; align-items: center; justify-content: center; padding: 48px 0; color: var(--app-text-secondary); font-size: 13px;">
+            <el-icon class="is-loading" style="margin-right: 6px;"><Loader2 /></el-icon>
+            正在加载 v{{ activeVersion }}…
+          </div>
+          <div v-else v-html="renderedResult" />
+        </div>
         <!-- 思维导图 -->
         <div v-else-if="resultTab === 'mindmap'" style="min-height: 400px; position: relative;">
           <div v-if="mindmapLoading" style="position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.85);">

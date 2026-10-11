@@ -18,7 +18,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
 from models.schemas import ExportRequest, BatchExportRequest
-from db.job_repo import get_job
+from db.job_repo import get_job, get_summary_version
 from config import DATA_DIR
 from services.naming import export_basename, safe_basename
 from services import md_render
@@ -33,18 +33,53 @@ DOCX_MEDIA = "application/vnd.openxmlformats-officedocument.wordprocessingml.doc
 
 
 def _load_job(req: ExportRequest) -> Dict[str, Any]:
-    """取任务并校验可导出（404 任务不存在 / 400 无结果文本）"""
+    """取任务并校验可导出（404 任务不存在 / 400 无结果文本）。
+
+    ★ 2026-10-11 支持指定历史版本：req.version 非空时，返回**该版本视图**——
+      result_text / summary_type / model / tags / summary_version 全部取自 summary_history，
+      而不是 jobs 表的最新版。四个格式与 doc_meta（文档信息）都只消费这一个 dict，
+      所以版本一致只需在这里做一次，不会出现「正文是 v1、文档信息写 v2 模型」的分裂。
+      传当前最新版版本号等同不传（前端两种路径都要能用）。
+    """
     job = get_job(req.job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"任务 {req.job_id} 不存在")
     if not job.get('result_text'):
         raise HTTPException(status_code=400, detail="任务没有结果文本")
-    return job
+
+    version = getattr(req, 'version', None)
+    if not version:
+        return {**job, '_export_version': None}
+
+    current_version = job.get('summary_version') or 1
+    if version == current_version:
+        return {**job, '_export_version': None}  # 就是当前版本，无需查历史表
+
+    ver = get_summary_version(req.job_id, version)
+    if not ver:
+        raise HTTPException(status_code=404, detail=f"版本 v{version} 不存在，无法导出")
+    if not (ver.get('result_text') or '').strip():
+        raise HTTPException(status_code=400, detail=f"版本 v{version} 没有结果文本，无法导出")
+
+    return {**job,
+            'result_text': ver['result_text'],
+            'summary_type': ver.get('summary_type') or job.get('summary_type', ''),
+            'model': ver.get('model') or job.get('model', ''),
+            'tags': ver.get('tags') or [],
+            'summary_version': version,
+            '_export_version': version}
 
 
 def _paths(job: Dict[str, Any], ext: str) -> Tuple[Path, str]:
-    """(磁盘路径, 对外下载名)——磁盘名附 job_id 短码防同标题互相覆盖"""
+    """(磁盘路径, 对外下载名)——磁盘名附 job_id 短码防同标题互相覆盖。
+
+    ★ 导出历史版本时文件名带 vN 后缀：否则同一任务先导 v1 再导 v2 会写同一个磁盘路径，
+    浏览器两次下载同名文件容易被当成同一个文件（拿到的还是上一次的内容）。
+    """
     download_name = export_basename(job)
+    version = job.get('_export_version')
+    if version:
+        download_name = f"{download_name}_v{version}"
     stem = f"{download_name}_{job['id'][:8]}"
     return EXPORT_DIR / f"{stem}.{ext}", download_name
 

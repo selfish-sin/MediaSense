@@ -66,7 +66,9 @@ export const jobsApi = {
   getSummaryVersion: (jobId, version) => api.get(`/jobs/${jobId}/summary-history/${version}`),
   generateTags: (jobId, model) => api.post(`/jobs/${jobId}/generate-tags`, model ? { model } : {}),
   updateTags: (jobId, tags) => api.put(`/jobs/${jobId}/tags`, { tags }),
-  generateMindmap: (jobId, model) => api.post(`/jobs/${jobId}/mindmap`, model ? { model } : {}),
+  // version 可选：指定按哪个总结版本生成（历史详情页查看 vN 时必须带上，否则出的是最新版）
+  generateMindmap: (jobId, model, version) =>
+    api.post(`/jobs/${jobId}/mindmap`, { ...(model ? { model } : {}), ...(version ? { version } : {}) }),
 }
 
 // ============ 存储清理 API（仅 localhost 可用） ============
@@ -152,10 +154,12 @@ export const summaryApi = {
 
 // ============ 导出 API（返回文件流，触发浏览器下载） ============
 export const exportApi = {
-  docx: (jobId) => _downloadExport('/export/docx', jobId, 'docx'),
-  pdf: (jobId) => _downloadExport('/export/pdf', jobId, 'pdf'),
-  html: (jobId) => _downloadExport('/export/html', jobId, 'html'),
-  txt: (jobId) => _downloadExport('/export/txt', jobId, 'txt'),
+  // version 可选：传了就导出该历史版本（历史详情页正在查看 vN 时用），
+  // 不传导出当前最新版——两条路径后端都支持，行为一致
+  docx: (jobId, version) => _downloadExport('/export/docx', jobId, 'docx', version),
+  pdf: (jobId, version) => _downloadExport('/export/pdf', jobId, 'pdf', version),
+  html: (jobId, version) => _downloadExport('/export/html', jobId, 'html', version),
+  txt: (jobId, version) => _downloadExport('/export/txt', jobId, 'txt', version),
   // 批量导出：多个任务的结果打包为 ZIP
   batch: (jobIds) => _downloadBlob('/export/batch', { job_ids: jobIds }),
 }
@@ -188,8 +192,8 @@ async function _downloadBlob(endpoint, body) {
   return { success: true, filename }
 }
 
-async function _downloadExport(endpoint, jobId, format) {
-  return _downloadBlob(endpoint, { job_id: jobId, format })
+async function _downloadExport(endpoint, jobId, format, version) {
+  return _downloadBlob(endpoint, { job_id: jobId, format, ...(version ? { version } : {}) })
 }
 
 // ============ Token 统计 API ============

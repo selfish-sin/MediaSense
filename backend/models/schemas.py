@@ -193,6 +193,10 @@ class ExportRequest(BaseModel):
     job_id: str = Field(..., description="任务ID")
     format: str = Field(..., description="导出格式: docx/pdf/html/txt")
     include_title: bool = Field(True, description="是否包含标题")
+    # ★ 2026-10-11：指定导出哪一个总结版本（不传=当前最新版）。
+    #   历史详情页可以查看任意历史版本，此前导出永远取 jobs.result_text（最新版），
+    #   用户在 v1 界面上点导出拿到的却是 v2 —— 导出的"全部文本"和眼前看到的不一致。
+    version: Optional[int] = Field(None, description="总结版本号；缺省导出当前最新版")
 
 
 class BatchExportRequest(BaseModel):

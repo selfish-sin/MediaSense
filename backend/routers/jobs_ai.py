@@ -279,19 +279,33 @@ async def generate_job_tags(job_id: str, body: dict = None):
 
 @router.post("/{job_id}/mindmap")
 async def generate_job_mindmap(job_id: str, body: dict = None):
-    """对已完成的任务生成 markmap 思维导图"""
+    """对已完成的任务生成 markmap 思维导图
+
+    ★ 2026-10-11：body 可带 version —— 历史详情页正在查看 vN 时，思维导图必须基于 vN，
+      否则页面停在 v1、导图却是 v2 的结构（与导出同一个毛病）。
+      不传 version = 基于当前最新版，行为与原来完全一致。
+    """
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"任务 {job_id} 不存在")
     if not job.get('result_text'):
         raise HTTPException(status_code=400, detail="任务没有总结结果，无法生成思维导图")
 
-    model = (body or {}).get('model', job.get('model', DEFAULT_MODEL))
+    body = body or {}
+    version = body.get('version')
+    result_text = job['result_text']
+    if version and version != (job.get('summary_version') or 1):
+        ver = get_summary_version(job_id, version)
+        if not ver or not (ver.get('result_text') or '').strip():
+            raise HTTPException(status_code=404, detail=f"版本 v{version} 不存在或没有结果，无法生成思维导图")
+        result_text = ver['result_text']
+
+    model = body.get('model', job.get('model', DEFAULT_MODEL))
     from services.ai_processor import generate_mindmap
     from main import sio
     try:
         mindmap_md = await generate_mindmap(
-            result_text=job['result_text'],
+            result_text=result_text,
             title=job.get('title', ''),
             model=model,
             sio=sio,
