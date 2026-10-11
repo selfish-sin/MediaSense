@@ -292,10 +292,13 @@ class TestModuleTemplate:
 
 
 class TestLoadOverrides:
-    def test_load_overrides_db_error(self):
+    def test_load_overrides_db_error_logs_and_degrades(self, caplog):
+        """DB 异常：降级返回空 dict，且 warning 可见（spec：禁止静默吞错）"""
         with patch("db.database.get_connection", side_effect=Exception("no db")):
-            result = _load_module_overrides()
-            assert result == {}
+            with caplog.at_level("WARNING", logger="services.prompt_builder"):
+                result = _load_module_overrides()
+        assert result == {}
+        assert "prompt_module_overrides" in caplog.text
 
     def test_load_overrides_success(self):
         mock_conn = MagicMock()
@@ -497,8 +500,16 @@ class TestOutputLanguageFixed:
 class TestPromptTextRestored:
     """2026-10-11 回退锁：用户要求提示词正文与档位保持原样、不做合并。
     本类断言就是"别再擅自改提示词"的红线——确需改动时必须先说明需求并同步更新本类。
-    到目前为止仅两处经用户逐条授权的正文改动：①输出模块段落标题同步为【输出形态】；
-    ②depth 四档去掉写死的字数（避免与「字数」维度冲突）。"""
+    经用户逐条授权的正文改动：
+    - 第一批：①输出模块段落标题同步为【输出形态】；②depth 四档去掉写死的字数
+      （避免与「字数」维度冲突）。
+    - 第二批（配方张力调和，详见 TestCrossDimensionTuning）：③chapters「整体评价」段
+      去中医专属、依据分类通用化并新增「视角的解释力与边界」；④rules=deep 第 2 条加
+      「认知框架标签优先、不重复标注」主从句；⑤rules=standard 第 1 条加
+      「框架授权的补充/补注/延伸除外」但书；⑥500 字档由硬下限改 400–600 区间；
+      ⑦recorder 角色加「视频内部推断性还原不属于外部补充」出口；
+      ⑧纯增量新增 output 档位 dialogue/steps，talk_digest/tutorial_steps 分别改指；
+      ⑨qa 模板修复字面量 \\n（bug 修复，非措辞调整）。"""
 
     def test_all_baseline_modules_present(self):
         """曾误删的 13 个档位必须都在（角色 2 / 内容类型 6 / 输出 3 / 语气 2）
@@ -510,7 +521,8 @@ class TestPromptTextRestored:
                              "entertainment", "academic_study", "argument",
                              "event", "storytelling"},
             "output": {"summary", "bullets", "qa", "timeline", "chapters",
-                       "process_ledger", "viewpoints", "comparison", "freeform"},
+                       "process_ledger", "viewpoints", "comparison", "dialogue",
+                       "steps", "freeform"},
             "tone": {"学术严谨", "通俗科普", "口语化", "新闻客观", "正式商务"},
             "mode": {"general", "social_science", "tcm"},
         }
@@ -538,7 +550,8 @@ class TestPromptTextRestored:
         """输出模块的段落标题与维度展示名一致（2026-10-11 用户明确授权同步为【输出形态】；
         此前正文仍是【输出格式】，是"只改展示名未动正文"的过渡状态）"""
         for key in ("summary", "bullets", "qa", "timeline", "chapters",
-                    "process_ledger", "viewpoints", "comparison", "freeform"):
+                    "process_ledger", "viewpoints", "comparison", "dialogue",
+                    "steps", "freeform"):
             assert _get_module_template("output", key).startswith("【输出形态】"), key
 
     def test_summary_not_merged_with_bullets(self):
@@ -642,3 +655,121 @@ class TestRealityBriefing:
         assert "【现实研判·认知框架】" in prompt
         assert "智库分析师" in prompt
         assert "素材内容" in prompt
+        # B1 调和回归：chapters 评价段不得再把中医临床依据分类强加给研判场景
+        assert "临床经验" not in prompt
+        assert "视角的解释力与边界" in prompt
+
+
+class TestCrossDimensionTuning:
+    """2026-10-11 第二批授权改动：消解跨维度对撞、补齐形态缺口。
+    原则：只加主从规则与通用化，不删纪律、不合并模块、不动段序；
+    未被点名的配方提示词应逐字节不变。"""
+
+    # ── 甲：qa 模板字面量 bug ──
+    def test_qa_template_has_real_newline_not_literal(self):
+        tpl = _get_module_template("output", "qa")
+        assert "\\n" not in tpl  # 不得残留字面反斜杠+n
+        assert "**Q：问题**" in tpl
+        assert "A：答案" in tpl
+
+    # ── B1：chapters「整体评价」段去中医专属 ──
+    def test_chapters_evaluation_is_domain_neutral(self):
+        tpl = _get_module_template("output", "chapters")
+        # 写死中医临床的四类依据退出，换成领域中性的四分法
+        assert "经典依据、临床经验、推理演绎、个案举例" not in tpl
+        for kw in ("事实数据", "经典或权威引述", "逻辑推理", "个案与实践经验"):
+            assert kw in tpl, kw
+        # 外部补充受当前认知框架约束：禁止时只指缺口（现实研判不再被强制补注）
+        assert "框架不允许外部补充时只指出缺口" in tpl
+        # 与研判框架的「遮蔽」互相增强
+        assert "视角的解释力与边界" in tpl
+        # [补注] 通道保留（中医配方能力不缩水）
+        assert "[补注]" in tpl
+
+    def test_tcm_recipe_keeps_clinical_lens_via_framework(self):
+        """中医视角没有丢：临床经验等字样仍由 mode=tcm 认知框架提供，只是不再写死在形态层"""
+        r = next(x for x in RECIPES if x["key"] == "tcm_lecture")
+        with patch("services.prompt_builder._load_module_overrides", return_value={}):
+            prompt = build_modular_prompt(r["dimensions"], "中医讲座素材")
+        assert "临床经验" in prompt  # 来自 mode=tcm 第 6 条四步辨析
+        assert "[补注]" in prompt
+
+    # ── B2：rules=deep 标签主从 ──
+    def test_deep_rule_defers_to_framework_tag_scheme(self):
+        tpl = _get_module_template("rules", "deep")
+        assert "以框架标注为准" in tpl
+        assert "不另加标签" in tpl
+
+    # ── B3：rules=standard 外部补充但书 ──
+    def test_standard_rule_allows_framework_authorized_additions(self):
+        tpl = _get_module_template("rules", "standard")
+        assert "认知框架明确授权的补充" in tpl
+        assert "与讲者原话严格分开" in tpl
+
+    # ── B4：500 字档区间化（与 depth=quick 和解） ──
+    def test_500_word_count_is_range_not_hard_floor(self):
+        desc = _get_word_count_desc("500")
+        assert "500 字左右" in desc
+        assert "400–600" in desc
+        assert "绝对不允许" not in desc
+        # 其余字数档不在本轮授权范围：仍是下限语义
+        assert "绝对不允许少于3000字" in _get_word_count_desc("3000")
+
+    def test_quick_watch_prompt_no_longer_self_contradicts(self):
+        r = next(x for x in RECIPES if x["key"] == "quick_watch")
+        with patch("services.prompt_builder._load_module_overrides", return_value={}):
+            prompt = build_modular_prompt(r["dimensions"], "短视频素材")
+        assert "篇幅尽量短" in prompt
+        assert "绝对不允许少于500字" not in prompt
+
+    # ── B5：recorder 推断出口 ──
+    def test_recorder_allows_in_video_inference(self):
+        tpl = _get_module_template("role", "recorder")
+        assert "推断性还原不属于外部补充" in tpl
+
+    # ── C：dialogue/steps 纯增量档位 ──
+    def test_dialogue_and_steps_modules_exist(self):
+        mods = {m["key"]: m for m in PROMPT_DIMENSIONS["output"]["modules"]}
+        for key, must_have in (
+            ("dialogue", ("议题交锋", "发言者", "分歧与共识")),
+            ("steps", ("目标与适用场景", "前置准备", "操作步骤", "验证与常见问题")),
+        ):
+            assert key in mods
+            tpl = mods[key]["template"]
+            assert tpl.startswith("【输出形态】")
+            for kw in must_have:
+                assert kw in tpl, (key, kw)
+
+    def test_dialogue_handles_unlabeled_speakers(self):
+        """转录无说话人分离时的兜底：推断身份，无法辨明标甲/乙，不得张冠李戴"""
+        tpl = _get_module_template("output", "dialogue")
+        assert "发言者甲/乙" in tpl
+        assert "不要张冠李戴" in tpl
+
+    def test_talk_digest_uses_dialogue_output(self):
+        r = next(x for x in RECIPES if x["key"] == "talk_digest")
+        assert r["dimensions"]["output"] == "dialogue"
+        with patch("services.prompt_builder._load_module_overrides", return_value={}):
+            prompt = build_modular_prompt(r["dimensions"], "访谈素材")
+        assert "议题交锋" in prompt
+        assert "分歧与共识" in prompt
+        # qa 自问自答形态不再进入对话配方（它天然丢发言者归属）
+        assert "提出 6-10 个问题" not in prompt
+
+    def test_tutorial_steps_uses_steps_output(self):
+        r = next(x for x in RECIPES if x["key"] == "tutorial_steps")
+        assert r["dimensions"]["output"] == "steps"
+        with patch("services.prompt_builder._load_module_overrides", return_value={}):
+            prompt = build_modular_prompt(r["dimensions"], "教程素材")
+        assert "前置准备" in prompt
+        assert "操作步骤" in prompt
+        # bullets 的金句型泛用清单不再进入教程配方
+        assert "值得记住的一句话" not in prompt
+
+    def test_qa_and_bullets_modules_remain_for_manual_combo(self):
+        """旧档位保留：自由搭维度与历史任务仍可用，只是不再被这两个配方引用"""
+        assert _get_module_template("output", "qa")
+        assert _get_module_template("output", "bullets")
+        assert not any(r["dimensions"].get("output") == "qa" for r in RECIPES)
+        # bullets 仍被 quick_watch 使用
+        assert any(r["dimensions"].get("output") == "bullets" for r in RECIPES)
