@@ -72,6 +72,19 @@
   （fixed 定位元素恒为 null）；`el-dropdown` 的菜单项会为每行都渲染并全部留在 DOM 里，
   按文案 find 会命中第一行的菜单——必须先按可见性过滤
 
+### 提示词维度（2026-10-11 固化）
+
+- **`utils/recipes.js` 的 `DIMENSION_KEYS` 是前端维度顺序的单一事实源**，必须与后端
+  `prompt_builder.DIMENSION_ORDER` 一一对应；`DimensionSelector` 与 `TemplatesView` 的维度树都读它。
+  **禁止在页面里再抄一份维度列表**——`TemplatesView` 曾自己抄了 8 键版本且悄悄过时（缺
+  `language`/`speech_fix`），表现为"模板中心里某些维度凭空消失"。
+- 维度的 `label`/`desc`/`modules` 一律来自 `/api/summary/dimensions`（模板中心按 key 动态渲染），
+  前端不硬编码档位名——后端改档位/改名时前端应零改动。
+- 配方列表来自 `/api/summary/recipes`，**数组顺序即展示顺序**；本地自定义配方（`usr_*`）与之合并去重。
+- `settingsStore.selectedDimensions` 只是首屏占位，`loadDeepConfig()` 会用后端 defaults 整体覆盖；
+  新增维度时初值给不给都行，但**删维度后必须把该键从初值里也删掉**（否则残留键会被当成用户选择下发）。
+- `matchRecipeKey` 只比对配方定义过的维度，配方未定义的维度不影响高亮——加维度不会让已有配方失效。
+
 ### 构建与路由
 
 - Vue Router history 模式，SPA fallback 由后端 `serve_vue_spa` 处理
