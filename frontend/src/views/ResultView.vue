@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, Search, Loader2, ExternalLink, FileText, Cpu, RefreshCcw } from 'lucide-vue-next'
+import { ArrowLeft, Search, Loader2, ExternalLink, FileText, Cpu, RefreshCcw, ChevronUp, ChevronDown } from 'lucide-vue-next'
 import { jobsApi, exportApi } from '../utils/api'
 import { useModelStore } from '../stores/modelStore'
 import { useRafMarkdown } from '../composables/useMarkdownRender'
@@ -28,8 +28,6 @@ const summaryHistoryNotifier = createFailureNotifier('总结版本历史加载�
 const job = ref(null)
 const loading = ref(false)
 const searchText = ref('')
-const searchMatches = ref([])
-const currentMatch = ref(0)
 // 结果区容器引用（★ 模板 ref="resultSectionRef" 必须有同名顶层声明）
 const resultSectionRef = ref(null)
 // ★ Socket 监听解绑函数集合（卸载时逐个调用，只移除本组件注册的 handler）
@@ -193,10 +191,9 @@ async function switchToVersion(version) {
   }
 }
 
-// 换版本后清掉旧的搜索高亮（命中下标是按旧正文算的，留着会跳错位置）
+// 换版本/清空搜索共用：清高亮，关键词还在就按新正文重算（实现见下方「搜索」区）
 function resetSearch() {
-  searchMatches.value = []
-  currentMatch.value = 0
+  clearHits()
   if (searchText.value.trim()) doSearch()
 }
 
@@ -382,29 +379,147 @@ ${renderedResult.value}
 }
 
 // ============ 搜索 ============
-function doSearch() {
-  if (!searchText.value.trim() || !displayResult.value) {
-    searchMatches.value = []
-    currentMatch.value = 0
-    return
+// ★ 为什么必须在**渲染后的 DOM** 上做，不能拿 markdown 源码的字符下标去切 HTML：
+//   markdown 渲染会把段落/表格/列表/行内代码重排，源文字符位置与 DOM 文本位置完全对不上
+//   （表格单元格里多出的分隔符、列表符号都会错位）。这里统一用 TreeWalker 走文本节点，
+//   在 DOM 层建 <mark>，命中数与高亮一一对应。
+const resultBodyRef = ref(null)
+// 命中的 <mark> 元素（文档顺序），长度即命中数
+const searchHits = ref([])
+const currentMatch = ref(0)
+
+function clearHits() {
+  for (const mark of searchHits.value) {
+    const parent = mark.parentNode
+    if (!parent) continue
+    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark)
+    parent.removeChild(mark)
+    parent.normalize()   // 合并被拆散的文本节点，避免 DOM 碎片化
   }
-  const q = searchText.value.toLowerCase()
-  const text = displayResult.value.toLowerCase()
-  const matches = []
-  let idx = 0
-  while ((idx = text.indexOf(q, idx)) !== -1) {
-    matches.push(idx)
-    idx += q.length
+  searchHits.value = []
+  currentMatch.value = 0
+}
+
+/** 在结果区高亮关键词，返回命中的 <mark> 元素数组（文档顺序） */
+function applyHits(q) {
+  clearHits()
+  const root = resultBodyRef.value
+  const keyword = (q || '').trim()
+  if (!root || !keyword) return []
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  const nodes = []
+  let full = ''
+  while (walker.nextNode()) {
+    const node = walker.currentNode
+    if (!node.nodeValue) continue
+    nodes.push({ node, start: full.length })
+    full += node.nodeValue
   }
-  searchMatches.value = matches
-  currentMatch.value = matches.length > 0 ? 1 : 0
-  if (matches.length === 0) {
-    ElMessage.info('未找到匹配内容')
-  } else {
-    ElMessage.success(`找到 ${matches.length} 处匹配`)
+  const lower = full.toLowerCase()
+  const needle = keyword.toLowerCase()
+  const ranges = []
+  let i = 0
+  while ((i = lower.indexOf(needle, i)) !== -1) {
+    ranges.push([i, i + needle.length])
+    i += needle.length
+  }
+
+  const marks = []
+  // 从后往前插：前面的插入不会影响后面节点里已算好的偏移
+  for (let r = ranges.length - 1; r >= 0; r--) {
+    const [s, e] = ranges[r]
+    let startNode = null, startOff = 0, endNode = null, endOff = 0
+    for (const item of nodes) {
+      const end = item.start + item.node.nodeValue.length
+      if (startNode === null && s < end) {
+        startNode = item.node
+        startOff = s - item.start
+      }
+      if (e <= end) {
+        endNode = item.node
+        endOff = e - item.start
+        break
+      }
+    }
+    if (!startNode || !endNode) continue
+    const mark = document.createElement('mark')
+    mark.className = 'search-hit'
+    try {
+      const range = document.createRange()
+      range.setStart(startNode, startOff)
+      range.setEnd(endNode, endOff)
+      mark.appendChild(range.extractContents())
+      range.insertNode(mark)
+      marks.push(mark)
+    } catch {
+      // 单个命中点失败不该中断整批高亮（跨节点等边缘情况）：跳过这一处
+    }
+  }
+  return marks.reverse()   // 收集顺序是倒的，翻回来才是文档顺序
+}
+
+/** 跳到第 n 处（1-based），加当前高亮并滚动到视野中央 */
+function gotoMatch(n) {
+  const hits = searchHits.value
+  if (!hits.length) return
+  const idx = ((n - 1) % hits.length + hits.length) % hits.length
+  currentMatch.value = idx + 1
+  for (const [i, el] of hits.entries()) el.classList.toggle('search-hit--current', i === idx)
+  hits[idx].scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
+
+/** 重新应用高亮（正文重渲染后调用：切版本、流式结束、切回总结 tab） */
+function refreshHits(keepIndex = false) {
+  const prev = keepIndex ? currentMatch.value : 1
+  searchHits.value = applyHits(searchText.value)
+  if (searchHits.value.length) {
+    gotoMatch(prev > searchHits.value.length ? 1 : prev)
   }
 }
 
+function doSearch() {
+  if (resultTab.value !== 'summary') {
+    ElMessage.info('搜索只在「AI 总结」内容里进行，请先切回该 tab')
+    return
+  }
+  if (!searchText.value.trim() || !displayResult.value) {
+    clearHits()
+    return
+  }
+  // markdown 是 rAF 异步渲染的，正文可能还没进 DOM → 等一拍再高亮
+  nextTick(() => {
+    refreshHits(false)
+    if (!searchHits.value.length) ElMessage.info('未找到匹配内容')
+    else ElMessage.success(`找到 ${searchHits.value.length} 处匹配`)
+  })
+}
+
+function stepMatch(delta) {
+  if (!searchHits.value.length) {
+    ElMessage.info('没有匹配结果，先搜索一个词')
+    return
+  }
+  gotoMatch(currentMatch.value + delta)
+}
+
+// 换版本/清空搜索共用：清高亮，关键词还在就按新正文重算
+function clearSearch() {
+  searchText.value = ''
+  clearHits()
+}
+
+// 正文重新渲染（切版本、流式结束、切回总结 tab）后重新落高亮
+watch(renderedResult, () => {
+  if (resultTab.value === 'summary' && searchText.value.trim()) refreshHits(true)
+})
+watch(resultTab, () => {
+  if (resultTab.value === 'summary' && searchText.value.trim()) refreshHits(true)
+  else clearHits()
+})
+watch(versionLoading, (loading) => {
+  if (!loading && searchText.value.trim()) refreshHits(true)
+})
 function formatTime(time) {
   if (!time) return ''
   return new Date(time).toLocaleString()
@@ -747,19 +862,29 @@ async function copyTranscript() {
       <div v-if="(displayResult || isStreaming) && resultTab !== 'transcript'" style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;">
         <el-input
           v-model="searchText"
-          placeholder="在结果中搜索..."
+          placeholder="在结果中搜索...（Enter 搜索）"
           size="small"
-          style="width: 200px;"
+          style="width: 220px;"
           clearable
           @keyup.enter="doSearch"
+          @clear="clearSearch"
         >
           <template #append>
-            <el-button :icon="Search" @click="doSearch" />
+            <el-button :icon="Search" @click="doSearch" title="搜索" />
           </template>
         </el-input>
-        <span v-if="searchMatches.length" style="font-size: 12px; color: var(--app-text-secondary);">
-          {{ currentMatch }}/{{ searchMatches.length }}
-        </span>
+        <!-- 命中数 + 上一处/下一处：此前搜索只显示「1/N」却没有任何翻页入口，
+             计数永远停在 1，看起来像"搜到了但没反应" -->
+        <template v-if="searchHits.length">
+          <span style="font-size: 12px; color: var(--app-text-secondary); white-space: nowrap;">
+            {{ currentMatch }}/{{ searchHits.length }}
+          </span>
+          <el-button-group size="small">
+            <el-button :icon="ChevronUp" :disabled="searchHits.length < 2" @click="stepMatch(-1)" title="上一处（Shift+Enter）" />
+            <el-button :icon="ChevronDown" :disabled="searchHits.length < 2" @click="stepMatch(1)" title="下一处" />
+          </el-button-group>
+          <el-button size="small" text @click="clearSearch">清除</el-button>
+        </template>
         <div style="flex: 1;" />
         <!-- 流式输出指示 -->
         <el-tag v-if="isStreaming" type="warning" size="small" effect="plain">
@@ -888,6 +1013,7 @@ async function copyTranscript() {
 
         <div
           v-else-if="resultTab === 'summary'"
+          ref="resultBodyRef"
           class="markdown-body"
           style="line-height: 1.8; font-size: 14px; position: relative; min-height: 80px;"
         >
@@ -976,6 +1102,28 @@ async function copyTranscript() {
 .version-chip.active {
   border-color: var(--app-accent-1);
   background: rgba(var(--app-accent-1-rgb, 56, 189, 248), 0.15);
+}
+
+/* 搜索命中高亮：<mark> 由脚本在渲染后的 DOM 上插入
+   （不是 v-html 里写死的——markdown 重排后源码字符位与 DOM 位置对不上） */
+.markdown-body .search-hit {
+  background: rgba(250, 204, 21, 0.38);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.markdown-body .search-hit--current {
+  background: var(--app-accent-1);
+  color: #fff;
+  box-shadow: 0 0 0 1px rgba(var(--app-accent-1-rgb, 56, 189, 248), 0.5);
+}
+html[data-theme='dark'] .markdown-body .search-hit {
+  background: rgba(250, 204, 21, 0.32);
+  color: inherit;
+}
+html[data-theme='dark'] .markdown-body .search-hit--current {
+  background: var(--app-accent-1);
+  color: #0b1120;
 }
 
 /* 流式思考过程 */
