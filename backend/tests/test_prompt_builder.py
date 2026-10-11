@@ -124,6 +124,59 @@ class TestRecipes:
         assert "过程盘点" in prompt
         assert "整体评价" not in prompt
 
+    def test_insight_digest_recipe(self):
+        """观点提炼预设：欣赏型人设 + 肯定为主规则 + 观点梳理结构；不挂任何批判型模块"""
+        r = next(x for x in RECIPES if x["key"] == "insight_digest")
+        assert r["dimensions"]["role"] == "appreciator"
+        assert r["dimensions"]["rules"] == "affirmative"
+        assert r["dimensions"]["output"] == "viewpoints"
+        # 不注入认知框架（mode）与类型预设（content_type）空模板，避免引入额外判断口径
+        assert r["dimensions"]["mode"] == "general"
+        assert r["dimensions"]["content_type"] == "general"
+        # 篇幅克制：standard + 3000 字，避免触发 ai_process 分批（分批=串行长请求，无汇总阶段）
+        assert r["dimensions"]["depth"] == "standard"
+        assert r["dimensions"]["word_count"] == "3000"
+        assert "critical" not in r["dimensions"].values()
+
+    def test_affirmative_rule_allows_praise_and_natural_limits(self):
+        """用户要求（2026-10-10）：只有正面、但自然带出问题，不质疑不并列
+        两条边界必须同时写死：认可有授权且要具体、正反并列/裁决有禁令"""
+        tpl = _get_module_template("rules", "affirmative")
+        # 授权侧：认可讲透 + 限制顺带一提
+        for kw in ("以认可为主", "值得取", "顺带一提", "不超过五处"):
+            assert kw in tpl, kw
+        # 禁令侧：不搞正反并列、不裁决
+        for kw in ("不搞正反并列", "不下", "打分评级"):
+            assert kw in tpl, kw
+        # 关键：肯定与提醒互不吞掉（肯定不空洞、提醒不升级为审判）
+        assert "两条互不吞掉" in tpl
+        assert "不评价讲者本人" in tpl
+
+    def test_viewpoints_output_has_conditional_reminder_slot(self):
+        """观点梳理结构：留「值得取的地方」与「用时留意」的位置，且不设正反对照栏"""
+        tpl = _get_module_template("output", "viewpoints")
+        assert "值得取的地方" in tpl
+        assert "用时留意" in tpl
+        # 提醒是可选栏位、明确写了没必要就不写
+        assert "没必要就不写" in tpl
+        # 只拦「作为输出栏位的评价标题」；禁令声明句里点名这些词是必要的
+        for banned in ("## 整体评价", "## 优点", "## 不足", "## 改进建议", "## 缺陷"):
+            assert banned not in tpl, banned
+
+    def test_insight_digest_prompt_builds_clean(self):
+        """装配后：欣赏型人设与肯定纪律落地，且全文不出现正反评价栏"""
+        with patch("services.prompt_builder._load_module_overrides", return_value={}):
+            r = next(x for x in RECIPES if x["key"] == "insight_digest")
+            prompt = build_modular_prompt(r["dimensions"], "素材内容")
+        assert "善意而有分寸的整理者" in prompt
+        assert "以认可为主" in prompt
+        assert "值得取的地方" in prompt
+        assert "用时留意" in prompt
+        assert "整体评价" not in prompt
+        # 批判型模块的措辞不得混入
+        assert "逻辑谬误" not in prompt
+        assert "指出内容的亮点和不足" not in prompt
+
     def test_tcm_recipe_and_role_module(self):
         """中医预设：专用角色模块 + 原貌保留与辨析补注型维度组合"""
         r = next(x for x in RECIPES if x["key"] == "tcm_lecture")
