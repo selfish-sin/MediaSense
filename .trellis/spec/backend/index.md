@@ -112,6 +112,31 @@
 - **磁盘名与下载名解耦**：磁盘落盘名附唯一后缀（job_id 短码/时间戳）防互相覆盖，
   `FileResponse(filename=...)` 用可读名。磁盘名不进 `FileResponse`。
 
+### 提示词维度与提示词正文（2026-10-11 定稿）
+
+`services/prompt_builder.py` 是 9 维模块化提示词的单一实现（角色/内容类型/认知模式/分析立场/深度/
+输出形态/语气/字数/口误纠错）。**提示词正文（各模块的 `template`/`name`/`desc`）与
+`build_modular_prompt` 的拼装段序属用户资产**——"整理维度"这类需求只动**档位与展示层**，
+不得改写模板文字、不得合并模块、不得调整段序；确需改动必须先拿到用户明确要求
+（2026-10-11 有过一次擅自改写被整批回退的先例）。
+
+- **`DIMENSION_ORDER` 只管展示顺序**（决定 `/api/summary/dimensions` 返回顺序，前端
+  `utils/recipes.js` 的 `DIMENSION_KEYS` 必须与之一致），**不决定拼装段序**；
+  `_DIMENSION_DEFS` 是物理定义，导出时按 ORDER 重排为 `PROMPT_DIMENSIONS`。
+- **输出语言不是维度**：固定简体中文，纪律由 `_output_language_discipline()`（复用
+  `prompts.LANGUAGE_DESCS["简体中文"]`，避免两份文案）拼在字数之后；历史任务的 `language`
+  键被忽略（有测试锁定）。
+- **不要顺手删"0 次使用"的档位**：实测使用次数只作参考，删档位/裁配方属需求变更，必须单独确认，
+  并同步 `test_prompt_builder.py` 的档位锁与 `TestPromptTextRestored`（13 个档位 + depth 原字数
+  文案 + 输出段落标题【输出格式】 + 摘要不与要点列表合并）。
+- **改维度要同步 4 处**：`_DIMENSION_DEFS`/`DIMENSION_ORDER`、前端 `DIMENSION_KEYS`、
+  `settingsStore.selectedDimensions`、`build_modular_prompt`（段序，非明确需求不动）。
+- **`prompts.py` 的 `TONE_DESCS`/`WORD_COUNT_DESCS`/`LANGUAGE_DESCS` 是旧路径（`build_prompt_vars`）
+  与历史任务兜底共用常量**：删维度档位时不要连带删常量，否则历史任务重跑落到兜底文案。
+- **校验"提示词是否被改动"的方法**：不要把两份中文交给 diff 肉眼看（PowerShell 会把 UTF-8 按
+  Latin-1 解码成乱码，`åæç«åº`），要用 `git show <base>:<file>` 落字节文件 + 脚本逐组合比对
+  `build_modular_prompt` 的输出。
+
 ## Quality Check
 
 - [ ] 仓库根 `backend/venv/Scripts/python.exe verify.py backend` 全绿（ruff + pytest；2026-10-07 基线 979；必须用已安装开发锁的环境）
