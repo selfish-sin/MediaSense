@@ -130,6 +130,12 @@ class ModelTestResponse(BaseModel):
     response: Optional[str] = None
     error: Optional[str] = None
     latency_ms: Optional[int] = None
+    # 失败类别（network/auth/forbidden/model/rate_limit/quota/tls/server/no_key/unknown）：
+    # 前端据此区分「网络不通 / 密钥无效 / 账号无权限 / 模型不存在 / 限流」并给出对应修法，
+    # 避免所有失败都显示成同一句"连接失败"（2026-10-11）
+    kind: Optional[str] = None
+    # 可行动修法（一句话，直接来自服务端真实原因）
+    hint: Optional[str] = None
 
 
 # ============ 云端 ASR provider 配置（模型管理页「ASR 模型」域） ============

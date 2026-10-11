@@ -67,6 +67,11 @@ export const useModelStore = defineStore('model', () => {
     return await modelsApi.test({ key })
   }
 
+  /** 一键体检：并发探测全部模型。返回 {results, summary}，失败项带 kind/hint 修法。 */
+  async function healthCheck() {
+    return await modelsApi.healthCheck()
+  }
+
   async function setDefaultModel(key) {
     await modelsApi.setDefault(key)
     await loadModels()
@@ -87,6 +92,7 @@ export const useModelStore = defineStore('model', () => {
     updateModel,
     deleteModel,
     testModel,
+    healthCheck,
     setDefaultModel,
   }
 })

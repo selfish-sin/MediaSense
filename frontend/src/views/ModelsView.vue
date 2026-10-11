@@ -22,6 +22,12 @@ const editingKey = ref('')
 const showApiKey = ref(false)
 const testing = ref(false)
 const testResult = ref(null)
+const healthChecking = ref(false)
+// key -> 体检结果；空表示本次没测过（表头不显示状态，不假装已体检）
+const healthMap = ref({})
+const healthSummary = ref(null)
+// 单模型测试失败的常驻告警（title=现象，hint=修法）；成功/未测时为 null
+const testAlert = ref(null)
 const fetchingModels = ref(false)
 const fetchingModelKey = ref('')
 const fetchDialogVisible = ref(false)
@@ -207,6 +213,33 @@ function handleRowCommand(cmd, row) {
   if (cmd === 'delete') { handleDelete(row.key); return }
 }
 
+// ★ 失败类别文案：与后端 _classify_failure 的 kind 一一对应（改一处要同步另一处）。
+//   存在的意义：401/403/404/429/网络不通原本一律叫「连接失败」，用户无从判断该改密钥、
+//   找客服开权限、改模型 ID 还是关代理——分类后每类都带明确修法。
+const HEALTH_KIND = {
+  ok: { label: '正常', type: 'success' },
+  no_key: { label: '未设密钥', type: 'info' },
+  network: { label: '网络/代理不通', type: 'danger' },
+  tls: { label: '证书校验失败', type: 'warning' },
+  auth: { label: '密钥无效', type: 'danger' },
+  forbidden: { label: '账号无权限', type: 'danger' },
+  forbidden_realname: { label: '账号未实名', type: 'warning' },
+  model: { label: '模型ID不存在', type: 'danger' },
+  endpoint: { label: '端点路径不对', type: 'danger' },
+  rate_limit: { label: '被限流', type: 'warning' },
+  quota: { label: '额度/余额不足', type: 'warning' },
+  server: { label: '服务端错误', type: 'warning' },
+  bad_request: { label: '请求被拒绝', type: 'danger' },
+  unknown: { label: '未知错误', type: 'info' },
+}
+function healthKindMeta(kind) {
+  return HEALTH_KIND[kind] || { label: kind || '未知错误', type: 'info' }
+}
+const healthFailed = computed(() => Object.values(healthMap.value).filter((r) => !r.ok))
+function healthOf(key) {
+  return healthMap.value[key] || null
+}
+
 async function handleTest(key) {
   testing.value = true
   testResult.value = null
@@ -216,13 +249,74 @@ async function handleTest(key) {
     if (res.success) {
       ElMessage.success(`连接成功 (${res.latency_ms}ms)`)
     } else {
-      ElMessage.error(`连接失败: ${res.error}`)
+      const meta = healthKindMeta(res.kind)
+      ElMessage.error(`连接失败（${meta.label}）: ${res.error}`)
+      // 修法不塞进 toast（会被截断），单测失败也在表格上方常驻告警里写清楚怎么修
+      testAlert.value = res.hint
+        ? { type: 'error', title: `${key} 连接失败（${meta.label}）：${res.error}`, hint: res.hint }
+        : { type: 'error', title: `${key} 连接失败：${res.error}`, hint: '' }
     }
   } catch (err) {
     ElMessage.error(err.message)
   } finally {
     testing.value = false
   }
+}
+
+/** 一键体检：真实发一次最小请求探测全部模型（后端 4 路并发，单个 20s 超时）。 */
+async function runHealthCheck() {
+  healthChecking.value = true
+  try {
+    const res = await modelStore.healthCheck()
+    const map = {}
+    for (const r of res.results || []) map[r.key] = r
+    healthMap.value = map
+    healthSummary.value = res.summary || null
+    const s = healthSummary.value
+    if (s && s.failed) {
+      const ring = s.failed_in_ring ? `，其中 ${s.failed_in_ring} 个还在兜底环里` : ''
+      ElMessage.warning(`体检完成：${s.ok}/${s.total} 正常，${s.failed} 个异常${ring}`)
+    } else {
+      ElMessage.success(`体检完成：${s?.total ?? 0} 个模型全部正常`)
+    }
+  } catch (err) {
+    ElMessage.error(err?.message || String(err))
+  } finally {
+    healthChecking.value = false
+  }
+}
+
+/**
+ * 把体检判定的"硬失败"模型移出兜底环。
+ * 硬失败 = 密钥/权限/实名/模型不存在/端点错/未设密钥——这些重试永远不会成功，
+ * 留在环里只会让每次换模型都白撞一次（用户体感就是"又连不上"）。
+ * 限流/服务端错误/网络不通**不算**硬失败：它们会自愈，摘掉等于少一个真备胎。
+ */
+const HARD_FAIL_KINDS = ['auth', 'forbidden', 'forbidden_realname', 'model', 'endpoint', 'no_key', 'quota']
+const hardFailed = computed(() => healthFailed.value.filter((r) => HARD_FAIL_KINDS.includes(r.kind)))
+
+async function removeHardFailedFromRing() {
+  if (!hardFailed.value.length) return
+  const cfg = await modelStore.loadFallbackChain()
+  const bad = new Set(hardFailed.value.map((r) => r.key))
+  const next = (cfg.chain || []).filter((k) => !bad.has(k))
+  const removed = (cfg.chain || []).length - next.length
+  if (!removed) {
+    ElMessage.info('这些异常模型本来就不在兜底环里')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `将移出兜底环（模型本身不会被删除，随时可加回）：\n${[...bad].join('、')}`,
+      '确认清理兜底环',
+      { type: 'warning' },
+    )
+  } catch (err) {
+    if (isDialogCancel(err)) return
+    throw err
+  }
+  const saved = await modelStore.saveFallbackChain(next, cfg.enabled)
+  ElMessage.success(`已移出 ${removed} 个失效模型，兜底环剩 ${(saved.chain || []).length} 个候选`)
 }
 
 async function fetchModelsFromForm() {
@@ -342,7 +436,48 @@ onMounted(() => {
           <div class="card-head-row" style="margin-bottom: 12px;">
             <span class="wb-card-title">LLM 文本模型</span>
             <span class="card-head-hint">用于总结、AI 校正、打标签、思维导图与追问</span>
+            <div style="margin-left: auto; display: flex; gap: 8px; align-items: center;">
+              <el-tooltip content="真实发一次最小请求，逐个探测全部模型；失败会列出真实原因与修法（会消耗极少量额度）" placement="top">
+                <el-button :loading="healthChecking" @click="runHealthCheck">
+                  <el-icon><RefreshCcw /></el-icon>
+                  <span style="margin-left: 4px;">一键体检</span>
+                </el-button>
+              </el-tooltip>
+              <el-tooltip v-if="hardFailed.length" content="把密钥/权限/实名/模型不存在这类永远不会成功的模型移出兜底环（模型本身不删除）" placement="top">
+                <el-button type="warning" plain @click="removeHardFailedFromRing">
+                  移出兜底环（{{ hardFailed.length }}）
+                </el-button>
+              </el-tooltip>
+            </div>
           </div>
+
+          <!-- 体检结论常驻展示：失败原因 + 该怎么修。修法写在告警里而不是 toast，
+               因为 toast 会被长文案截断，而"限流"和"没权限"用户要做的完全不同。 -->
+          <el-alert
+            v-if="healthFailed.length"
+            type="warning" show-icon :closable="false" style="margin-bottom: 12px;"
+          >
+            <template #title>体检发现 {{ healthFailed.length }} 个模型连不上（共 {{ healthSummary?.total ?? 0 }} 个，{{ healthSummary?.ok ?? 0 }} 个正常）</template>
+            <div style="font-size: 12px; line-height: 1.8;">
+              <div v-for="r in healthFailed" :key="r.key">
+                <el-tag size="small" :type="healthKindMeta(r.kind).type" style="margin-right: 6px;">{{ healthKindMeta(r.kind).label }}</el-tag>
+                <b>{{ r.key }}</b>
+                <span v-if="r.in_fallback_ring" style="color: var(--el-color-warning);">（在兜底环中，换模型时会被反复尝试）</span>
+                <div>{{ r.hint }}</div>
+                <div style="font-size: 11px; color: var(--el-text-color-secondary);">服务端原话：{{ r.reason }}</div>
+              </div>
+            </div>
+          </el-alert>
+
+          <el-alert
+            v-if="testAlert"
+            :type="testAlert.type" show-icon closable style="margin-bottom: 12px;"
+            @close="testAlert = null"
+          >
+            <template #title>{{ testAlert.title }}</template>
+            <div v-if="testAlert.hint" style="font-size: 12px;">{{ testAlert.hint }}</div>
+          </el-alert>
+
           <div ref="tableWrapRef" class="table-wrap">
           <el-table :data="modelStore.models" v-loading="modelStore.loading" stripe style="width: 100%;">
       <!-- 列宽一律 min-width：容器变窄时由 Element Plus 触发横向滚动（固定 width 会被裁切）；
@@ -359,6 +494,16 @@ onMounted(() => {
         </template>
       </el-table-column>
       <el-table-column v-if="layout !== 'narrow'" prop="endpoint" label="端点" min-width="240" show-overflow-tooltip />
+      <!-- 状态列只在体检跑过后出现：没测过就显示"未体检"，不拿空白冒充已检测 -->
+      <el-table-column v-if="healthSummary && layout !== 'narrow'" label="体检状态" min-width="130" align="center">
+        <template #default="{ row }">
+          <el-tag v-if="healthOf(row.key)" size="small"
+                  :type="healthOf(row.key).ok ? 'success' : healthKindMeta(healthOf(row.key).kind).type">
+            {{ healthOf(row.key).ok ? `${healthOf(row.key).latency_ms}ms` : healthKindMeta(healthOf(row.key).kind).label }}
+          </el-tag>
+          <span v-else style="font-size: 11px; color: var(--el-text-color-placeholder);">未体检</span>
+        </template>
+      </el-table-column>
       <el-table-column v-if="layout === 'full'" prop="model_id" label="模型ID" min-width="130" show-overflow-tooltip />
       <el-table-column v-if="layout === 'full'" label="默认" min-width="60" align="center">
         <template #default="{ row }">

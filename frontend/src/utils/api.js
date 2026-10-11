@@ -108,6 +108,8 @@ export const modelsApi = {
   update: (key, data) => api.put(`/models/${key}`, data),
   delete: (key) => api.delete(`/models/${key}`),
   test: (data) => api.post('/models/test', data),
+  // 一键体检：并发探测全部 LLM 模型，返回每模型连通性 + 失败类别 + 修法
+  healthCheck: () => api.post('/models/health-check'),
   setDefault: (key) => api.post('/models/default', { key }),
   // AI 调用兜底链：GET 读配置，POST 保存（顺序即优先级）
   // 用 POST 而非 PUT：后端存在 `PUT /models/{key}`，子路径会被吞
