@@ -10,6 +10,7 @@ import { Pencil, Trash2, Plus, RefreshCw, FileText, Files } from 'lucide-vue-nex
 import { useSettingsStore } from '../stores/settingsStore'
 import { summaryApi, templatesApi } from '../utils/api'
 import { isDialogCancel } from '../utils/errorNotice'
+import { DIMENSION_KEYS } from '../utils/recipes'
 import DimensionSelector from '../components/DimensionSelector.vue'
 
 const settings = useSettingsStore()
@@ -18,7 +19,7 @@ const settings = useSettingsStore()
 const activeTab = ref('modules')  // modules | library
 
 // ============ 预设配方编辑器（在维度模块编辑器顶部） ============
-// 草稿 = 8 维度选择；选择器选中某配方会载入其维度；可保存为本地自定义配方
+// 草稿 = 9 维度选择；选择器选中某配方会载入其维度；可保存为本地自定义配方
 const recipeDraft = ref({})                 // { role, mode, content_type, ... }
 const editingRecipeKey = ref('')            // 当前编辑的配方 key（'' 表示新建）
 const editingRecipeName = ref('')
@@ -84,7 +85,8 @@ function isCustomRecipe() {
 }
 
 // ============ 维度树 ============
-const dimensionKeys = ['role', 'mode', 'content_type', 'rules', 'depth', 'output', 'tone', 'word_count']
+// 顺序与键集统一取自 utils/recipes.js 的 DIMENSION_KEYS（单一事实源，勿在页面里再抄一份）
+const dimensionKeys = DIMENSION_KEYS
 
 const dimensionList = computed(() => {
   const dims = settings.promptDimensions || {}
