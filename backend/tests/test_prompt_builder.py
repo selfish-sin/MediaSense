@@ -540,11 +540,38 @@ class TestPromptTextRestored:
                 assert b not in blob, f"depth={m['key']} 仍写死字数：{b}"
 
     def test_deep_research_recipe_uses_chapters(self):
-        """「🧠 深度批判分析」输出形态 = 章节分析（2026-10-11 用户拍板的配方层调整，未动提示词正文）"""
+        """「🧠 理论深度研究」输出形态 = 章节分析；
+        2026-10-11 立场从 critical 改为 theoretical：该配方定位是哲学/理论/思想史，
+        critical 的经验证据观、"偏见"与"改进建议"对历史文本会时代错置"""
         r = next(x for x in RECIPES if x["key"] == "deep_research")
+        assert r["name"] == "🧠 理论深度研究"
         assert r["dimensions"]["output"] == "chapters"
-        assert r["dimensions"]["rules"] == "critical"
+        assert r["dimensions"]["rules"] == "theoretical"
         assert r["dimensions"]["depth"] == "deep"
+        # 拼装后必须真的注入理论审视原则（不是空档位）
+        with patch("services.prompt_builder._load_module_overrides", return_value={}):
+            prompt = build_modular_prompt(r["dimensions"], "理论素材")
+        assert "理解先于裁判" in prompt
+        assert "时代错置" in prompt
+        # critical 文本不得再随该配方注入（经验社科尺子退出）
+        assert "对可以改进或需补充的方面给出建议" not in prompt
+
+    def test_theoretical_rule_exists_for_humanities(self):
+        """rules 新增「理论审视」档：与 critical 平级，专管理论/思想史文本"""
+        mods = {m["key"]: m for m in PROMPT_DIMENSIONS["rules"]["modules"]}
+        assert "theoretical" in mods
+        assert "critical" in mods  # 经验社科向档位保留，不删除
+        tpl = mods["theoretical"]["template"]
+        # 核心姿态：语境化理解、广义论证、内部批判、概念史、不给古人提建议
+        for kw in ("理解先于裁判", "时代错置", "先验论证、概念分析、文本诠释",
+                   "内部批判", "概念是历史的", "不给历史文本提"):
+            assert kw in tpl, kw
+
+    def test_social_science_mode_thickens_intellectual_history(self):
+        """思想史维度加厚：谱系关系之外须含论敌语境与概念史变化（2026-10-11 用户要求）"""
+        tpl = _get_module_template("mode", "social_science")
+        for kw in ("思想史与学科史定位", "回应的问题与论敌", "含义变化", "不以今度古"):
+            assert kw in tpl, kw
 
     def test_output_section_headers_match_dimension_name(self):
         """输出模块的段落标题与维度展示名一致（2026-10-11 用户明确授权同步为【输出形态】；
