@@ -935,7 +935,11 @@ class TestSummaryRouter:
     def test_get_dimensions(self, client):
         resp = client.get("/api/summary/dimensions")
         assert resp.status_code == 200
-        assert len(resp.json()["dimensions"]) == 10
+        assert len(resp.json()["dimensions"]) == 9
+        # 篇幅字数已并入 depth（2026-10-11），不再有独立 word_count 维度
+        assert "word_count" not in resp.json()["dimensions"]
+        depth = resp.json()["dimensions"]["depth"]
+        assert [m["key"] for m in depth["modules"]] == ["quick", "standard", "deep", "research"]
         # 口误纠错维度：单模块 + 默认启用
         sf = resp.json()["dimensions"]["speech_fix"]
         assert [m["key"] for m in sf["modules"]] == ["balanced"]
