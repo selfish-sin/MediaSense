@@ -90,6 +90,7 @@ class TestRecipes:
             "news_brief",
             "tutorial_steps",
             "talk_digest",
+            "reality_briefing",    # 2026-10-11 用户明确需求：现实研判（智库式），追加在末尾
         ]
 
     def test_general_summary_recipe_is_app_default(self):
@@ -500,7 +501,8 @@ class TestPromptTextRestored:
     ②depth 四档去掉写死的字数（避免与「字数」维度冲突）。"""
 
     def test_all_baseline_modules_present(self):
-        """曾误删的 13 个档位必须都在（角色 2 / 内容类型 6 / 输出 3 / 语气 2）"""
+        """曾误删的 13 个档位必须都在（角色 2 / 内容类型 6 / 输出 3 / 语气 2）
+        用子集断言：新增档位不影响本锁，但删档位会立刻报红"""
         expected = {
             "role": {"general", "appreciator", "recorder", "academic",
                      "tech", "journalist", "creative", "tcm"},
@@ -510,9 +512,11 @@ class TestPromptTextRestored:
             "output": {"summary", "bullets", "qa", "timeline", "chapters",
                        "process_ledger", "viewpoints", "comparison", "freeform"},
             "tone": {"学术严谨", "通俗科普", "口语化", "新闻客观", "正式商务"},
+            "mode": {"general", "social_science", "tcm"},
         }
         for dim_key, keys in expected.items():
-            assert {m["key"] for m in PROMPT_DIMENSIONS[dim_key]["modules"]} == keys, dim_key
+            actual = {m["key"] for m in PROMPT_DIMENSIONS[dim_key]["modules"]}
+            assert keys <= actual, f"{dim_key} 有档位被删：{keys - actual}"
 
     def test_depth_has_no_hardcoded_word_counts(self):
         """depth 只管分析粒度，不写死字数（2026-10-11 用户要求：模板里写死字数会与「字数」维度
@@ -589,3 +593,52 @@ class TestSpeechFix:
         m = PROMPT_DIMENSIONS["speech_fix"]["modules"][0]
         assert m["key"] == "balanced"
         assert m["name"] == "按学科与上下文纠错"
+
+
+# ============ 现实研判（2026-10-11 新增：认知模式 + 角色 + 配方） ============
+
+
+class TestRealityBriefing:
+    """用户需求原话：要的是「认识方法与重点」——点出内容在当下的价值与紧迫性、
+    指出它的理论特色与视角遮蔽、考究其论证合理性；不要写成理论综述，也不要去做事实核查。
+    定位类比：像智库做研判与辅助研判。"""
+
+    def test_mode_module_exists(self):
+        """认知模式新增 reality 档位，与「社科深度特化」平级"""
+        mods = [m["key"] for m in PROMPT_DIMENSIONS["mode"]["modules"]]
+        assert "reality" in mods
+        assert PROMPT_DIMENSIONS["mode"]["modules"][mods.index("reality")]["name"] == "现实研判"
+
+    def test_mode_template_covers_key_points(self):
+        """正文必须覆盖：视角 → 遮蔽 → 当下形势 → 研判与推理考究 → 不做事实核查 → 层次跟随"""
+        tpl = _get_module_template("mode", "reality")
+        for kw in ("观察视角", "遮蔽", "当下的现实情况", "研判与辅助研判",
+                   "推理有没有跳步", "不做事实核查", "层次跟随内容"):
+            assert kw in tpl, kw
+        # 关键边界：不许把内容硬拽到理论坐标上
+        assert "不要往理论坐标上拽" in tpl
+        # 不是学术综述、不是事实核查
+        assert "不是写学术综述" in tpl
+
+    def test_role_module_exists(self):
+        """角色新增「智库分析师」，与研判定位配套"""
+        mods = {m["key"]: m for m in PROMPT_DIMENSIONS["role"]["modules"]}
+        assert "analyst" in mods
+        assert mods["analyst"]["name"] == "智库分析师"
+        assert "辅助研判" in mods["analyst"]["template"]
+
+    def test_recipe_combines_mode_and_role(self):
+        """预设配方「🎯 现实研判」：角色=智库分析师 + 认知模式=现实研判 + 章节分析"""
+        r = next(x for x in RECIPES if x["key"] == "reality_briefing")
+        assert r["dimensions"]["role"] == "analyst"
+        assert r["dimensions"]["mode"] == "reality"
+        assert r["dimensions"]["output"] == "chapters"
+        assert r["dimensions"]["depth"] == "deep"
+        # 分析立场必须是 deep：standard 含"不添加视频中未提及的信息"，会与 reality 的 [延伸] 授权冲突
+        assert r["dimensions"]["rules"] == "deep"
+        # 选到它时提示词里必须真的注入研判框架（不是空模板）
+        with patch("services.prompt_builder._load_module_overrides", return_value={}):
+            prompt = build_modular_prompt(r["dimensions"], "素材内容")
+        assert "【现实研判·认知框架】" in prompt
+        assert "智库分析师" in prompt
+        assert "素材内容" in prompt
