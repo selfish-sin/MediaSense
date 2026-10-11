@@ -32,6 +32,7 @@ const CHECK_LABELS = {
   passed: '内容抽查通过',
   skipped: '内容抽查已关闭，未比对',
   unavailable: '内容抽查不可用，按原结果采用',
+  cached: '复用缓存字幕（未重新获取）',
 }
 
 const CACHE_LABELS = {

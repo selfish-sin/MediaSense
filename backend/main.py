@@ -512,6 +512,27 @@ async def _handle_media_file(input_file, job_dir, sio, job_id, model_size, speak
         {'source': 'transcription', **_info}
 
 
+async def _cache_platform_subtitle(cache_id, language, srt_path, txt_path, title,
+                                   subtitle_from, sio, job_id):
+    """平台字幕**已判定正确**（抽查通过 / 抓取成功）→ 注入缓存池。
+
+    加速项：写入失败只告警，绝不阻断主流程。调用方负责只在已验证正确时调用。
+    """
+    if not cache_id:
+        return
+    try:
+        from services import ai_cache as _ai_cache
+        stored = await asyncio.to_thread(
+            _ai_cache.store_subtitle, cache_id, language, srt_path, txt_path,
+            title=title, subtitle_from=subtitle_from,
+        )
+        if stored:
+            await emit_log(sio, job_id,
+                           f'💾 平台字幕已注入缓存（来源 {subtitle_from}）——下次处理同一视频可秒级复用')
+    except Exception as e:
+        logger.warning(f'平台字幕缓存写入失败（不影响主流程）: {e}')
+
+
 async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                             model_size, speaker_diarization, language, whisper_device: str = 'auto',
                             transcribe_engine: str = 'cloud_free'):
@@ -544,10 +565,51 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
     is_bilibili = 'bilibili' in input_url.lower() or 'b23.tv' in input_url.lower()
     is_douyin = is_douyin_url(input_url)
 
+    # ★ 平台字幕缓存（2026-10-11）：同一视频重新处理/重试时复用上次**已验证正确**的字幕，
+    #   免去重新探测与内容抽查——B站 412/残字幕等平台侧瞬态失败不再白白回退一次全量转录。
+    #   键 = 规范化视频标识 + 语言（**不含音频哈希**：命中时连音频都不用下）。
+    _sub_cache_id = None
+    _bvid_hint = None  # 供下方 B站分支复用，避免短链二次 HEAD 解析
+    if not force_transcribe:
+        try:
+            from routers.jobs import normalize_url as _normalize_url
+            _sub_cache_id = _normalize_url(input_url)
+            if is_bilibili and 'bilibili:' not in _sub_cache_id:
+                # b23.tv 等短链 normalize_url 拿不到 BV，靠重定向解析补正键
+                _bvid_hint = await _extract_bvid(input_url)
+                if _bvid_hint:
+                    _sub_cache_id = f'bilibili:{_bvid_hint}'
+        except Exception as e:
+            logger.warning(f'平台字幕缓存标识解析失败（本次跳过缓存）: {e}')
+            _sub_cache_id = None
+    if _sub_cache_id and not options.get('bypass_cache', False):
+        _sub_hit = None
+        try:
+            from services import ai_cache as _ai_cache
+            _sub_hit = await asyncio.to_thread(
+                _ai_cache.lookup_subtitle, _sub_cache_id, language, job_dir
+            )
+        except Exception as e:
+            logger.warning(f'平台字幕缓存读取失败（不影响主流程）: {e}')
+        if _sub_hit:
+            srt_path = _sub_hit['srt_path']
+            txt_path = _sub_hit['txt_path']
+            title = _sub_hit['title']
+            seg_count = _sub_hit['seg_count']
+            meta = {'source': 'platform_subtitle', 'subtitle_from': _sub_hit['subtitle_from'],
+                    'subtitle_check': 'cached'}
+            await emit_log(sio, job_id,
+                           f"⚡ 命中平台字幕缓存（{_sub_hit['created_at']} 获取，"
+                           f"来源 {_sub_hit['subtitle_from']}）——跳过探测与内容抽查，直接使用")
+            update_job(job_id, title=title, platform=platform, status='transcribing',
+                       progress_msg='平台字幕缓存命中（跳过下载和转录）')
+    elif _sub_cache_id:
+        await emit_log(sio, job_id, '⏭ 已忽略平台字幕缓存（用户勾选），将重新获取字幕')
+
     if is_bilibili and force_transcribe:
         await emit_log(sio, job_id, f'🔧 已开启「强制转录」，跳过B站字幕提取，直接下载音频转录（{_engine_desc}）')
-    elif is_bilibili:
-        bvid = await _extract_bvid(input_url)
+    elif is_bilibili and not srt_path:
+        bvid = _bvid_hint or await _extract_bvid(input_url)
         # 短链不一定在输入中直接包含 BV，仍交给提取器做重定向解析。
         if not bvid:
             bvid = '待解析'
@@ -597,6 +659,10 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                         if ok:
                             meta['subtitle_check'] = 'passed'
                             await emit_log(sio, job_id, f'✅ B站字幕内容抽查通过（{_detail}），使用该字幕')
+                            await _cache_platform_subtitle(
+                                _sub_cache_id, language, srt_path, txt_path, title,
+                                'bilibili', sio, job_id,
+                            )
                         else:
                             await emit_log(sio, job_id, f'⚠ B站字幕内容抽查未通过（{_detail}）：疑似旧/错误字幕，丢弃，转转录（{_engine_desc}）')
                             for _p in (srt_path, txt_path):
@@ -618,7 +684,7 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
     # force_transcribe=True 时跳过，直接下载音频转录
     if is_douyin and force_transcribe:
         await emit_log(sio, job_id, f'🔧 已开启「强制转录」，跳过抖音AI字幕提取，直接下载音频转录（{_engine_desc}）')
-    elif is_douyin:
+    elif is_douyin and not srt_path:
         # ★ 安全清洗（剥包裹/截断片段/裸 v.douyin.com 短链补全）——批量入口已做，
         #   单任务 URL 此前只在 yt-dlp 路径内部清洗，抖音分支必须提前拿到干净 URL
         input_url = sanitize_input_url(input_url)
@@ -649,6 +715,10 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
                     if ok:
                         meta['subtitle_check'] = 'passed'
                         await emit_log(sio, job_id, f'✅ 抖音字幕内容抽查通过（{_detail}），使用该字幕')
+                        await _cache_platform_subtitle(
+                            _sub_cache_id, language, srt_path, txt_path, title,
+                            'douyin', sio, job_id,
+                        )
                     else:
                         await emit_log(sio, job_id, f'⚠ 抖音字幕内容抽查未通过（{_detail}）：疑似旧/错误字幕，丢弃，转转录（{_engine_desc}）')
                         for _p in (srt_path, txt_path):
@@ -681,6 +751,10 @@ async def _handle_url_input(input_url, job_dir, sio, job_id, options,
             await emit_log(sio, job_id, f'✅ 原文字幕抓取成功：{yt_sub.get("message", "已获取字幕")}')
             update_job(job_id, title=title, platform=platform, status='transcribing',
                        progress_msg='原文字幕已获取（跳过转录）')
+            # YouTube 路径无内容抽查环节，抓取成功即视为可用 → 注入缓存
+            await _cache_platform_subtitle(
+                _sub_cache_id, language, srt_path, txt_path, title, 'youtube', sio, job_id,
+            )
         else:
             await emit_log(sio, job_id, f'⚠️ 原文字幕抓取失败：{yt_sub.get("message", "")}，进入转录流程（{_engine_desc}）')
 

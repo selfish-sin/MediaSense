@@ -192,3 +192,69 @@ def store_transcription(audio_path: str, engine: str, language: Optional[str],
     actual_engine = actual_engine or engine
     return cache_put(key, 'asr', actual_engine, srt,
                      meta={'txt': txt, 'seg_count': int(seg_count), 'actual_engine': actual_engine})
+
+
+# ============ 平台字幕缓存（2026-10-11） ============
+# 与 ASR 缓存的根本区别：**键不含音频哈希**——平台字幕路径本就不下载音频，
+# 命中时连音频都不用下。键 = 平台视频标识 + 语言，故"同一视频换个链接形态/重新处理"
+# 也能命中。只有**已判定正确**的字幕才允许入库（B站/抖音=内容抽查 passed；YouTube=抓取成功）。
+
+def subtitle_key(normalized_id: str, language: Optional[str]) -> str:
+    """平台字幕 v1 身份：规范化视频标识（bilibili:BV.../youtube:id/douyin:id）+ 语言。"""
+    return make_key('subtitle_v1', normalized_id or '', language or '')
+
+
+def lookup_subtitle(normalized_id: str, language: Optional[str],
+                    output_dir: Any) -> Optional[Dict[str, Any]]:
+    """命中时把缓存 SRT/TXT 写回 output_dir。
+
+    返回 {'srt_path','txt_path','title','subtitle_from','seg_count','created_at'}；未命中/异常 None。
+    """
+    if not config.AI_CACHE_ENABLED or not normalized_id:
+        return None
+    hit = cache_get(subtitle_key(normalized_id, language))
+    if not hit:
+        return None
+    meta = hit.get('meta') or {}
+    txt = meta.get('txt', '')
+    if not (txt or '').strip():
+        return None  # 旧格式/残缺条目按未命中处理
+    out = Path(output_dir)
+    base = meta.get('base') or 'subtitle'
+    srt_path = out / f'{base}.srt'
+    txt_path = out / f'{base}.txt'
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        srt_path.write_text(hit['content'], encoding='utf-8')
+        txt_path.write_text(txt, encoding='utf-8')
+    except OSError as e:
+        logger.warning(f'平台字幕缓存命中但写文件失败（按未命中处理）: {e}')
+        return None
+    return {
+        'srt_path': str(srt_path), 'txt_path': str(txt_path),
+        'title': meta.get('title') or base,
+        'subtitle_from': meta.get('subtitle_from') or hit.get('model') or '',
+        'seg_count': int(meta.get('seg_count') or 0),
+        'created_at': hit.get('created_at', ''),
+    }
+
+
+def store_subtitle(normalized_id: str, language: Optional[str], srt_path: str, txt_path: str, *,
+                   title: str = '', subtitle_from: str = '', seg_count: int = 0) -> bool:
+    """字幕**已判定正确**时入池（抽查未通过/未验证的调用方不得调用本函数）。"""
+    if not config.AI_CACHE_ENABLED or not normalized_id:
+        return False
+    try:
+        srt = Path(srt_path).read_text(encoding='utf-8')
+        txt = Path(txt_path).read_text(encoding='utf-8')
+    except OSError as e:
+        logger.warning(f'平台字幕缓存跳过（结果文件不可读）: {e}')
+        return False
+    if not srt.strip() or not txt.strip():
+        return False
+    base = Path(srt_path).stem or 'subtitle'
+    return cache_put(
+        subtitle_key(normalized_id, language), 'subtitle', subtitle_from or '', srt,
+        meta={'txt': txt, 'seg_count': int(seg_count), 'base': base,
+              'title': title or base, 'subtitle_from': subtitle_from or ''},
+    )
