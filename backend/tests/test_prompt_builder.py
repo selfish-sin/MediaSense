@@ -623,15 +623,21 @@ class TestRealityBriefing:
         assert PROMPT_DIMENSIONS["mode"]["modules"][mods.index("reality")]["name"] == "现实研判"
 
     def test_mode_template_covers_key_points(self):
-        """正文必须覆盖：视角 → 遮蔽 → 当下形势 → 研判与推理考究 → 不做事实核查 → 层次跟随"""
+        """正文必须覆盖：观察视角 → 遮蔽分寸 → 当下形势 → 研判与推理考究 →
+        外部不联网深挖/内部证据质量必评 → 层次跟随（2026-10-11 v3：两例实测后修订）"""
         tpl = _get_module_template("mode", "reality")
         for kw in ("观察视角", "遮蔽", "当下的现实情况", "研判与辅助研判",
-                   "推理有没有跳步", "不做事实核查", "层次跟随内容"):
+                   "推理有没有跳步", "不联网", "证据质量", "层次跟随内容"):
             assert kw in tpl, kw
         # 关键边界：不许把内容硬拽到理论坐标上
         assert "不要往理论坐标上拽" in tpl
-        # 不是学术综述、不是事实核查
+        # 不是学术综述；事实核查改为"外部不深挖 + 内部质量必评"二分，不再笼统禁止
         assert "不是写学术综述" in tpl
+        assert "不联网深挖" in tpl
+        # v3 纪律：盲区三道关、作者判断不换皮、措辞强度不加码
+        for kw in ("后文已经展开的不叫盲区", "是严谨而非缺陷", "不得换个说法冒充新增判断",
+                   "政策谈判"):
+            assert kw in tpl, kw
 
     def test_role_module_exists(self):
         """角色新增「智库分析师」，与研判定位配套"""
