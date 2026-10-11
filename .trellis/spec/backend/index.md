@@ -134,6 +134,9 @@
   `test_output_section_headers_match_dimension_name` 锁定此一致性）。
 - **改维度要同步 4 处**：`_DIMENSION_DEFS`/`DIMENSION_ORDER`、前端 `DIMENSION_KEYS`、
   `settingsStore.selectedDimensions`、`build_modular_prompt`（段序，非明确需求不动）。
+- **新增"授权类"档位时必须逐条核对同配方的相反纪律**：`reality`「现实研判」授权引入 `[延伸]` 外部对照，
+  而同配方的 `rules=standard`「标准提炼」首条是"不添加视频中未提及的信息"——两条相反指令同时进 prompt，
+  模型行为不可预期。落盘时改用不含该禁令的 `rules=deep`。**加新档位/新授权前，先通读同配方其他档位的正文。**
 - **`prompts.py` 的 `TONE_DESCS`/`WORD_COUNT_DESCS`/`LANGUAGE_DESCS` 是旧路径（`build_prompt_vars`）
   与历史任务兜底共用常量**：删维度档位时不要连带删常量，否则历史任务重跑落到兜底文案。
 - **校验"提示词是否被改动"的方法**：不要把两份中文交给 diff 肉眼看（PowerShell 会把 UTF-8 按
