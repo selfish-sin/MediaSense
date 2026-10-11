@@ -45,9 +45,12 @@ store_subtitle(normalized_id, language, srt_path, txt_path, *, title='', subtitl
 
 1. 算 `normalized_id`；为空（无法识别平台）则跳过缓存。
 2. `lookup_subtitle(...)` 命中 → 设置 `srt_path/txt_path/title`、
-   `meta={'source':'platform_subtitle','subtitle_from':...,'subtitle_check':'cached','cache':'hit'}`，
+   `meta={'source':'platform_subtitle','subtitle_from':...,'subtitle_check':'cached'}`，
    emit「⚡ 命中平台字幕缓存（X 月 X 日获取）——跳过探测与抽查」，`update_job`。
-3. 三个平台分支加 `if srt_path: 跳过` 守卫（命中后不再探测）。
+   **不复用 `meta['cache']`**（那是 ASR 转录缓存语义，前端会渲染成"复用了同音频的转录缓存"，与事实不符）；
+   改用 `subtitle_check='cached'` 表达来源，前端 `TranscriptProvenance.vue` 的 `CHECK_LABELS` 补一条
+   `cached: '复用缓存字幕（未重新获取）'`。
+3. 三个平台分支加 `not srt_path` 守卫（命中后不再探测）。
 
 ## 写入路径
 
@@ -63,7 +66,8 @@ store_subtitle(normalized_id, language, srt_path, txt_path, *, title='', subtitl
 
 ## 协作模式
 
-后端单侧（纯 backend + 单测）。无前端改动（日志/结果来源沿用既有 `transcript_meta` 通道）。
+后端单侧（backend 实现 + 单测）。前端仅 1 行：`TranscriptProvenance.vue` 的 `CHECK_LABELS`
+补 `cached` 文案，让结果页「来源」显示"B站平台字幕（复用缓存字幕（未重新获取））"而非留白。
 
 ## 已知取舍
 

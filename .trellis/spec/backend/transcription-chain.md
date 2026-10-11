@@ -110,6 +110,21 @@ extract_bilibili_subtitles
   需浏览器 cookie 且频繁 403，勿再尝试**）。签名 vendor 自 f2（`douyin_abogus.py`，SM3 用
   cryptography），坑点见 CONTEXT.md 当前状态区块。
 - 其他平台：直接下载 → 引擎路由。
+- **平台字幕缓存（2026-10-11，`ai_cache` 的 `op='subtitle'`）**：字幕**已验证正确**后注入缓存池，
+  同一视频重新处理/重试时直接复用，免去重新探测与内容抽查——B站 412/残字幕等平台侧瞬态失败
+  不再白白回退一次全量转录（历史痛点：同一播客 B站 交替"这次有字幕 / 这次没字幕"，没字幕那次白跑云端）。
+  - 键 = `ai_cache.subtitle_key(规范化视频标识, 语言)` = `make_key('subtitle_v1', id, lang)`，
+    **不含音频哈希**：平台字幕路径本就不下载音频，命中时连音频都不用下。
+    规范化标识复用 `routers/jobs.py::normalize_url`（`bilibili:BV…` / `youtube:<id>` / `douyin:<id>`），
+    B站 b23.tv 短链用 `main._extract_bvid()` 补正（解析结果同时回喂下方 B站分支，不二次 HEAD）。
+  - 读写点：`main._handle_url_input` 在三个平台分支**之前**查一次；命中即把 SRT/TXT 写回 `job_dir`、
+    `meta.subtitle_check='cached'`、跳过探测与抽查（**不复用 `meta.cache`**——那是 ASR 转录缓存语义）。
+  - 写入时机（**未验证一律不写，宁缺勿错**）：B站/抖音 = 内容抽查 `passed`；YouTube = 抓取成功。
+    抽查 `unavailable` / 未通过 / 抓取失败 → 不写。
+  - 门控：`force_transcribe=true` 不读不写；`bypass_cache=true` 跳过读、成功仍写回；
+    `AI_CACHE_ENABLED=0` 整体不介入（行为与改造前一致）。
+  - 已知边界：抖音裸短链（`douyin:short:<code>`）与标准链接键不同会 miss（游客态字幕本就常空，影响小）；
+    视频被换源后可能长期复用旧字幕，由工作台「忽略缓存」开关兜底。
 - **音频获取单点**：`main._acquire_audio`（断点续传复用 → 按 options 下载），成功返回的
   媒体一律登记 `files['audio'/'video']`（素材登记不变量，勿在别处散落登记）。
 
