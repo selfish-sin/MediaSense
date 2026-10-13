@@ -458,7 +458,9 @@ async def web_search_collect(
     前三级未配 Key 自动跳过（跳过原因记入 error 汇总）；任何一级成功即返回。
     **整条链共享 `total_budget` 秒**（<=0 关闭）：每级只拿到「剩余时间」作超时，
     剩余不足 `SEARCH_MIN_SLICE` 即停止后续兜底并把原因写进 error——不做「每级各自
-    吃满超时」的串行白等（那是修复前最坏 ~90s 的来源）。
+    吃满超时」的串行白等（那是修复前最坏 ~90s 的来源）。每个 HTTP 后端额外用
+    `asyncio.wait_for` 把**整段墙钟**也卡在切片上（httpx 标量超时是各阶段各自的上限，
+    只传 timeout= 拦不住），与 DDGS 那条同一姿势。
     无论成功失败都返回 SearchOutcome；失败原因写在 `error`（绝不静默返回空）。
     """
     query = (query or "").strip()
@@ -502,9 +504,24 @@ async def web_search_collect(
         timeout, sliced = _budget_slice(provider.timeout)
         search = globals()[provider.search_name]
         try:
-            results = await search(
-                query, max_results=max_results, snippet_limit=snippet_limit, timeout=timeout,
+            # ★ 外层再套一层 asyncio.wait_for（2026-10-13）：httpx 的标量 timeout 是
+            #   connect/read/write/pool **各自**的上限，一级实际能跑到 ~2× 切片，
+            #   于是"共享总预算"名存实亡（最坏又回到 ~90s），超支后
+            #   remaining < SEARCH_MIN_SLICE 还会把**免 Key 的 DDGS 兜底**判成"未尝试"
+            #   白白丢掉。wait_for 卡的是整段墙钟，与下面 DDGS 那条同一姿势。
+            #   ★ search 仍按模块内名字运行时解析（globals()），保住 monkeypatch 打桩。
+            results = await asyncio.wait_for(
+                search(
+                    query, max_results=max_results, snippet_limit=snippet_limit, timeout=timeout,
+                ),
+                timeout=timeout,
             )
+        except asyncio.TimeoutError:
+            # 文案沿用 fail_label 前缀 + 预算说明，保持与"后端自己报错"同一形态可读
+            msg = (f"{provider.fail_label}（超时 {_fmt_sec(timeout)}s"
+                   + ("，受联网检索总预算限制" if sliced else "") + "）")
+            errors.append(msg)
+            logger.warning(f"[web_search] {msg}")
         except SearchUnavailable as exc:
             errors.append(str(exc))
         except Exception as exc:

@@ -1,6 +1,8 @@
 """
 ai_processor 核心AI处理服务测试（可快速覆盖部分）
 """
+import asyncio
+
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -123,14 +125,61 @@ class TestGenerateTags:
                 tags = await generate_tags("test")
                 assert "历史" in tags
 
-    async def test_tags_failure_returns_empty(self):
+    async def test_tags_failure_returns_none(self):
+        """★ 契约 A（2026-10-13）：调用失败返回 None（区别于「成功但没标签」的 []）。
+        修复前这里返回 []，调用方分不清"打标签挂了"和"确实没有标签"，
+        会清空已有标签并当成功返回。"""
         with patch("services.ai_processor.get_model_by_key", return_value=self.mock_cfg):
             mock_client = AsyncMock()
             mock_client.__aenter__.return_value = mock_client
             mock_client.post.side_effect = Exception("API error")
             with patch("httpx.AsyncClient", return_value=mock_client):
                 tags = await generate_tags("test")
+                assert tags is None
+
+    async def test_tags_unparsable_output_returns_empty_list(self):
+        """反防：调用成功但模型没吐出合法标签数组 → []（不是 None），
+        否则上层会把"解析不出"误判成"调用失败"。"""
+        with patch("services.ai_processor.get_model_by_key", return_value=self.mock_cfg):
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status = MagicMock()
+            mock_resp.json.return_value = {
+                "choices": [{"message": {"content": "抱歉，我无法完成"}}],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 4},
+            }
+            mock_client = AsyncMock()
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.post.return_value = mock_resp
+            with patch("httpx.AsyncClient", return_value=mock_client), \
+                 patch("services.ai_processor._record_token_usage") as rec:
+                tags = await generate_tags("test")
                 assert tags == []
+                # 即便解析不出标签，这次调用真的花了 token，必须记账
+                rec.assert_called_once()
+
+    async def test_tags_records_token_usage_with_actual_model(self):
+        """★ 回归锚点：打标签的 token 此前**从不记账**（真实账单高于系统显示）。
+        记账用**实际使用**的模型 key，与 generate_mindmap 的 _on_ok 同一口径。"""
+        with patch("services.ai_processor.get_model_by_key", return_value=self.mock_cfg), \
+             patch("services.ai_processor.run_with_fallback") as mock_rwf:
+            async def _fake_rwf(model, step_name, timeout, build_payload, **kw):
+                return kw['on_success']('["哲学","历史"]', '实际模型k', 33, 21)
+            mock_rwf.side_effect = _fake_rwf
+            with patch("services.ai_processor._record_token_usage") as rec:
+                tags = await generate_tags("some text", job_id="job-t")
+        assert tags == ["哲学", "历史"]
+        rec.assert_called_once_with('实际模型k', 33, 21, "job-t")
+
+    async def test_tags_cancel_propagates_not_swallowed(self):
+        """★ 回归锚点：TaskCancelledError 是 Exception 子类，修复前被 except Exception
+        吞成 []（用户取消的任务照样往下跑完）。"""
+        with patch("services.ai_processor.get_model_by_key", return_value=self.mock_cfg), \
+             patch("services.ai_processor.run_with_fallback") as mock_rwf:
+            async def _cancel(*a, **kw):
+                raise TaskCancelledError("用户取消")
+            mock_rwf.side_effect = _cancel
+            with pytest.raises(TaskCancelledError):
+                await generate_tags("some text", job_id="job-c")
 
     async def test_tags_http_error_emits_real_reason(self):
         # 回归：打标签 4xx 时服务端错误文字必须推到前端（socket 日志），不能只进日志文件
@@ -146,11 +195,11 @@ class TestGenerateTags:
             with patch("httpx.AsyncClient", return_value=mock_client):
                 with patch("socket_handlers.emit_log", new=AsyncMock()) as mock_emit:
                     tags = await generate_tags("test", sio=object(), job_id="job-x")
-                    assert tags == []
-                    mock_emit.assert_awaited_once()
-                    msg = mock_emit.await_args.args[2]
-                    assert "无权访问 gemini高级普通 分组" in msg
-                    assert "Attempted to access streaming" not in msg
+                    assert tags is None            # 调用失败 = None（契约 A）
+                    mock_emit.assert_awaited()
+                    msgs = [c.args[2] for c in mock_emit.await_args_list]
+                    assert any("无权访问 gemini高级普通 分组" in m for m in msgs)
+                    assert all("Attempted to access streaming" not in m for m in msgs)
 
 
 @pytest.mark.asyncio
@@ -664,3 +713,340 @@ class TestCallAiThinkingPhaseCancel:
         with patch("httpx.AsyncClient", return_value=mock_client):
             content, _, _ = await _call_ai(self._mock_cfg(), "提示词", job_id="j1")
         assert content == "正文"
+
+
+# ── A4：失败路径的 token 不能丢（2026-10-13）──────────────────────────────
+# 修复前 _call_ai 的所有失败分支恒 `return '[处理失败: ...]', 0, 0`，而 _stream()
+# 在断流/超时前已经累计的 token 随协程一起丢弃 → token_usage 表系统性少记，
+# 真实账单高于系统显示。
+@pytest.mark.asyncio
+class TestCallAiFailureTokenAccounting:
+
+    @staticmethod
+    def _patch_transport(monkeypatch, respond):
+        from services import ai_processor as ap
+        original_client = httpx.AsyncClient
+        monkeypatch.setattr(ap.httpx, 'AsyncClient',
+                            lambda **kw: original_client(transport=httpx.MockTransport(respond), **kw))
+
+    async def test_disconnect_after_content_returns_real_tokens(self, monkeypatch):
+        """已吐正文后断流：失败串照旧，但 token 必须是真实消耗（缺 usage 时按字符粗估）。"""
+        import socket_handlers
+        monkeypatch.setattr(socket_handlers, 'emit_ai_token', AsyncMock())
+        monkeypatch.setattr(socket_handlers, 'emit_log', AsyncMock())
+
+        class BrokenStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                for _ in range(10):
+                    yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+                raise httpx.ReadError('upstream disconnected')
+
+        self._patch_transport(
+            monkeypatch, lambda request: httpx.Response(200, stream=BrokenStream()))
+
+        state = {}
+        usage_state = {}
+        content, in_tok, out_tok = await _call_ai(
+            MOCK_CFG, '失败也记账', sio=object(), state=state, usage_state=usage_state)
+
+        assert content == '[处理失败: 连接中断（已输出部分内容）]'
+        # 70 字符正文 → 与成功路径同一口径的粗估；关键是不能是 0
+        assert out_tok == 70 // 2
+        assert usage_state['out_tok'] == 70 // 2
+
+    async def test_usage_state_accumulates_across_retries(self, monkeypatch):
+        """断连重试会重跑整段：前一次已上报的 usage 必须计入最终返回值。"""
+        from services import ai_processor as ap
+        monkeypatch.setattr(ap.asyncio, 'sleep', AsyncMock())
+
+        class UsageThenDrop(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                # 只有 usage、没有正文 → emitted 仍为 False，允许安全重试
+                yield b'data: {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 3}}\n\n'
+                raise httpx.ReadError('upstream disconnected')
+
+        calls = {'n': 0}
+
+        def respond(request):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                return httpx.Response(200, stream=UsageThenDrop())
+            return httpx.Response(200, text=(
+                'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+                'data: {"choices": [], "usage": {"prompt_tokens": 11, "completion_tokens": 5}}\n\n'
+                'data: [DONE]\n\n'))
+
+        self._patch_transport(monkeypatch, respond)
+
+        usage_state = {}
+        content, in_tok, out_tok = await _call_ai(
+            MOCK_CFG, '重试也记账', max_retries=1, usage_state=usage_state)
+
+        assert content == 'ok'
+        assert calls['n'] == 2
+        assert (in_tok, out_tok) == (18, 8)      # 7+11, 3+5
+
+    async def test_timeout_branch_returns_accumulated_tokens(self, monkeypatch):
+        """单轮超时时已收到的 usage 照实返回，不再恒 0。"""
+        class HangStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'data: {"choices": [], "usage": {"prompt_tokens": 42, "completion_tokens": 9}}\n\n'
+                await asyncio.sleep(5)
+
+        self._patch_transport(
+            monkeypatch, lambda request: httpx.Response(200, stream=HangStream()))
+
+        usage_state = {}
+        content, in_tok, out_tok = await _call_ai(
+            MOCK_CFG, '超时也记账', round_timeout=0.05, usage_state=usage_state)
+
+        assert content == '[处理失败: 超时]'
+        assert (in_tok, out_tok) == (42, 9)
+
+
+# ── A5：半死连接下取消仍要生效（2026-10-13）───────────────────────────────
+@pytest.mark.asyncio
+class TestCallAiSilentStreamCancel:
+    """端点连上却不吐字时零 token，取消检查挂在 token 计数上永不触发——
+    用户点了取消要等满 4 次重试（分钟级）才响应。修复：按**时间**轮询。"""
+
+    def _mock_cfg(self):
+        return MOCK_CFG
+
+    async def test_cancel_by_time_poll_in_silent_stream(self, monkeypatch):
+        import socket_handlers
+        from services import ai_processor as ap
+
+        monkeypatch.setattr(socket_handlers, 'check_cancelled', lambda job_id: True)
+        monkeypatch.setattr(ap, 'CANCEL_POLL_INTERVAL', 0.01)
+
+        async def fake_aiter_lines():
+            # 只吐空 keep-alive 行：没有正文/reasoning token，靠 token 计数永不触发检查
+            for _ in range(6):
+                await asyncio.sleep(0.02)
+                yield 'data: {"choices": []}'
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.aiter_lines = fake_aiter_lines
+        stream_cm = MagicMock()
+        stream_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.stream = MagicMock(return_value=stream_cm)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            with pytest.raises(TaskCancelledError):
+                await _call_ai(self._mock_cfg(), "静默流", job_id="j-silent")
+
+    async def test_cancel_checked_before_first_attempt(self, monkeypatch):
+        """整轮开始前（含每次重试前）查取消：不查就已经在烧 API 了。"""
+        import socket_handlers
+        from services import ai_processor as ap
+        monkeypatch.setattr(socket_handlers, 'check_cancelled', lambda job_id: True)
+
+        def _boom(**kw):
+            raise AssertionError("已取消时不该发起任何 HTTP 请求")
+
+        monkeypatch.setattr(ap.httpx, 'AsyncClient', _boom)
+
+        with pytest.raises(TaskCancelledError):
+            await _call_ai(self._mock_cfg(), "取消优先", job_id="j-pre")
+
+
+# ── A5：校正路径的整体超时 + 跨候选 token（2026-10-13）────────────────────
+@pytest.mark.asyncio
+class TestCorrectPathTimeoutShell:
+
+    async def test_overall_timeout_raises_actionable(self, monkeypatch):
+        """长转录按块累加可以挂数小时 → 必须有与 ai_process 同级的整体超时外壳。"""
+        from services import ai_processor as ap
+
+        async def _slow(text, **kw):
+            await asyncio.sleep(5)
+            return text, 1, 1, {}
+
+        monkeypatch.setattr(ap, 'correct_transcript', _slow)
+
+        with pytest.raises(Exception) as ei:
+            await correct_transcript_with_fallback(
+                "长文本", model="glm-5-2", fallback_models=["m2"], total_timeout=0.05)
+        msg = str(ei.value)
+        assert '整体超时' in msg and '拆小分批校正' in msg   # 可行动，不裸 TimeoutError
+
+    async def test_round_timeout_forwarded(self, monkeypatch):
+        """硬编码的单轮 600s 提到参数层，并透传到 correct_transcript。"""
+        from services import ai_processor as ap
+        seen = {}
+
+        async def _fake(text, model="", sio=None, job_id='', domain='default', **kw):
+            seen.update(kw)
+            return text, 1, 1, {'total_chunks': 1, 'failed_chunks': 0,
+                                'integrity_warnings': 0, 'length_warnings': 0, 'warnings': []}
+
+        monkeypatch.setattr(ap, 'correct_transcript', _fake)
+
+        await correct_transcript_with_fallback(
+            "文本", model="glm-5-2", fallback_models=[], round_timeout=123.0)
+
+        assert seen['round_timeout'] == 123.0
+
+    async def test_tokens_accumulate_across_candidates(self, monkeypatch):
+        """换候选重跑是真的又烧了一次：失败候选的 token 也要累计进返回值。"""
+        from services import ai_processor as ap
+
+        async def _fake(text, model="", **kw):
+            if model == "glm-5-2":
+                # 整批无效 → 视为该模型不可用，换下一个
+                return text, 7, 7, {'total_chunks': 2, 'failed_chunks': 2,
+                                    'integrity_warnings': 0, 'length_warnings': 0, 'warnings': []}
+            return "[00:05] 校正后", 3, 4, {'total_chunks': 1, 'failed_chunks': 0,
+                                            'integrity_warnings': 0, 'length_warnings': 0, 'warnings': []}
+
+        monkeypatch.setattr(ap, 'correct_transcript', _fake)
+
+        _, in_tok, out_tok, _, used = await correct_transcript_with_fallback(
+            "文本", model="glm-5-2", fallback_models=["m2"])
+
+        assert used == "m2"
+        assert (in_tok, out_tok) == (10, 11)      # 7+3, 7+4
+
+
+# ── A1/A3：分批总结的 fail-fast 与 edited_prompt（2026-10-13）────────────
+# 修复前分批模式下任一批失败都会把 '[处理失败: ...]' 哨兵串拼进合并正文，
+# 前面还加 '# 分批处理结果' 标题 → 两处调用方的 startswith('[处理失败') 防线
+# 在分批模式下永远不成立 → 任务标 completed、残缺文档写进 jobs.result_text。
+@pytest.mark.asyncio
+class TestAiProcessBatchFailFast:
+
+    # 2 万字符/批（word_count=500 映射表），要 2 批就得超过它
+    LONG = '甲' * 25000
+
+    async def test_second_batch_failure_raises_with_batch_index(self):
+        """★ 契约 C：分批中任一批失败 → 在合并/落库/记账前抛异常，并指名第几批。"""
+        calls = {'n': 0}
+
+        async def _fake(model, prompt, **kw):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                return "## 第一批内容", 10, 5, 'glm'
+            return "[处理失败: 兜底环内全部模型失败（glm）——401 密钥无效]", 20, 7, 'glm'
+
+        from services import ai_processor as ap
+        with patch("services.ai_processor.get_model_by_key", return_value=MOCK_CFG), \
+             patch("services.ai_processor._call_ai_with_fallback", side_effect=_fake), \
+             patch("services.ai_processor._record_token_usage") as rec, \
+             patch("socket_handlers.emit_ai_token", new=AsyncMock()) as emit_tok, \
+             patch("socket_handlers.emit_log", new=AsyncMock()), \
+             patch("socket_handlers.emit_progress", new=AsyncMock()):
+            with pytest.raises(Exception) as ei:
+                await ap.ai_process(self.LONG, dimensions={'word_count': '500'})
+
+        msg = str(ei.value)
+        assert '第 2/2 批' in msg                     # 批次序号 + 总批数
+        assert '401 密钥无效' in msg                   # 哨兵里的真实原因
+        assert '换用可用模型' in msg                   # 可行动建议
+        # 失败状态不能被推成"AI 完成"（emit_ai_token(done=True)）
+        assert not any(c.kwargs.get('done') for c in emit_tok.await_args_list)
+        # 但已消耗的 token 仍要记账（且是累计值）
+        rec.assert_called_once()
+        assert rec.call_args.args[1:3] == (30, 12)
+
+    async def test_call_chain_persisted_on_failure(self):
+        ctx = {}
+
+        async def _fake(model, prompt, **kw):
+            kw['call_chain'].append({'model': 'glm', 'ok': False, 'reason': '401'})
+            return "[处理失败: 401 密钥无效]", 1, 1, 'glm'
+
+        from services import ai_processor as ap
+        with patch("services.ai_processor.get_model_by_key", return_value=MOCK_CFG), \
+             patch("services.ai_processor._call_ai_with_fallback", side_effect=_fake), \
+             patch("services.ai_processor._record_token_usage"), \
+             patch("socket_handlers.emit_ai_token", new=AsyncMock()), \
+             patch("socket_handlers.emit_log", new=AsyncMock()), \
+             patch("socket_handlers.emit_progress", new=AsyncMock()):
+            with pytest.raises(Exception):
+                await ap.ai_process(self.LONG, dimensions={'word_count': '500'}, ctx=ctx)
+        assert ctx['call_chain'] and ctx['call_chain'][0]['reason'] == '401'
+
+    async def test_single_batch_failure_keeps_sentinel(self):
+        """反防：单批模式行为不变——仍返回哨兵串（调用方有防线），不抛异常。"""
+
+        async def _fake(model, prompt, **kw):
+            return "[处理失败: 超时]", 3, 0, 'glm'
+
+        from services import ai_processor as ap
+        with patch("services.ai_processor.get_model_by_key", return_value=MOCK_CFG), \
+             patch("services.ai_processor._call_ai_with_fallback", side_effect=_fake), \
+             patch("services.ai_processor._record_token_usage"):
+            out, in_tok, out_tok = await ap.ai_process(
+                "短文本", dimensions={'word_count': '500'})
+        assert out == "[处理失败: 超时]"
+        assert (in_tok, out_tok) == (3, 0)
+
+    async def test_edited_prompt_applies_in_batch_mode(self):
+        """★ A3 回归锚点：用户编辑过的提示词在长视频（分批）上也必须生效。
+        修复前分批复用分支只认 dimensions，把 edited_prompt 整个丢了
+        （短视频生效、长视频不生效，行为不一致）。"""
+        prompts = []
+
+        async def _fake(model, prompt, **kw):
+            prompts.append(prompt)
+            return "内容", 1, 1, 'glm'
+
+        from services import ai_processor as ap
+        with patch("services.ai_processor.get_model_by_key", return_value=MOCK_CFG), \
+             patch("services.ai_processor._call_ai_with_fallback", side_effect=_fake), \
+             patch("services.ai_processor._record_token_usage"):
+            await ap.ai_process(
+                self.LONG, dimensions={'word_count': '500'},
+                summary_options={'edited_prompt': '【用户自己写的开头】\n{{CONTENT}}\n【用户自己写的结尾】'})
+
+        assert len(prompts) == 2                       # 确实分了两批
+        for i, p in enumerate(prompts, 1):
+            assert '【用户自己写的开头】' in p and '【用户自己写的结尾】' in p
+            assert f'第 {i}/2 部分' in p                # 每批内容都替换进占位符
+
+    async def test_edited_prompt_without_placeholder_keeps_content(self):
+        """编辑版提示词不带 {{CONTENT}} 时按同一注入约定把内容附在末尾，
+        而不是让整批内容凭空消失。"""
+        prompts = []
+
+        async def _fake(model, prompt, **kw):
+            prompts.append(prompt)
+            return "内容", 1, 1, 'glm'
+
+        from services import ai_processor as ap
+        with patch("services.ai_processor.get_model_by_key", return_value=MOCK_CFG), \
+             patch("services.ai_processor._call_ai_with_fallback", side_effect=_fake), \
+             patch("services.ai_processor._record_token_usage"):
+            await ap.ai_process(
+                self.LONG, dimensions={'word_count': '500'},
+                summary_options={'edited_prompt': '【用户自己写的提示词】'})
+
+        assert len(prompts) == 2
+        assert all('【用户自己写的提示词】' in p and '第 ' in p for p in prompts)
+
+
+# ── ai_process 正常路径不回归 ──
+@pytest.mark.asyncio
+class TestAiProcessBatchSuccess:
+
+    async def test_multi_chunk_merges_all_batches(self):
+        prompts = []
+
+        async def _fake(model, prompt, **kw):
+            prompts.append(prompt)
+            return f"第{len(prompts)}批结果", 2, 3, 'glm'
+
+        from services import ai_processor as ap
+        with patch("services.ai_processor.get_model_by_key", return_value=MOCK_CFG), \
+             patch("services.ai_processor._call_ai_with_fallback", side_effect=_fake), \
+             patch("services.ai_processor._record_token_usage"):
+            out, in_tok, out_tok = await ap.ai_process(
+                '甲' * 25000, dimensions={'word_count': '500'})
+
+        assert '第1批结果' in out and '第2批结果' in out
+        assert (in_tok, out_tok) == (4, 6)

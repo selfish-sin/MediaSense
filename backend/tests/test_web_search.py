@@ -332,6 +332,61 @@ class TestWebSearchCollect:
     # web_search_collect() 的成功/失败语义由本文件上方的 TestWebSearchCollect 覆盖。
 
 
+class TestSearchWallClockCap:
+    """★ A6（2026-10-13）：总预算必须是**墙钟上限**。
+
+    修复前 `_budget_slice` 只把「剩余预算」当 httpx 标量 timeout 传下去，而 httpx 的
+    标量超时是 connect/read/write/pool **各自**的上限——一级实际能跑到约 2× 切片，
+    整条链因此能超出 SEARCH_TOTAL_BUDGET（该预算存在的目的正是消掉「最坏 ~90s」），
+    超支后 remaining < SEARCH_MIN_SLICE 还会把**免 Key 的 DDGS 兜底**判成「未尝试」
+    白白丢掉。修复：每个 provider 外层再套 asyncio.wait_for（与 DDGS 那条同一姿势）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_hanging_provider_is_capped_by_budget(self, monkeypatch):
+        import asyncio as _asyncio
+        import time as _time
+
+        monkeypatch.setattr(web_search, "SEARCH_MIN_SLICE", 0.02)
+        monkeypatch.setattr(web_search, "ollama_configured", lambda: True)
+
+        async def _hang(query, **kw):
+            # 只认 httpx 标量 timeout 的后端在这里（修复前）会一直跑下去
+            await _asyncio.sleep(5)
+            return [{"title": "T", "url": "https://x.com", "snippet": "s"}]
+
+        monkeypatch.setattr(web_search, "ollama_search", _hang)
+
+        started = _time.monotonic()
+        outcome = await web_search.web_search_collect("q", total_budget=0.2)
+        elapsed = _time.monotonic() - started
+
+        assert outcome.ok is False
+        assert elapsed < 1.0, f"墙钟上限失效：实际跑了 {elapsed:.2f}s"
+        # 失败原因可见且可行动（含后端名 + 「被总预算掐断」）
+        assert "Ollama 联网搜索失败" in outcome.error
+        assert "受联网检索总预算限制" in outcome.error
+        assert "超时" in outcome.error
+
+    @pytest.mark.asyncio
+    async def test_slow_but_ok_provider_still_succeeds_within_slice(self, monkeypatch):
+        """反防：加了墙钟上限不该误杀「在预算内慢慢返回」的后端。"""
+        import asyncio as _asyncio
+
+        monkeypatch.setattr(web_search, "SEARCH_MIN_SLICE", 0.02)
+        monkeypatch.setattr(web_search, "ollama_configured", lambda: True)
+
+        async def _slow_ok(query, **kw):
+            await _asyncio.sleep(0.05)
+            return [{"title": "慢但成功", "url": "https://x.com", "snippet": "s"}]
+
+        monkeypatch.setattr(web_search, "ollama_search", _slow_ok)
+
+        outcome = await web_search.web_search_collect("q", total_budget=2.0)
+        assert outcome.ok is True
+        assert outcome.sources[0]["title"] == "慢但成功"
+
+
 class TestDescribeSearchBackends:
     def test_reports_availability(self, monkeypatch):
         monkeypatch.setattr(web_search, "ollama_configured", lambda: True)

@@ -23,6 +23,22 @@ from services.httpx_errors import describe_http_error
 
 logger = logging.getLogger(__name__)
 
+# ★ 流读取期间的**时间型**取消轮询间隔（秒）：
+#   取消检查原挂在「每 20 个正文 token / 每 20 片 reasoning」上，端点连上却不吐字
+#   （半死连接）时零 token → 检查永不触发，用户点了取消要等满 4 次重试（分钟级）
+#   才响应。流循环里改成按时间兜底：距上次检查超过这个间隔就查一次。
+CANCEL_POLL_INTERVAL = 1.0
+
+# 单轮（一次 HTTP 流）总超时默认值，由调用方按场景下调/上调（不再硬编码在 wait_for 里）
+DEFAULT_ROUND_TIMEOUT = 600.0
+
+
+def _usage_of(usage_state: Optional[dict]) -> Tuple[int, int]:
+    """从调用方传入的 usage_state 读回本次调用已累计的 (in_tok, out_tok)。"""
+    if not usage_state:
+        return 0, 0
+    return int(usage_state.get('in_tok') or 0), int(usage_state.get('out_tok') or 0)
+
 
 class TaskCancelledError(Exception):
     """任务被用户取消时抛出的异常"""
@@ -98,16 +114,25 @@ async def _call_ai(
     max_retries: int = 3,
     state: Optional[dict] = None,
     bypass_cache: bool = False,
+    usage_state: Optional[dict] = None,
+    round_timeout: float = DEFAULT_ROUND_TIMEOUT,
 ) -> Tuple[str, int, int]:
     """单次AI调用（支持流式输出+批量推送+断连重试），返回(content, input_tokens, output_tokens)
 
     max_retries: 流式断连时最大重试次数（指数退避: 2s → 4s → 8s）
+    round_timeout: 单轮流的总超时（默认 600s）；多次重试各自适用本值。
 
     ★ state（可选出参，2026-10-05）：调用方传入可变 dict，本函数回填
       - state['emitted']: 本次调用是否已经向前端推送过正文 token
       - state['content']: 成功时的完整正文
       兜底编排（_call_ai_with_fallback）据此执行"只在一字未吐时才换模型"——
       已经吐字再换模型会让前端出现「A 的半截 + B 的完整」的混血文档。
+
+    ★ usage_state（可选出参，2026-10-13）：调用方传入可变 dict，本函数在**流读取
+      过程中**就把已累计的 usage 回填（usage_state['in_tok']/['out_tok']）。
+      失败分支（超时/断连）会直接返回这批真实数值而不是 0：此前协程被丢弃时
+      局部变量一起消失，token_usage 表系统性少记，真实账单高于系统显示。
+      换候选重跑时把本 dict 传给下一次调用即可跨候选累计。
 
     ★ AI 结果缓存（2026-10-06）：默认开启；键 = endpoint+model_id+temperature+max_tokens+prompt。
       命中直接复用上次成功结果（token 消耗 0）；bypass_cache=True 跳过（显式重跑语义）。
@@ -147,11 +172,26 @@ async def _call_ai(
     try:
         async def _stream():
             """在带总超时的协程内完成流式读取，避免 API 半死不活时永久挂起"""
+            # ★ 断连重试会把整段重跑一遍：前几次尝试已经烧掉的 token 必须计入本次
+            #   返回，否则「重试成功」只记最后一轮的量，账单仍然对不上。
+            #   每次进入 _stream 都重新读基线（上次尝试已把用量写进 usage_state）。
+            prior_in, prior_out = _usage_of(usage_state)
             content_parts = []
             in_tok = 0
             out_tok = 0
             token_count = 0
             reasoning_count = 0
+            emitted_chars = 0
+            last_cancel_check = time.monotonic()
+
+            def _sync_usage():
+                """把本次尝试已累计的 token 立刻回填到调用方的 usage_state。
+                失败分支的协程会被丢弃，局部变量随之消失——不回填等于漏记账。
+                没收到 usage 时按已吐字符数粗估（与成功路径 len//2 同一口径）。"""
+                if usage_state is None:
+                    return
+                usage_state['in_tok'] = prior_in + in_tok
+                usage_state['out_tok'] = prior_out + (out_tok or emitted_chars // 2)
 
             # ★ 批量推送缓冲区：每 BATCH_TOKENS 个 token 或每 BATCH_INTERVAL 秒发送一次
             _BATCH_TOKENS = 10
@@ -171,6 +211,12 @@ async def _call_ai(
                         await resp.aread()
                     resp.raise_for_status()
                     async for line in resp.aiter_lines():
+                        # ★ 时间型取消轮询：端点连上却不吐字（半死连接）时零 token，
+                        #   挂在 token 计数上的检查永远不触发，用户取消要等满重试才生效。
+                        _now = time.monotonic()
+                        if _now - last_cancel_check >= CANCEL_POLL_INTERVAL:
+                            last_cancel_check = _now
+                            _check_cancelled(job_id)
                         if not line.startswith("data: "):
                             continue
                         data_str = line[6:]
@@ -199,12 +245,15 @@ async def _call_ai(
                                         thinking_buffer = []
                             if text_piece:
                                 content_parts.append(text_piece)
+                                emitted_chars += len(text_piece)
                                 token_count += 1
                                 if state is not None:
                                     state['emitted'] = True
                                 # ★ 每 20 个 token 检查一次取消标记（避免高频检查影响性能）
                                 if token_count % 20 == 0:
                                     _check_cancelled(job_id)
+                                # 每片都回填：断连/超时可能发生在任何一片之后
+                                _sync_usage()
 
                                 # ★ 批量推送：累积 token，满足条件时批量发送
                                 # 注意：前端只认 data.token（字符串），故每次 flush 拼接成字符串发出
@@ -226,6 +275,7 @@ async def _call_ai(
                             if usage:
                                 in_tok = usage.get('prompt_tokens', 0)
                                 out_tok = usage.get('completion_tokens', 0)
+                                _sync_usage()
                         except json.JSONDecodeError:
                             continue
 
@@ -242,15 +292,20 @@ async def _call_ai(
 
         # ★ 流式调用 + 断连重试（指数退避: 2s → 4s → 8s）
         for retry in range(max_retries + 1):
+            # ★ 每次重试前查一次取消：零输出的断连重试在整轮里可能耗时数分钟，
+            #   退避 sleep 期间用户点取消也不该白等。
+            _check_cancelled(job_id)
             try:
-                content_parts, in_tok, out_tok, batch_flush_count = await asyncio.wait_for(_stream(), timeout=600.0)
+                content_parts, in_tok, out_tok, batch_flush_count = await asyncio.wait_for(
+                    _stream(), timeout=round_timeout)
                 break  # 成功
             except asyncio.TimeoutError:
-                logger.error('AI调用超时（单轮总超时 600s）')
+                logger.error(f'AI调用超时（单轮总超时 {round_timeout}s）')
                 if sio:
                     from socket_handlers import emit_log
                     await emit_log(sio, job_id, 'AI处理超时（已自动终止，请重试）')
-                return '[处理失败: 超时]', 0, 0
+                # ★ 失败也返回已烧掉的 token（2026-10-13）：此前恒 0，token_usage 系统性少记
+                return '[处理失败: 超时]', *_usage_of(usage_state)
             except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.ReadTimeout, ConnectionError) as e:
                 # ★ 已吐字就不再重试（2026-10-05）：重试会从头再流一遍，
                 #   而第一遍的半截已经推给前端了 → 前端变成「断连前的半截 + 重试的完整」，
@@ -261,7 +316,8 @@ async def _call_ai(
                     if sio:
                         from socket_handlers import emit_log
                         await emit_log(sio, job_id, f'❌ AI连接中断（已输出部分内容，不再重试以免内容重复）: {e}')
-                    return '[处理失败: 连接中断（已输出部分内容）]', 0, 0
+                    # 已吐出的正文是真的花了钱，照实记账（缺 usage 时按字符数粗估）
+                    return '[处理失败: 连接中断（已输出部分内容）]', *_usage_of(usage_state)
                 if retry < max_retries:
                     wait = 2 ** retry  # 1, 2, 4 (retry 0: 1s, retry 1: 2s, retry 2: 4s)
                     logger.warning(f'AI流式断连，{wait}s后重试 ({retry+1}/{max_retries}): {e}')
@@ -275,7 +331,7 @@ async def _call_ai(
                     if sio:
                         from socket_handlers import emit_log
                         await emit_log(sio, job_id, f'❌ AI连接失败（已重试{max_retries}次）: {e}')
-                    return '[处理失败: 连接断开]', 0, 0
+                    return '[处理失败: 连接断开]', *_usage_of(usage_state)
             except TaskCancelledError:
                 # ★ 用户取消必须向上抛，不能被下面的通用 except 吞成
                 #   '[处理失败: ...]' 哨兵串（否则 main.py 会把 cancelled 记成 failed）
@@ -288,14 +344,14 @@ async def _call_ai(
                 if sio:
                     from socket_handlers import emit_log
                     await emit_log(sio, job_id, f'AI处理失败: {detail}')
-                return f'[处理失败: {detail}]', 0, 0
+                return f'[处理失败: {detail}]', *_usage_of(usage_state)
             except Exception as e:
                 # 非网络错误（如 JSON 解析失败等），不重试
                 logger.error(f'AI调用失败: {e}')
                 if sio:
                     from socket_handlers import emit_log
                     await emit_log(sio, job_id, f'AI处理失败: {e}')
-                return f'[处理失败: {e}]', 0, 0
+                return f'[处理失败: {e}]', *_usage_of(usage_state)
 
         content = ''.join(content_parts)
         if state is not None:
@@ -312,6 +368,9 @@ async def _call_ai(
         # 如果 usage 没拿到，估算
         if not out_tok:
             out_tok = len(content) // 2  # 粗略估算
+        # 断连重试前几次尝试烧掉的 token 一并计入（usage_state 是跨尝试累计口径）
+        if usage_state is not None:
+            in_tok, out_tok = _usage_of(usage_state)
 
         # 推送完成信号（附带完整内容，前端用作最终校准）
         if sio:
@@ -331,13 +390,13 @@ async def _call_ai(
         if sio:
             from socket_handlers import emit_log
             await emit_log(sio, job_id, f'AI处理失败: {detail}')
-        return f'[处理失败: {detail}]', 0, 0
+        return f'[处理失败: {detail}]', *_usage_of(usage_state)
     except Exception as e:
         logger.error(f'AI调用失败: {e}')
         if sio:
             from socket_handlers import emit_log
             await emit_log(sio, job_id, f'AI处理失败: {e}')
-        return f'[处理失败: {e}]', 0, 0
+        return f'[处理失败: {e}]', *_usage_of(usage_state)
 
 
 # ============ 兜底编排（2026-10-05）============
@@ -396,6 +455,9 @@ async def _call_ai_with_fallback(
     # 失败原因**独立于 call_chain 累积**：call_chain 是可选出参，不传时
     # 真实原因不能跟着丢（否则上层只拿到"全部失败"而看不到"为什么"）。
     failures: list = []
+    # ★ 跨候选累计的 token（2026-10-13）：换模型重跑是真的又烧了一次，
+    #   此前只回传最后一个候选的用量，token_usage 表系统性少记。
+    usage_state: dict = {}
 
     for idx, cand in enumerate(candidates):
         if idx > 0:
@@ -419,7 +481,7 @@ async def _call_ai_with_fallback(
             content, in_tok, out_tok = await _call_ai(
                 model_cfg, prompt, timeout=timeout, sio=sio, job_id=job_id,
                 round_label=round_label, final=final, max_retries=max_retries,
-                state=state, bypass_cache=bypass_cache,
+                state=state, bypass_cache=bypass_cache, usage_state=usage_state,
             )
         except TaskCancelledError:
             # 用户取消：绝不换模型重试
@@ -598,16 +660,30 @@ async def ai_process(
 
         # 分批时每批只传入部分内容
         if len(chunks) > 1:
-            if use_modular:
+            chunk_body = f'[第 {i+1}/{len(chunks)} 部分]\n\n{chunk}'
+            if edited_prompt:
+                # ★ 用户编辑过的完整提示词（2026-10-13 修复 A3）：分批复用分支此前
+                #   只认 dimensions/custom_prompt/full_override，把 edited_prompt 丢了——
+                #   长视频上用户改过的文字完全不生效，短视频却生效（行为不一致）。
+                #   这里复用单批路径的注入点（与下方 prompt_template 分支一致）：
+                #   模板正文一个字不动，只把 {{CONTENT}} 换成本批内容。
+                #   编辑版提示词可能不带占位符（build_modular_prompt 也是「无占位则
+                #   追加内容」的注入约定），此时按同一约定把本批内容附在末尾，
+                #   避免整批内容凭空消失。
+                if '{{CONTENT}}' in edited_prompt:
+                    chunk_prompt = edited_prompt.replace('{{CONTENT}}', chunk_body)
+                else:
+                    chunk_prompt = f'{edited_prompt}\n\n【待处理内容】\n{chunk_body}'
+            elif use_modular:
                 from services.prompt_builder import build_modular_prompt
                 chunk_prompt = build_modular_prompt(
                     dimensions=dimensions,
-                    content=f'[第 {i+1}/{len(chunks)} 部分]\n\n{chunk}',
+                    content=chunk_body,
                     custom_prompt=custom_prompt or opts.get("custom_prompt", ""),
                     full_override=opts.get("full_override", ""),
                 )
             else:
-                chunk_prompt = prompt_template.replace('{{CONTENT}}', f'[第 {i+1}/{len(chunks)} 部分]\n\n{chunk}')
+                chunk_prompt = prompt_template.replace('{{CONTENT}}', chunk_body)
         else:
             chunk_prompt = prompt
 
@@ -616,12 +692,36 @@ async def ai_process(
             sio=sio, job_id=job_id, round_label=f'批次 {i+1}/{len(chunks)}', final=False,
             call_chain=call_chain, bypass_cache=bypass_cache,
         )
+        total_in += in_tok
+        total_out += out_tok
+
+        # ★ 契约 C：分批模式 fail-fast（2026-10-13 修复 A1）
+        #   任一批返回失败哨兵就整份失败：合并时哨兵串被 '# 分批处理结果' 标题前缀
+        #   顶到正文里，两处调用方的 result_text.lstrip().startswith('[处理失败')
+        #   防线在分批模式下永远不成立 → 任务标 completed、残缺文档写进
+        #   jobs.result_text 与 summary_history。宁可显式失败让用户重试。
+        #   单批模式保持原样（调用方有哨兵防线）。
+        if len(chunks) > 1 and is_call_failed(content):
+            detail = _strip_sentinel(content)
+            msg = (f'第 {i + 1}/{len(chunks)} 批 AI 处理失败：{detail}；'
+                   f'分批总结已中止，不写入残缺结果（本次已消耗 token 已记账）。'
+                   f'可重试该任务，或在「模型管理」换用可用模型/检查 Key 与额度后重新总结。')
+            logger.error(f'[{job_id}] {msg}')
+            if sio:
+                from socket_handlers import emit_log
+                await emit_log(sio, job_id, f'❌ {msg}')
+            # 调用链照实回填（排障要看"这次到底调了谁、哪一批挂了"）
+            if isinstance(ctx, dict):
+                ctx['call_chain'] = call_chain
+            _record_token_usage(model, total_in, total_out, job_id)
+            # ★ 抛在 emit_ai_token(done=True) 之前：不能把失败状态推成"AI 完成"，
+            #   更不能把半截合并结果播给前端。
+            raise Exception(msg)
+
         # 本批成功后记住它（失败的批不记忆，否则会把"已失效"传染给后续批次）
         if not is_call_failed(content):
             preferred_model = used_model
         results.append(content)
-        total_in += in_tok
-        total_out += out_tok
 
     # 合并结果
     if len(chunks) > 1:
@@ -774,6 +874,7 @@ async def correct_transcript(
     job_id: str = '',
     domain: str = 'default',
     bypass_cache: bool = False,
+    round_timeout: float = DEFAULT_ROUND_TIMEOUT,
 ) -> Tuple[str, int, int, dict]:
     """
     用云端模型校正语音转写文本。
@@ -845,7 +946,7 @@ async def correct_transcript(
         content, in_tok, out_tok = await _call_ai(
             model_cfg, prompt, timeout=120.0,
             sio=sio, job_id=job_id, round_label=f'校正批次 {i+1}/{len(chunks)}',
-            bypass_cache=bypass_cache,
+            bypass_cache=bypass_cache, round_timeout=round_timeout,
         )
 
         used = content
@@ -933,6 +1034,8 @@ async def correct_transcript_with_fallback(
     fallback_models: Optional[List[str]] = None,
     max_fallbacks: Optional[int] = None,
     bypass_cache: bool = False,
+    total_timeout: float = 1800.0,
+    round_timeout: float = DEFAULT_ROUND_TIMEOUT,
 ) -> Tuple[str, int, int, dict, str]:
     """correct_transcript 的多模型兜底包装：所选模型不可用时自动换下一个候选。
 
@@ -949,7 +1052,13 @@ async def correct_transcript_with_fallback(
     部分批次失败不算不可用——那些批次已逐批回退原文，整体结果仍可用，stats 会告警。
     用户取消（TaskCancelledError）直接上抛，绝不换模型重试。
 
+    ★ total_timeout（2026-10-13）：与 ai_process 同级的**整体超时外壳**。此前只有
+      单轮上限，长转录按块累加可以挂数小时；超限按可行动文案抛异常。
+      round_timeout：单轮流上限（透传给 correct_transcript → _call_ai）。
+      <=0 关闭对应超时。
+
     返回 (校正后文本, input_tokens, output_tokens, stats, 实际使用的模型 key)。
+    token 为**跨候选累计**（换模型重跑是真的又烧了一次，此前只回传最后一个候选）。
     所有候选都不可用时抛出异常（由调用方按"校正失败不影响主流程"兜底）。
     """
     if fallback_models is None:
@@ -960,45 +1069,69 @@ async def correct_transcript_with_fallback(
         if max_fallbacks is not None:
             candidates = candidates[:max_fallbacks + 1]
     last_error: Optional[Exception] = None
+    # ★ 跨候选累计的 token（2026-10-13）：失败候选跑掉的 token 也是真金白银
+    spent_in = 0
+    spent_out = 0
 
-    for idx, cand in enumerate(candidates):
-        if idx > 0:
-            # 换模型决策同时落盘（logger）与推送（socket）：纯 socket 日志服务端排障时不可见
-            logger.info(f'[{job_id}] 校正换模型重试（候选 {idx + 1}/{len(candidates)}）：{cand}')
-            if sio:
-                from socket_handlers import emit_log
-                await emit_log(sio, job_id, f'🔄 自动换模型重试（候选 {idx + 1}/{len(candidates)}）：{cand}')
-        try:
-            corrected, in_tok, out_tok, stats = await correct_transcript(
-                text, model=cand, sio=sio, job_id=job_id, domain=domain,
-                bypass_cache=bypass_cache,
-            )
-        except TaskCancelledError:
-            raise
-        except Exception as e:
-            last_error = e
-            logger.warning(f'[{job_id}] 校正模型 {cand} 抛异常：{e}')
-            if sio:
-                from socket_handlers import emit_log
-                await emit_log(sio, job_id, f'⚠ 模型 {cand} 校正失败：{e}')
-            continue
+    async def _try_candidates():
+        nonlocal last_error, spent_in, spent_out
+        for idx, cand in enumerate(candidates):
+            if idx > 0:
+                # 换模型决策同时落盘（logger）与推送（socket）：纯 socket 日志服务端排障时不可见
+                logger.info(f'[{job_id}] 校正换模型重试（候选 {idx + 1}/{len(candidates)}）：{cand}')
+                if sio:
+                    from socket_handlers import emit_log
+                    await emit_log(sio, job_id, f'🔄 自动换模型重试（候选 {idx + 1}/{len(candidates)}）：{cand}')
+            try:
+                corrected, in_tok, out_tok, stats = await correct_transcript(
+                    text, model=cand, sio=sio, job_id=job_id, domain=domain,
+                    bypass_cache=bypass_cache, round_timeout=round_timeout,
+                )
+            except TaskCancelledError:
+                raise
+            except Exception as e:
+                last_error = e
+                logger.warning(f'[{job_id}] 校正模型 {cand} 抛异常：{e}')
+                if sio:
+                    from socket_handlers import emit_log
+                    await emit_log(sio, job_id, f'⚠ 模型 {cand} 校正失败：{e}')
+                continue
 
-        total = stats.get('total_chunks', 0)
-        dead = stats.get('failed_chunks', 0) + stats.get('integrity_warnings', 0)
-        if total > 0 and dead >= total:
-            last_error = Exception(f'模型 {cand} 全部批次校正无效（失败 {stats.get("failed_chunks", 0)}/完整性 {stats.get("integrity_warnings", 0)}/共 {total} 批）')
-            logger.warning(f'[{job_id}] {last_error}，视为该模型不可用')
-            if sio:
-                from socket_handlers import emit_log
-                await emit_log(sio, job_id, f'⚠ {last_error}，视为该模型不可用')
-            continue
+            spent_in += in_tok
+            spent_out += out_tok
 
-        if idx > 0 and sio:
+            total = stats.get('total_chunks', 0)
+            dead = stats.get('failed_chunks', 0) + stats.get('integrity_warnings', 0)
+            if total > 0 and dead >= total:
+                last_error = Exception(f'模型 {cand} 全部批次校正无效（失败 {stats.get("failed_chunks", 0)}/完整性 {stats.get("integrity_warnings", 0)}/共 {total} 批）')
+                logger.warning(f'[{job_id}] {last_error}，视为该模型不可用')
+                if sio:
+                    from socket_handlers import emit_log
+                    await emit_log(sio, job_id, f'⚠ {last_error}，视为该模型不可用')
+                continue
+
+            if idx > 0 and sio:
+                from socket_handlers import emit_log
+                await emit_log(sio, job_id, f'✅ 已自动切换到模型 {cand} 完成校正')
+            return corrected, spent_in, spent_out, stats, cand
+
+        raise Exception(f'所有候选模型均无法完成校正（尝试: {"、".join(candidates)}）；最后原因: {last_error}')
+
+    # ★ 整体超时外壳（2026-10-13）：与 ai_process 的 1800s 同级，防止长转录
+    #   按块累加挂数小时；超限抛可行动异常（不是裸 TimeoutError）。
+    try:
+        if total_timeout and total_timeout > 0:
+            return await asyncio.wait_for(_try_candidates(), timeout=total_timeout)
+        return await _try_candidates()
+    except asyncio.TimeoutError:
+        msg = (f'AI 校正整体超时（超过 {int(total_timeout)}s 已自动终止，'
+               f'单轮流上限 {int(round_timeout)}s）；可把文本拆小分批校正，'
+               f'或在「模型管理」换用更快的模型后重试')
+        logger.error(f'[{job_id}] {msg}')
+        if sio:
             from socket_handlers import emit_log
-            await emit_log(sio, job_id, f'✅ 已自动切换到模型 {cand} 完成校正')
-        return corrected, in_tok, out_tok, stats, cand
-
-    raise Exception(f'所有候选模型均无法完成校正（尝试: {"、".join(candidates)}）；最后原因: {last_error}')
+            await emit_log(sio, job_id, f'❌ {msg}')
+        raise Exception(msg)
 
 
 # ============ 非流式 AI 调用（2026-10-05）============
@@ -1217,8 +1350,16 @@ async def generate_tags(
     sio=None,
     job_id: str = '',
     bypass_cache: bool = False,
-) -> List[str]:
-    """用AI分析文本生成3-5个分类标签（走统一兜底环：任一候选失败自动换下一个）"""
+) -> Optional[List[str]]:
+    """用AI分析文本生成3-5个分类标签（走统一兜底环：任一候选失败自动换下一个）
+
+    ★ 返回值语义（2026-10-13 契约 A，原为「失败也返回 []」）——调用方必须能分清
+      「调用失败」和「模型没吐出标签」，否则会把"打标签挂了"当成"没有标签"而
+      清空已有标签并返回成功：
+      - list（非空）：成功且有标签
+      - []：调用成功但模型没吐出合法标签数组（解析不出，不算失败）
+      - None：**调用失败**（兜底环内全部候选抛异常）
+    """
     prompt = f"""请分析以下视频转录文本的内容主题，返回 3-5 个分类标签。
 标签要求：
 - 每个标签 2-5 个字
@@ -1238,7 +1379,11 @@ async def generate_tags(
             "max_tokens": 100,
         }
 
-    def _parse(content: str, _used: str, in_tok: int, out_tok: int) -> List[str]:
+    def _parse(content: str, used_model: str, in_tok: int, out_tok: int) -> List[str]:
+        # ★ token 记账（2026-10-13）：打标签此前**从不记账**（全项目只有 3 处调用
+        #   _record_token_usage，它不在其中），真实账单高于系统显示。记**实际使用**
+        #   的模型 key 而非请求的那个，与 generate_mindmap 的 _on_ok 同一口径。
+        _record_token_usage(used_model, in_tok, out_tok, job_id)
         # 清理 markdown 代码块包裹
         cleaned = content.strip()
         if cleaned.startswith('```'):
@@ -1259,12 +1404,20 @@ async def generate_tags(
             model, '打标签', 30.0, _build, sio=sio, job_id=job_id,
             on_success=_parse, bypass_cache=bypass_cache,
         )
+    except TaskCancelledError:
+        # ★ 必须排在 except Exception 之前（2026-10-13）：TaskCancelledError 是
+        #   Exception 子类，被当成普通失败吞成 None 会丢掉取消语义——上层因此把
+        #   用户取消的任务继续跑完（或记成"只是没打上标签"）。
+        raise
     except Exception as e:
-        logger.warning(f'自动打标签失败: {e}')
+        # 失败返回 None（= 调用失败），不是 []（= 调用成功但没标签）：调用方据此
+        # 区分"打标签挂了"和"确实没有标签"，不再清空已有标签后当成功。
+        logger.warning(f'[{job_id}] 自动打标签失败（调用失败，返回 None）: {e}')
         if sio:
             from socket_handlers import emit_log
-            await emit_log(sio, job_id, f'⚠ 打标签失败: {e}')
-        return []
+            await emit_log(sio, job_id,
+                           f'⚠ 打标签失败（未产出任何标签）: {e}；可稍后重试或在模型管理页换用可用模型')
+        return None
 
 
 # ============ Token 统计 ============
