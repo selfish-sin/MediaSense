@@ -115,12 +115,20 @@ const activeModel = computed(() => {
 // rAF 节流渲染 Markdown（重新总结流式输出逐 token 追加，避免每次追加全量重渲染）
 const { html: renderedResult } = useRafMarkdown(() => displayResult.value)
 
+// ★ 任务加载请求序号：同一路由记录内换任务（浏览器前进/后退 /result/A ⇄ /result/B、连点两个历史任务）
+//   会复用同一个组件实例，两次 loadJob 的响应可能乱序到达，慢的旧响应会把页面覆盖成另一个任务。
+let loadJobSeq = 0
+
 async function loadJob() {
   const jobId = route.params.jobId
   if (!jobId) return
+  const reqId = ++loadJobSeq
   loading.value = true
   try {
-    job.value = await jobsApi.get(jobId)
+    const jobData = await jobsApi.get(jobId)
+    // 回包时已切到别的任务 → 丢弃，绝不覆盖用户正在看的任务
+    if (reqId !== loadJobSeq || route.params.jobId !== jobId) return
+    job.value = jobData
     await loadSummaryHistory()
     // ★ do_summary=false 或无总结结果但有转录文本时，默认落到转录 tab
     //   避免结果页空荡荡，让用户能看到转录/校正内容
@@ -131,9 +139,11 @@ async function loadJob() {
       loadTranscript()
     }
   } catch (err) {
+    if (reqId !== loadJobSeq || route.params.jobId !== jobId) return
     ElMessage.error(err.message)
   } finally {
-    loading.value = false
+    // 只有最后一次请求才有权复位 loading
+    if (reqId === loadJobSeq) loading.value = false
   }
 }
 
@@ -142,9 +152,12 @@ async function loadSummaryHistory() {
   if (!jobId) return
   try {
     const res = await jobsApi.getSummaryHistory(jobId)
+    // 拉取期间已切到别的任务 → 版本列表也不能落到当前页面上
+    if (route.params.jobId !== jobId) return
     summaryHistory.value = res.versions || []
     summaryHistoryNotifier.ok()
   } catch {
+    if (route.params.jobId !== jobId) return
     summaryHistoryNotifier.fail()
     summaryHistory.value = []
   }
