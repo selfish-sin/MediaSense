@@ -30,7 +30,7 @@ describe('parseChatTime', () => {
   })
 
   it('formats as HH:mm', () => {
-    expect(formatChatTime('2026-09-17 03:20:00')).toBe('11:20') // UTC+8
+    expect(formatChatTime('2026-09-17 03:20:00')).toBe('11:20') // 套件固定 TZ=Asia/Shanghai（vitest.config.js）
     expect(formatChatTime('')).toBe('')
   })
 })
