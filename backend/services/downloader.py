@@ -225,6 +225,13 @@ def _run_ytdlp(args: list, timeout: int = 120):
     """运行 yt-dlp，兼容 PyInstaller frozen 模式。
     args: 不含 [sys.executable, '-m', 'yt_dlp'] 前缀的参数列表。
     返回对象含 .returncode / .stdout(bytes) / .stderr(bytes)，与 subprocess.run 兼容。
+
+    ★ timeout 契约（B2 修复，2026-10-13）：frozen 分支此前**完全不消费 timeout**
+    （`_yt_dlp.main()` 是同步调用，没有包装）。项目以 MediaSense.spec 打包发行，实际用户
+    跑的就是这个分支——yt-dlp 遇 412 重试循环 / 半开连接 / ffmpeg 卡住即长期不返回，
+    于是「下载超时(600s)」「字幕抓取超时(120s)」提示永远不会出现，任务永久挂住并一直
+    占着并发信号量（MAX_CONCURRENT_JOBS=2，挂 2 个整站排队卡死）。现在两条分支都真正
+    超时并抛 `subprocess.TimeoutExpired`，调用点已有的 except 分支因此自动生效，无需改动。
     """
     full_args = FFMPEG_ARGS + args
     if getattr(sys, 'frozen', False):
@@ -237,25 +244,53 @@ def _run_ytdlp(args: list, timeout: int = 120):
                 self.stdout = out
                 self.stderr = err
 
-        # yt-dlp.main() writes to process-global stdio. Serialise this narrow
-        # frozen-mode section so concurrent jobs cannot steal each other's logs.
-        with _YTDLP_STDIO_LOCK:
-            old_out, old_err = sys.stdout, sys.stderr
+        box: dict = {}
+
+        def _invoke() -> None:
+            # yt-dlp.main() 是同步阻塞调用且写进程级 stdio，放独立线程跑，主线程
+            # 负责 join(timeout)。
             buf_out, buf_err = _io.BytesIO(), _io.BytesIO()
+            old_out, old_err = sys.stdout, sys.stderr
+            rc = 0
+            # ★ 局部持有 wrapper 引用并在还原后 detach()：否则 wrapper 被回收时会连带
+            #   关闭底层 BytesIO，后面 getvalue() 直接 ValueError（读不到 yt-dlp 输出）。
+            tw_out = _io.TextIOWrapper(buf_out, encoding='utf-8', errors='replace')
+            tw_err = _io.TextIOWrapper(buf_err, encoding='utf-8', errors='replace')
             try:
-                sys.stdout = _io.TextIOWrapper(buf_out, encoding='utf-8', errors='replace')
-                sys.stderr = _io.TextIOWrapper(buf_err, encoding='utf-8', errors='replace')
-                rc = 0
+                sys.stdout, sys.stderr = tw_out, tw_err
                 try:
                     _yt_dlp.main(full_args)
                 except SystemExit as e:
                     rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
-                finally:
-                    sys.stdout.flush()
-                    sys.stderr.flush()
+                except BaseException as e:  # 原样带回调用线程抛出，不吞错
+                    box['exc'] = e
             finally:
+                for buf in (tw_out, tw_err):
+                    try:
+                        buf.flush()
+                    except Exception:
+                        pass
                 sys.stdout, sys.stderr = old_out, old_err
-        return _R(rc, buf_out.getvalue(), buf_err.getvalue())
+                tw_out.detach()
+                tw_err.detach()
+            box['rc'] = rc
+            box['out'] = buf_out.getvalue()
+            box['err'] = buf_err.getvalue()
+
+        with _YTDLP_STDIO_LOCK:
+            worker = threading.Thread(target=_invoke, name='yt-dlp-frozen', daemon=True)
+            worker.start()
+            worker.join(timeout if timeout and timeout > 0 else None)
+            if worker.is_alive():
+                # 无法中断已在跑的 yt-dlp（Python 线程不可杀）：放弃等待并抛标准超时异常，
+                # 让调用点走既有的超时分支。已知边界：僵尸线程可能继续往已还原的 stdio 写，
+                # 最多污染日志排版，不会阻塞任务流（daemon 线程不挡进程退出）。
+                logger.error(f'yt-dlp(frozen) 超时({timeout}s)，已放弃等待：{" ".join(full_args[:6])}...')
+                raise subprocess.TimeoutExpired(
+                    cmd=['yt_dlp(frozen)'] + full_args, timeout=timeout)
+        if 'exc' in box:
+            raise box['exc']
+        return _R(box.get('rc', 1), box.get('out', b''), box.get('err', b''))
     else:
         cmd = [sys.executable, '-m', 'yt_dlp'] + full_args
         return subprocess.run(cmd, capture_output=True, timeout=timeout)
@@ -1144,13 +1179,9 @@ async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None
                                             video_duration: float = 0.0) -> dict:
     """yt-dlp兜底提取B站字幕（带cookie）
     关键防误认：只认"本次调用新增"的srt，避免把旧任务残留当成成功结果
-    """
-    bilibili_headers = [
-        '--add-header', 'Origin:https://www.bilibili.com',
-        '--add-header', 'Referer:https://www.bilibili.com',
-        '--add-header', f'User-Agent:{FULL_CHROME_UA}',
-    ]
 
+    抓取循环体在 `_bili_ytdlp_subs`，这里负责 cookie 文件的写入与**必删**保证。
+    """
     # 把 cookie 写成 Netscape 格式文件给 yt-dlp 用（注入 buvid 指纹，yt-dlp 自己的
     # BiliBili 提取器同样会被风控 412，带上指纹能显著降低拦截概率）
     # ★ 写到 DATA_DIR 而非任务目录：job_dir 下的文件可经 /api/download/file 被
@@ -1178,6 +1209,41 @@ async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None
     if existing_srts and sio:
         from socket_handlers import emit_log
         await emit_log(sio, job_id, f'⚠ 目录已有 {len(existing_srts)} 个旧srt文件，将只认本次新增')
+
+    # ★ B8 修复（2026-10-13）：cookie 文件写着明文 SESSDATA。此前删除语句只在
+    # 「成功」与「正常走完循环」两条路径上执行——循环中协程被取消（CancelledError 是
+    # BaseException，`except Exception` 抓不到）或任何异常上抛，都会把明文 cookie
+    # 留在 DATA_DIR。整段包 try/finally，删除只在 finally 做一处。
+    try:
+        return await _bili_ytdlp_subs(
+            output_dir, url, sio, job_id, video_duration, existing_srts, cookie_args)
+    finally:
+        try:
+            cookie_file.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning(f'清理B站临时cookie失败（{cookie_file.name}: {e}），请手动删除该文件')
+
+
+async def _bili_ytdlp_subs(
+    output_dir: Path,
+    url: str,
+    sio=None,
+    job_id: str = '',
+    video_duration: float = 0.0,
+    existing_srts: set = frozenset(),
+    cookie_args: Optional[list] = None,
+) -> dict:
+    """yt-dlp 抓 B站字幕的循环体（cookie 文件生命周期由调用方 try/finally 兜住）。
+
+    独立成函数只是为了让 try/finally 覆盖到**每一次 await**——取消（CancelledError）
+    与异常都在 finally 生效，不会把明文 cookie 留在磁盘上。返回契约与调用方一致。
+    """
+    bilibili_headers = [
+        '--add-header', 'Origin:https://www.bilibili.com',
+        '--add-header', 'Referer:https://www.bilibili.com',
+        '--add-header', f'User-Agent:{FULL_CHROME_UA}',
+    ]
+    cookie_args = list(cookie_args or [])
 
     for sub_flag in ['--write-auto-sub', '--write-sub']:
         ytdlp_args = bilibili_headers + cookie_args + [
@@ -1235,11 +1301,6 @@ async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None
             # 生成对应的TXT
             txt_path = srt_path.with_suffix('.txt')
             _srt_to_txt(srt_path, txt_path)
-            # 清理临时 cookie 文件
-            try:
-                cookie_file.unlink(missing_ok=True)
-            except BaseException as e:
-                logger.debug(f'清理B站临时cookie失败（忽略）: {e}')
 
             if sio:
                 from socket_handlers import emit_log
@@ -1261,11 +1322,6 @@ async def _extract_bilibili_subtitles_ytdlp(url: str, output_dir: Path, sio=None
         except Exception as e:
             logger.warning(f'yt-dlp字幕提取异常: {e}')
             continue
-    # 清理临时 cookie 文件
-    try:
-        cookie_file.unlink(missing_ok=True)
-    except BaseException as e:
-        logger.debug(f'清理B站临时cookie失败（忽略）: {e}')
     if sio:
         from socket_handlers import emit_log
         await emit_log(sio, job_id, '❌ B站无可用字幕（AI字幕未生成+无CC字幕），进入转录流程')

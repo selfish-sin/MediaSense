@@ -351,34 +351,69 @@ async def extract_douyin_subtitles(url: str, output_dir: Path,
 
 
 # ============ 直链下载（音频/视频共用 play_addr） ============
+def _partial_path(dest: Path) -> Path:
+    """半截产物路径：`{base}.mp4` → `{base}.mp4.part`（后缀不匹配任何媒体白名单）。
+
+    ★ 治本（B1）：直链下载曾直接写最终名 `{base}.mp4`，中途断流就在 job_dir 里留下
+    一个几 MB 的**截断 mp4**。main._acquire_audio 的断点续传扫描只按「后缀 + size>1000」
+    捞文件（`.mp4` 在白名单里、截断文件 mtime 最新）→ 被当「已有完整音频」跳过下载 →
+    送进 ASR → **产出静默截断的转录并标 completed**。故一律先写 `.part`，
+    完整落盘后再 `Path.replace()` 原子改名，失败路径删 `.part`，目录里不留半截 `.mp4`。
+    """
+    return dest.parent / f'{dest.name}.part'
+
+
 def _stream_download_sync(play_url: str, dest: Path, prog: Optional[dict] = None) -> None:
-    """httpx 流式下载直链到 dest（阻塞，跑在线程池）。
+    """httpx 流式下载直链到 `{dest}.part`，完整后原子改名为 dest（阻塞，跑在线程池）。
 
     prog 为共享进度字典 {'done','total'}，由 async 壳轮询汇报（线程里只写数字，不碰 socket）。
     """
     headers = {"User-Agent": _UA, "Referer": "https://www.douyin.com/"}
-    with httpx.stream("GET", play_url, headers=headers,
-                      timeout=httpx.Timeout(_DOWNLOAD_TIMEOUT, read=60), follow_redirects=True) as r:
-        if r.status_code != 200:
-            raise DouyinError(f"抖音直链下载失败（HTTP {r.status_code}），直链可能已过期，请重试")
-        if prog is not None:
-            prog['total'] = int(r.headers.get("content-length") or 0)
-            prog['done'] = 0
-        with open(dest, "wb") as f:
-            for chunk in r.iter_bytes(_DOWNLOAD_CHUNK):
-                f.write(chunk)
-                if prog is not None:
-                    prog['done'] += len(chunk)
+    part = _partial_path(dest)
+    try:
+        with httpx.stream("GET", play_url, headers=headers,
+                          timeout=httpx.Timeout(_DOWNLOAD_TIMEOUT, read=60), follow_redirects=True) as r:
+            if r.status_code != 200:
+                raise DouyinError(f"抖音直链下载失败（HTTP {r.status_code}），直链可能已过期，请重试")
+            if prog is not None:
+                prog['total'] = int(r.headers.get("content-length") or 0)
+                prog['done'] = 0
+            with open(part, "wb") as f:
+                for chunk in r.iter_bytes(_DOWNLOAD_CHUNK):
+                    f.write(chunk)
+                    if prog is not None:
+                        prog['done'] += len(chunk)
+        if part.stat().st_size <= 0:
+            raise DouyinError(f"抖音直链下载为空（{dest.name}），请重试")
+        part.replace(dest)
+    finally:
+        # 失败/取消路径清掉半截文件：绝不让 .mp4.part 变成续传扫描的候选
+        try:
+            part.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning(f'清理抖音半截下载文件失败（{part.name}: {e}）')
 
 
 def _download_via_ffmpeg_sync(play_url: str, dest: Path, max_seconds: int) -> None:
-    """ffmpeg 直读直链截取开头 N 秒（字幕抽查场景，不付整段下载成本）"""
-    cmd = [str(_FFMPEG_BIN), '-y', '-user_agent', _UA,
-           '-i', play_url, '-t', str(int(max_seconds)),
-           '-c', 'copy', str(dest)]
-    p = subprocess.run(cmd, capture_output=True, timeout=180)
-    if p.returncode != 0 or not dest.exists() or dest.stat().st_size < 1024:
-        raise DouyinError(f'ffmpeg 截取失败: {p.stderr.decode("utf-8", "ignore")[-200:]}')
+    """ffmpeg 直读直链截取开头 N 秒（字幕抽查场景，不付整段下载成本）。
+
+    同样走 `.part` + 原子改名（见 `_partial_path` 的 B1 说明）：ffmpeg 被中断时
+    也不会在任务目录留下一个「看起来完整」的 mp4。
+    """
+    part = _partial_path(dest)
+    try:
+        cmd = [str(_FFMPEG_BIN), '-y', '-user_agent', _UA,
+               '-i', play_url, '-t', str(int(max_seconds)),
+               '-c', 'copy', str(part)]
+        p = subprocess.run(cmd, capture_output=True, timeout=180)
+        if p.returncode != 0 or not part.exists() or part.stat().st_size < 1024:
+            raise DouyinError(f'ffmpeg 截取失败: {p.stderr.decode("utf-8", "ignore")[-200:]}')
+        part.replace(dest)
+    finally:
+        try:
+            part.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning(f'清理抖音半截截取文件失败（{part.name}: {e}）')
 
 
 async def download_douyin_video(url: str, output_dir: Path, sio=None, job_id: str = '',
@@ -449,6 +484,15 @@ async def download_douyin_video(url: str, output_dir: Path, sio=None, job_id: st
             logger.warning(f'抖音直链下载失败（第{attempt}次）: {type(e).__name__}: {e}')
 
     if last_err is not None:
+        # 兜底：清掉本次失败可能留下的半截产物（正常路径已在 _stream_download_sync
+        # 的 finally 清理，这里防御协程被取消 / 历史崩溃残留）。
+        # 只删 .part，不删 dest——dest 只可能是上一次「完整」下载的产物，删了会毁掉
+        # 断点续传复用。
+        part = _partial_path(dest)
+        try:
+            part.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning(f'清理抖音半截下载文件失败（{part.name}: {e}）')
         raise Exception(f'抖音下载失败: {last_err}')
 
     size_mb = dest.stat().st_size / (1024 * 1024)

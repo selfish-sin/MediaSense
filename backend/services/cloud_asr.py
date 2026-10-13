@@ -35,8 +35,10 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as _FutTimeoutError
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -70,6 +72,9 @@ _BACKOFF_CAP = 8.0
 # 有界并发：SiliconFlow 限流为账号级 RPM/TPM（L0 免费档 RPM 1000），
 # 8 路并发 + 429 退避重试自适应兜底；env ASR_CLOUD_CONCURRENCY 可调（上限 16）
 _DEFAULT_CONCURRENCY = 8
+# 取消/失败后等待在飞分片线程收尾的上限（秒）。超过就放弃等待并记日志：
+# 一次在飞的云端请求最长 _call_timeout()（默认 180s），不能为收尾把「取消」卡成更久。
+_INFLIGHT_DRAIN_TIMEOUT = float(os.getenv('ASR_CLOUD_DRAIN_SECONDS') or 30.0)
 
 # 富文本标签（<|HAPPY|> / <|BGM|> / <|zh|> 等）防御性清洗（多 provider 通用）
 _RICH_TAG_RE = re.compile(r'<\|[A-Za-z_]+\|>')
@@ -448,21 +453,40 @@ def export_chunks(
     starts = [0.0] + list(cuts)
     total = len(starts) - 1
     export_start = time.time()
-    for i in range(total):
-        out_path = out_dir / f'{prefix}_cloud_{i:03d}.mp3'
-        cmd = [_ffmpeg_bin(), '-y', '-v', 'error', '-ss', f'{starts[i]:.3f}']
-        if i < total - 1:
-            cmd += ['-t', f'{starts[i + 1] - starts[i]:.3f}']
-        cmd += ['-i', audio_path, '-ac', '1', '-ar', '16000',
-                '-c:a', 'libmp3lame', '-b:a', '48k', str(out_path)]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
-            raise CloudASRUnavailableError(
-                f'ffmpeg 分片导出失败（第 {i + 1}/{total} 片，音频: {src.name}，'
-                f'ffmpeg: {(result.stderr or "").strip()[-200:]}），无法继续云端转录'
-            )
-        if progress_callback:
-            progress_callback(4 + int((i + 1) / total * 4), f'导出分片 {i + 1}/{total}...')
+    # ★ B4 修复（2026-10-13）：分片路径在导出**之前**就登记，导出循环抛错（含
+    #   subprocess.TimeoutExpired / OSError）时立刻清掉已落盘的残片。
+    #   此前清理只发生在 transcribe_audio_cloud 的 finally，而 export_chunks 在那之前
+    #   调用 → 导出中途失败会把 20MB 左右的 xxx_cloud_NNN.mp3 留在 job_dir（该目录可经
+    #   /api/download/file 对外服务）。
+    planned_paths = [out_dir / f'{prefix}_cloud_{i:03d}.mp3' for i in range(total)]
+    try:
+        for i in range(total):
+            out_path = planned_paths[i]
+            cmd = [_ffmpeg_bin(), '-y', '-v', 'error', '-ss', f'{starts[i]:.3f}']
+            if i < total - 1:
+                cmd += ['-t', f'{starts[i + 1] - starts[i]:.3f}']
+            cmd += ['-i', audio_path, '-ac', '1', '-ar', '16000',
+                    '-c:a', 'libmp3lame', '-b:a', '48k', str(out_path)]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
+                raise CloudASRUnavailableError(
+                    f'ffmpeg 分片导出失败（第 {i + 1}/{total} 片，音频: {src.name}，'
+                    f'ffmpeg: {(result.stderr or "").strip()[-200:]}），无法继续云端转录'
+                )
+            if progress_callback:
+                progress_callback(4 + int((i + 1) / total * 4), f'导出分片 {i + 1}/{total}...')
+    except BaseException:
+        leftover = 0
+        for p in planned_paths:
+            try:
+                if p.exists():
+                    p.unlink(missing_ok=True)
+                    leftover += 1
+            except OSError as e:
+                logger.warning(f'清理残留分片失败（{p.name}: {e}），请手动删除')
+        if leftover:
+            logger.warning(f'分片导出中断，已清理 {leftover} 个残留分片（{prefix}_cloud_*.mp3）')
+        raise
 
     chunks = sorted(out_dir.glob(f'{prefix}_cloud_*.mp3'))
     if not chunks:
@@ -561,7 +585,8 @@ def extract_sample(audio_path: str, max_seconds: float = 90.0) -> str:
 
 
 def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int = _MAX_RETRIES,
-                    provider: Optional[str] = None) -> str:
+                    provider: Optional[str] = None,
+                    cancel_event: Optional[threading.Event] = None) -> str:
     """单文件一次云端转写，返回清洗后的纯文本。
 
     provider 省略（None）→ 走 `preferred_provider()`（**只挑免费档**）；免费档不可用则抛
@@ -570,6 +595,12 @@ def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int
     401/402/403/404 配置与计费类错误立即抛 CloudASRConfigError（重试无意义）；
     400/429/5xx/网络错误指数退避重试，耗尽抛 CloudASRUnavailableError。
     供完整转录与 B站字幕抽查共用。
+
+    cancel_event（B3 修复，2026-10-13）：并发分片任务的**协作式取消**闸门。
+    用户取消时调用方置位本事件，各分片在「每次重试前 / 退避 sleep 前后」检查并抛
+    TranscriptionCancelledError 上抛。不置位的话，最多 8 个已经在跑的
+    `transcribe_file`（180s 超时 × 3 次重试 ≈ 9 分钟）在任务已标 cancelled 后
+    仍继续烧**付费**额度，且它们的异常无人接收。
     """
     if provider is None:
         provider = preferred_provider()
@@ -590,6 +621,9 @@ def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int
     label = provider_label(provider)
     last_reason = ''
     for attempt in range(max_retries):
+        if cancel_event is not None and cancel_event.is_set():
+            # 取消不回退：直接上抛，由调用方按取消语义收尾（不消耗本次额度）
+            raise TranscriptionCancelledError('用户取消，转录中止')
         try:
             resp = _do_request(cfg, path, timeout)
         except (httpx.TimeoutException, httpx.TransportError) as e:
@@ -630,8 +664,37 @@ def transcribe_file(path: str, timeout: Optional[float] = None, max_retries: int
                 logger.warning(f'云端 ASR 服务错误（第 {attempt + 1}/{max_retries} 次）: {last_reason}')
 
         if attempt < max_retries - 1:
-            time.sleep(min(2 ** attempt, _BACKOFF_CAP))
+            if cancel_event is not None and cancel_event.wait(min(2 ** attempt, _BACKOFF_CAP)):
+                raise TranscriptionCancelledError('用户取消，转录中止')
     raise CloudASRUnavailableError(f'云端 ASR 重试 {max_retries} 次后仍失败: {last_reason}')
+
+
+def _drain_futures(futures, timeout: float = _INFLIGHT_DRAIN_TIMEOUT) -> int:
+    """等待在飞分片线程收尾并**消费掉每个 future 的异常**，返回超时后仍在跑的线程数。
+
+    ★ B3 修复（2026-10-13）。两个后果都要消掉：
+    1. 异常无人 `result()` → 回收时线程库打 "Future exception was never retrieved"，
+       日志被噪声淹没，真正的失败原因反而看不见；
+    2. 不等就删分片 → 仍在读文件的线程在 Windows 上撞删除（OSError 被吞）或读到
+       不存在的分片，云端片段白付费。
+
+    等待有上限：一次在飞的 httpx 请求最长 180s，不能为了收尾把取消卡成更长的等待。
+    超限只记日志（可见可行动），随后照常删分片——线程是 daemon，池随进程退出。
+    """
+    end = time.time() + max(timeout, 0.0)
+    still_running = 0
+    for future in list(futures):
+        remaining = max(end - time.time(), 0.0)
+        try:
+            future.exception(timeout=remaining)  # 只取值不抛出：异常在主循环已处理过
+        except _FutTimeoutError:
+            future.cancel()  # 仅对未开始的 future 生效；已在跑的置位 cancel_event 收敛
+            still_running += 1
+        except CancelledError:
+            continue
+        except Exception as e:  # 理论上不会：exception() 不重抛被存的异常
+            logger.warning(f'分片线程收尾时读取异常失败: {type(e).__name__}: {e}')
+    return still_running
 
 
 def _rescue_failed_chunks(
@@ -791,9 +854,14 @@ def transcribe_audio_cloud(
 
     executor = ThreadPoolExecutor(max_workers=_concurrency(),
                                   thread_name_prefix='cloud-asr')
+    # ★ B3：全部分片共享一个协作式取消闸门。取消/失败时置位，在飞的 transcribe_file
+    #   在下一个重试边界退出，不再在任务已结束后继续烧付费额度。
+    cancel_event = threading.Event()
+    futures: dict = {}
     try:
         futures = {
-            executor.submit(transcribe_file, cp, provider=provider): (i, seg_start, seg_end, cp)
+            executor.submit(transcribe_file, cp, provider=provider,
+                            cancel_event=cancel_event): (i, seg_start, seg_end, cp)
             for i, (cp, (seg_start, seg_end)) in enumerate(zip(chunk_paths, segments))
         }
         completed = 0
@@ -864,13 +932,25 @@ def transcribe_audio_cloud(
             results.extend(rescued_texts)
             rescued = len(rescued_texts)
     finally:
-        # 取消/失败也要停掉排队任务并清理临时分片，不留垃圾占下载目录
+        # 取消/失败也要停掉排队任务并清理临时分片，不留垃圾占下载目录。
+        # 顺序要紧：先 cancel_futures 把**未开始**的 future 取消掉（否则 _drain_futures
+        # 会排队等它们跑完 = 白烧额度），再置位闸门让在飞的分片在重试边界退出并收尾。
         executor.shutdown(wait=False, cancel_futures=True)
+        cancel_event.set()
+        still_running = _drain_futures(futures) if futures else 0
+        if still_running:
+            # 可见可行动：分片仍可能被读，下面删文件有风险，如实记录而不是静默吞掉
+            logger.warning(
+                f'{still_running} 个云端分片请求在 {_INFLIGHT_DRAIN_TIMEOUT:.0f}s 内仍未结束'
+                f'（单次请求最长 {_call_timeout():.0f}s），已跳过等待并继续清理分片；'
+                f'这些请求可能仍会产生云端计费'
+            )
         for cp in chunk_paths:
             try:
                 Path(cp).unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as e:
+                # Windows 上仍被在飞线程占用时会撞删除：记日志便于用户手动清理
+                logger.warning(f'清理云端分片失败（{Path(cp).name}: {e}），请稍后手动删除')
 
     # 延迟画像：单片延迟波动大（旧 SenseVoice 实测 6s~300s+，mimo ~1-10s），
     # 中位/p90 直接决定整条转录快慢；日志留档便于诊断"云端突然变慢"

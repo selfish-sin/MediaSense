@@ -416,6 +416,22 @@ def _get_audio_duration_seconds(audio_path: str) -> Optional[float]:
         return None
 
 
+def media_duration_seconds(path) -> Optional[float]:
+    """媒体文件是否可解码 + 时长（秒）。**None = 取不到**（ffprobe 缺失/文件截断/无音轨）。
+
+    断点续传场景的通用有效性闸门（2026-10-13）：只看「后缀在白名单 + size > 1000」
+    会把下载中断留下的半截文件当完整素材复用——抖音直链下载曾直接往最终 `.mp4`
+    写（现已改为 `.part` + 原子改名），升级前遗留的坏文件仍会被捡起，
+    最终产出静默截断的转录并标记 completed。mp4 的 moov 默认在文件尾，
+    截断后 ffprobe 取不到时长，正好被这里拦住。
+
+    可用性前提：`ffprobe` 可解析时长才返回数值；环境里没有 ffprobe 时返回 None，
+    调用方需自行决定「跳过校验」而不是「判定文件损坏」——
+    见 main.py `_acquire_audio` 里的 ffprobe 可用性前置判断。
+    """
+    return _get_audio_duration_seconds(str(path))
+
+
 def _split_audio_chunks(audio_path: str, chunk_seconds: int = 300) -> list:
     """将音频切分为等长 WAV 片段
 
@@ -1042,6 +1058,11 @@ def transcribe_audio_sample(audio_path: str, max_seconds: float = 90.0, language
     会把清晰中文幻觉成英文（“什么是经方”→"What is the old?"），
     导致相似度恒≈0 误杀所有中文字幕（见 2026-09-08 复盘）。
     失败抛异常，由调用方决定是否保留原字幕。
+
+    ★ B7 修复（2026-10-13）：`subprocess.run(..., timeout=120)` 原先在 try 之外，
+    ffmpeg 超时/异常时还没进负责 `sample_wav.unlink()` 的 finally → 补录路径对**每个**
+    失败分片都调本函数，一次云端抖动可能留下 N 个 `*_cloud_NNN_sample.wav`。
+    现在 ffmpeg 也在清理范围内。
     """
     src = Path(audio_path)
     sample_wav = src.with_name(f'{src.stem}_sample.wav')
@@ -1053,10 +1074,10 @@ def transcribe_audio_sample(audio_path: str, max_seconds: float = 90.0, language
         '-acodec', 'pcm_s16le',
         str(sample_wav),
     ]
-    result = subprocess.run(cmd, capture_output=True, check=False, timeout=120)
-    if not sample_wav.exists() or sample_wav.stat().st_size <= 0:
-        raise Exception(f'ffmpeg 截取音频开头失败（returncode={result.returncode}）')
     try:
+        result = subprocess.run(cmd, capture_output=True, check=False, timeout=120)
+        if not sample_wav.exists() or sample_wav.stat().st_size <= 0:
+            raise Exception(f'ffmpeg 截取音频开头失败（returncode={result.returncode}）')
         model_path, _actual_size, local_only = _select_model('base')
         model = _get_whisper_model(
             model_path, 'cpu', 'int8',
@@ -1075,8 +1096,8 @@ def transcribe_audio_sample(audio_path: str, max_seconds: float = 90.0, language
     finally:
         try:
             sample_wav.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning(f'清理抽查音频片段失败（{sample_wav.name}: {e}），请手动删除')
 
 
 def _transcription_cache_key(audio_path, engine, language, speaker_diarization,

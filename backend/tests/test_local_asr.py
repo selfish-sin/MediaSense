@@ -6,7 +6,10 @@ VAD padding 边界、SRT/TXT 写盘契约（复用云端句级切分，时间轴
 识别主链路（VAD→识别→标点）依赖 1.1GB 本地模型，由真实冒烟覆盖，不在单测内。
 """
 import sys
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -393,3 +396,173 @@ def test_write_outputs_empty_results_writes_empty_files(tmp_path):
     assert count == 0
     assert Path(srt).read_text(encoding='utf-8') == ''
     assert Path(txt).read_text(encoding='utf-8') == ''
+
+
+# ============ B5：按需下载与转录内置检查必须互斥（2026-10-13） ============
+# 回归症状：_download_lock 只保护后台下载的状态字典，转录路径完全不查"是否已在下载"。
+# 模型管理页点下载（后台线程）与一个显式选 firered 的任务同时发生 → 两边都判定
+# engine_ready()==False → 两个线程交错写同一个 FIRERED_MODEL_DIR.tar.bz2.part →
+# tmp.replace(dest) 得到损坏的 tar → 838MB 下载白费。
+
+class TestEnsureEngineReadyMutex:
+    """两个并发 _ensure_engine_ready 不得同时进入下载阶段。"""
+
+    @staticmethod
+    def _patch_download_tracking(monkeypatch, tmp_path, hold=0.3, calls=None):
+        calls = calls if calls is not None else []
+        guard = threading.Lock()
+        inflight = {'now': 0, 'max': 0}
+
+        def fake_download_file(urls, dest, label, progress_callback=None,
+                               cancel_check=None, base=0.0, span=8.0, hint_target=None):
+            with guard:
+                inflight['now'] += 1
+                inflight['max'] = max(inflight['max'], inflight['now'])
+                calls.append(label)
+            try:
+                time.sleep(hold)
+                Path(dest).write_bytes(b'archive')
+            finally:
+                with guard:
+                    inflight['now'] -= 1
+        monkeypatch.setattr(local_asr, '_download_file', fake_download_file)
+        return inflight, calls
+
+    def _one_archive_spec(self, tmp_path, monkeypatch):
+        spec = SimpleNamespace(
+            name='FireRedASR',
+            size_hint='1.1GB',
+            archives=[SimpleNamespace(
+                kind='tar', label='FireRed', urls=['https://x/p.tar.bz2'],
+                satisfied=None, dest=lambda: tmp_path / 'pack')],
+        )
+        monkeypatch.setitem(local_asr.LOCAL_ENGINES, 'unit-test-engine', spec)
+        return spec
+
+    def test_concurrent_calls_are_serialised(self, tmp_path, monkeypatch):
+        self._one_archive_spec(tmp_path, monkeypatch)
+        inflight, calls = self._patch_download_tracking(monkeypatch, tmp_path, hold=0.3)
+        monkeypatch.setattr(local_asr, '_extract_archive', lambda *a, **k: None)
+        # 模型始终不就绪：两次调用都必须真的进下载阶段，才谈得上互斥
+        monkeypatch.setattr(local_asr, 'engine_ready', lambda key: False)
+        monkeypatch.setattr(local_asr, 'engine_part_status', lambda key: [])
+
+        errors = []
+
+        def run():
+            try:
+                local_asr._ensure_engine_ready('unit-test-engine')
+            except Exception as e:  # 完整性校验会失败（测试只关心互斥）
+                errors.append(e)
+
+        threads = [threading.Thread(target=run) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=15)
+
+        assert len(calls) == 2, '两次调用都应走到下载阶段'
+        assert inflight['max'] == 1, f'两个线程并发写同一个 .part（max={inflight["max"]}）'
+
+    def test_waits_for_running_download_then_skips_redownload(self, tmp_path, monkeypatch):
+        """等待期间模型已被别人下好 → 不重复下载"""
+        self._one_archive_spec(tmp_path, monkeypatch)
+        calls = []
+        self._patch_download_tracking(monkeypatch, tmp_path, hold=0.3, calls=calls)
+        monkeypatch.setattr(local_asr, '_extract_archive', lambda *a, **k: None)
+
+        ready = {'flag': False}
+        # 第一个线程在下载；第二个线程进来时已就绪 → 立即返回，不重复下载
+        monkeypatch.setattr(local_asr, 'engine_ready', lambda key: ready['flag'])
+
+        first = threading.Thread(
+            target=lambda: _try(local_asr._ensure_engine_ready, 'unit-test-engine'))
+        first.start()
+        time.sleep(0.1)
+        ready['flag'] = True
+        second_started = time.time()
+        local_asr._ensure_engine_ready('unit-test-engine')
+        second_done = time.time()
+
+        first.join(timeout=15)
+        assert len(calls) == 1, '模型已就绪却仍重复下载'
+        assert second_done - second_started < 0.3, '等待期间就绪了却仍阻塞在锁上'
+
+    def test_waiting_can_be_cancelled(self, tmp_path, monkeypatch):
+        self._one_archive_spec(tmp_path, monkeypatch)
+        self._patch_download_tracking(monkeypatch, tmp_path, hold=5.0)
+        monkeypatch.setattr(local_asr, '_extract_archive', lambda *a, **k: None)
+        monkeypatch.setattr(local_asr, 'engine_ready', lambda key: False)
+        monkeypatch.setattr(local_asr, 'engine_part_status', lambda key: [])
+
+        blocker = threading.Thread(
+            target=lambda: _try(local_asr._ensure_engine_ready, 'unit-test-engine'), daemon=True)
+        blocker.start()
+        time.sleep(0.2)
+        with pytest.raises(TranscriptionCancelledError):
+            local_asr._ensure_engine_ready(
+                'unit-test-engine', cancel_check=lambda: True)
+        blocker.join(timeout=20)
+
+
+def _try(fn, *args):
+    try:
+        fn(*args)
+    except Exception:
+        pass
+
+
+# ============ B6：补录路径也必须取引擎锁（2026-10-13） ============
+# 回归症状：transcribe_chunk_text 直接 _create_recognizer，既不加 _FIRERED_LOCK 也不更新
+# 忙碌状态 → engine_busy('firered') 在补录期返回 False，remove_engine 会在补录进行中
+# rmtree 掉模型目录；同时补录与完整转录的 1.3GB 模型可能同时在内存里。
+
+class TestChunkTextTakesEngineLock:
+
+    @pytest.fixture
+    def stubbed_sherpa(self, tmp_path, monkeypatch):
+        import numpy as np
+        seen = {}
+        monkeypatch.setattr(local_asr, '_load_sherpa', lambda: object())
+        monkeypatch.setattr(
+            local_asr, '_create_recognizer',
+            lambda sherpa: seen.setdefault('busy_at_create', local_asr.firered_busy()))
+        monkeypatch.setattr(local_asr, '_create_vad', lambda sherpa: object())
+        monkeypatch.setattr(local_asr, '_create_punct', lambda sherpa: object())
+        wav = tmp_path / 'chunk.wav'
+        wav.write_bytes(b'RIFF')
+        monkeypatch.setattr(local_asr, '_to_wav_16k_mono', lambda p, *a, **k: str(wav))
+        monkeypatch.setattr(
+            local_asr, '_read_wav_samples', lambda p: (np.array([0.0, 1.0]), 16000))
+        monkeypatch.setattr(local_asr, '_detect_speech_segments', lambda v, s, r: [])
+        monkeypatch.setattr(local_asr, '_pad_vad_boundaries', lambda raw, n, sr: [])
+        return seen
+
+    def test_busy_flag_true_during_rescue(self, stubbed_sherpa):
+        assert local_asr.transcribe_chunk_text('chunk.mp3') == ''
+        assert stubbed_sherpa['busy_at_create'] is True, '补录期 engine_busy() 为 False，删除保护失效'
+
+    def test_remove_engine_refused_during_rescue(self, stubbed_sherpa, monkeypatch):
+        """补录进行中调用 remove_engine 必须被拒（UI「正在转录中，请等待」）"""
+        state = {'refused': None, 'deleted': False}
+
+        def blocking(_sh):
+            state['refused'] = _try_remove(local_asr, state)
+            return object()
+
+        monkeypatch.setattr(local_asr, '_create_recognizer', blocking)
+        worker = threading.Thread(
+            target=lambda: local_asr.transcribe_chunk_text('chunk.mp3'), daemon=True)
+        worker.start()
+        time.sleep(0.2)
+        worker.join(timeout=10)
+        assert state['refused'] == 'busy', '补录中仍可删除模型文件'
+
+
+def _try_remove(mod, state):
+    try:
+        mod.remove_engine('firered')
+        state['deleted'] = True
+        return 'deleted'
+    except Exception as e:
+        return 'busy' if '转录中' in str(e) else f'other: {e}'

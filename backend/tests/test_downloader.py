@@ -2,9 +2,12 @@
 downloader 下载服务纯逻辑函数测试
 """
 import asyncio
+import subprocess
 import time
 import pytest
 from types import SimpleNamespace
+
+from services import downloader
 from services.downloader import (
     detect_platform,
     _format_srt_time,
@@ -1314,3 +1317,137 @@ class TestBiliRiskControlAndBackoff:
         started = time.time()
         _wait_bili_risk_cooldown()
         assert time.time() - started >= 0.04
+
+
+# ============ B2：frozen(打包版) 的 yt-dlp 调用必须真的超时（2026-10-13） ============
+# 回归症状：getattr(sys,'frozen',False) 为真时走 _yt_dlp.main() 分支，该分支**完全不消费
+# timeout**（只有非 frozen 的 subprocess.run 消费它）。项目以 MediaSense.spec 打包发行，
+# 实际用户跑的就是这个分支 → yt-dlp 遇 412 重试循环/半开连接即长期不返回 →
+# 「下载超时(600s)」「字幕抓取超时(120s)」提示永不出现，任务永久挂住并一直占着
+# 并发信号量（MAX_CONCURRENT_JOBS=2 → 挂 2 个整站排队卡死）。
+
+class TestFrozenYtdlpTimeout:
+    """装一个会 sleep 的假 yt_dlp 模块，验证 timeout 真的能打断等待。"""
+
+    @staticmethod
+    def _install_fake_yt_dlp(monkeypatch, fake_main):
+        import sys as _sys
+        import types
+        mod = types.ModuleType('yt_dlp')
+        mod.main = fake_main
+        monkeypatch.setitem(_sys.modules, 'yt_dlp', mod)
+        monkeypatch.setattr(downloader.sys, 'frozen', True, raising=False)
+
+    def test_hanging_main_raises_timeout_expired(self, monkeypatch):
+        def slow_main(args):
+            time.sleep(30)  # 模拟 yt-dlp 卡死
+            print('never')
+
+        self._install_fake_yt_dlp(monkeypatch, slow_main)
+        started = time.time()
+        with pytest.raises(subprocess.TimeoutExpired):
+            downloader._run_ytdlp(['--skip-download', 'https://x'], timeout=1)
+        assert time.time() - started < 10, 'frozen 分支没有真正消费 timeout'
+
+    def test_fast_main_returns_compat_result(self, monkeypatch, capsys):
+        """未超时时行为不变：SystemExit 码与 stdout/stderr 原样带回"""
+
+        def quick_main(args):
+            print('[download] ok')
+            raise SystemExit(0)
+
+        self._install_fake_yt_dlp(monkeypatch, quick_main)
+        result = downloader._run_ytdlp(['--skip-download', 'https://x'], timeout=30)
+        assert result.returncode == 0
+        assert b'[download] ok' in result.stdout
+        assert capsys.readouterr().out == '', 'yt-dlp 输出泄漏到进程 stdout'
+
+    def test_main_exception_is_reraised(self, monkeypatch):
+        def bad_main(args):
+            raise RuntimeError('yt-dlp 内部炸了')
+
+        self._install_fake_yt_dlp(monkeypatch, bad_main)
+        with pytest.raises(RuntimeError, match='yt-dlp 内部炸了'):
+            downloader._run_ytdlp(['--skip-download', 'https://x'], timeout=30)
+
+
+# ============ B8：临时 cookie 文件在异常/取消路径也必须删除（2026-10-13） ============
+# 回归症状：删除语句只在「成功」与「走完循环」两条路径上；协程被取消
+# （CancelledError 是 BaseException，`except Exception` 抓不到）时明文 SESSDATA
+# 留在 DATA_DIR。
+
+class TestBilibiliCookieCleanup:
+
+    @staticmethod
+    def _cookie_file(data_dir):
+        return data_dir / '.bilibili_cookies.txt'
+
+    @pytest.fixture
+    def cookie_env(self, tmp_path, monkeypatch):
+        data_dir = tmp_path / 'data'
+        data_dir.mkdir()
+        out_dir = tmp_path / 'job'
+        out_dir.mkdir()
+        monkeypatch.setattr(downloader, 'DATA_DIR', data_dir)
+        monkeypatch.setattr(downloader, 'load_cookies', lambda: {'SESSDATA': 'plain-secret'})
+        monkeypatch.setattr(downloader, '_ensure_buvid', lambda: {'buvid3': 'B'})
+        return data_dir, out_dir
+
+    @pytest.mark.asyncio
+    async def test_cancelled_does_not_leak_plaintext_cookie(self, cookie_env, monkeypatch):
+        data_dir, out_dir = cookie_env
+
+        def boom(args, **kwargs):
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(downloader, '_run_ytdlp', boom)
+        with pytest.raises(asyncio.CancelledError):
+            await downloader._extract_bilibili_subtitles_ytdlp(
+                'https://www.bilibili.com/video/BV1xx411c7mD', out_dir)
+        assert not self._cookie_file(data_dir).exists(), '取消后明文 SESSDATA 残留'
+
+    @pytest.mark.asyncio
+    async def test_uncaught_exception_does_not_leak_cookie(self, cookie_env, monkeypatch):
+        data_dir, out_dir = cookie_env
+
+        async def boom(*a, **kw):
+            raise RuntimeError('抓取过程炸了')
+
+        monkeypatch.setattr(downloader, '_bili_ytdlp_subs', boom)
+        with pytest.raises(RuntimeError):
+            await downloader._extract_bilibili_subtitles_ytdlp(
+                'https://www.bilibili.com/video/BV1xx411c7mD', out_dir)
+        assert not self._cookie_file(data_dir).exists(), '异常路径明文 SESSDATA 残留'
+
+    @pytest.mark.asyncio
+    async def test_cookie_deleted_on_normal_failure(self, cookie_env, monkeypatch):
+        data_dir, out_dir = cookie_env
+        monkeypatch.setattr(
+            downloader, '_run_ytdlp',
+            lambda args, **kw: SimpleNamespace(returncode=1, stdout=b'', stderr=b'412'))
+        result = await downloader._extract_bilibili_subtitles_ytdlp(
+            'https://www.bilibili.com/video/BV1xx411c7mD', out_dir)
+        assert result['success'] is False
+        assert not self._cookie_file(data_dir).exists()
+
+    @pytest.mark.asyncio
+    async def test_cookie_deleted_on_success(self, cookie_env, monkeypatch):
+        data_dir, out_dir = cookie_env
+        body = (
+            '1\n00:00:00,000 --> 00:01:00,000\n'
+            '这是一条足够长的中文字幕内容用于通过时间覆盖校验\n\n'
+        )
+        state = {'n': 0}
+
+        def fake(args, **kw):
+            # 第一次调用时产出字幕（模拟 yt-dlp 写盘）
+            state['n'] += 1
+            if state['n'] == 1:
+                (out_dir / '测试标题.srt').write_text(body, encoding='utf-8')
+            return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+
+        monkeypatch.setattr(downloader, '_run_ytdlp', fake)
+        result = await downloader._extract_bilibili_subtitles_ytdlp(
+            'https://www.bilibili.com/video/BV1xx411c7mD', out_dir, video_duration=60.0)
+        assert result['success'] is True
+        assert not self._cookie_file(data_dir).exists()

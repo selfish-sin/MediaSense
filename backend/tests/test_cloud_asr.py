@@ -4,14 +4,17 @@
 不触网：_do_request / detect_silences / export_chunks / transcribe_file 均可注入替身。
 export_chunks 用项目自带 ffmpeg 生成真实音频验证（毫秒级，不触网）。
 """
+import gc
+import logging
 import shutil
 import subprocess
+import threading
 
 import httpx
 import pytest
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from services import cloud_asr
 from services.cloud_asr import (
@@ -904,3 +907,126 @@ class TestEmptyTextIsFailure:
             cloud_asr, '_do_request',
             lambda cfg, p, t: self._mock_200({'choices': [{'message': {'content': '正常转写文本'}}]}))
         assert transcribe_file('a.mp3', provider='mimo', max_retries=1) == '正常转写文本'
+
+
+# ============ B4：分片导出中途失败必须清掉已落盘分片（2026-10-13） ============
+# 回归症状：export_chunks 抛错时清理逻辑还没进 transcribe_audio_cloud 的 finally，
+# 20MB 左右的 xxx_cloud_NNN.mp3 全留在 job_dir（该目录可经 /api/download/file 对外服务）。
+
+class TestExportChunksCleanupOnFailure:
+
+    @staticmethod
+    def _src(tmp_path):
+        p = tmp_path / 'broken_audio.wav'
+        p.write_bytes(b'\x00' * 16)
+        return p
+
+    def test_ffmpeg_timeout_mid_export_removes_written_chunks(self, monkeypatch, tmp_path):
+        src = self._src(tmp_path)
+        calls = {'n': 0}
+
+        def fake_run(cmd, **kw):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                Path(cmd[-1]).write_bytes(b'\x00' * 64)  # 第一片成功落盘
+                return subprocess.CompletedProcess(cmd, 0, '', '')
+            raise subprocess.TimeoutExpired(cmd, 300)
+
+        monkeypatch.setattr(cloud_asr.subprocess, 'run', fake_run)
+        with pytest.raises(subprocess.TimeoutExpired):
+            cloud_asr.export_chunks(str(src), [1.0, 2.0, 3.0])
+        assert calls['n'] == 2, '未在第二片触发超时'
+        assert list(tmp_path.glob('*_cloud_*.mp3')) == [], '导出中断后残留分片未清理'
+
+    def test_ffmpeg_error_mid_export_removes_written_chunks(self, monkeypatch, tmp_path):
+        src = self._src(tmp_path)
+        calls = {'n': 0}
+
+        def fake_run(cmd, **kw):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                Path(cmd[-1]).write_bytes(b'\x00' * 64)
+                return subprocess.CompletedProcess(cmd, 0, '', '')
+            return subprocess.CompletedProcess(cmd, 1, '', 'disk full')
+
+        monkeypatch.setattr(cloud_asr.subprocess, 'run', fake_run)
+        with pytest.raises(cloud_asr.CloudASRUnavailableError):
+            cloud_asr.export_chunks(str(src), [1.0, 2.0])
+        assert list(tmp_path.glob('*_cloud_*.mp3')) == [], '导出失败后残留分片未清理'
+
+
+# ============ B3：取消/失败后在飞的分片线程必须收尾（2026-10-13） ============
+# 回归症状：取消后最多 8 个已开跑的 transcribe_file（180s × 3 次重试）继续烧付费额度，
+# 异常无人 result() → "Future exception was never retrieved"，finally 又先删了分片。
+
+class TestInFlightCancel:
+
+    def test_transcribe_file_makes_no_request_when_already_cancelled(self, asr_enabled):
+        event = threading.Event()
+        event.set()
+
+        def boom(*a, **k):
+            raise AssertionError('取消后不应再发起云端请求（会继续烧付费额度）')
+
+        with patch.object(cloud_asr, '_do_request', boom):
+            with pytest.raises(TranscriptionCancelledError):
+                transcribe_file('a.mp3', provider='mimo', cancel_event=event)
+
+    def test_transcribe_file_stops_retrying_after_cancel(self, asr_enabled, no_sleep):
+        calls = {'n': 0}
+        event = threading.Event()
+
+        def flaky(*a, **k):
+            calls['n'] += 1
+            event.set()  # 用户在第 1 次请求期间点了取消
+            raise httpx.ReadTimeout('boom')
+
+        with patch.object(cloud_asr, '_do_request', flaky):
+            with pytest.raises(TranscriptionCancelledError):
+                transcribe_file('a.mp3', provider='mimo', max_retries=3, cancel_event=event)
+        assert calls['n'] == 1, '取消后仍继续重试消耗额度'
+
+    def test_cancel_propagates_event_and_cleans_chunks(self, monkeypatch, tmp_path, fake_audio):
+        chunk_paths, _calls = _setup_orchestration(monkeypatch, tmp_path)
+        seen: dict = {}
+
+        def slow_transcribe(path, provider=None, cancel_event=None, **kw):
+            seen['event'] = cancel_event
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if cancel_event is not None and cancel_event.is_set():
+                    seen['saw_set'] = True
+                    raise TranscriptionCancelledError('用户取消，转录中止')
+                time.sleep(0.01)
+            return '不该走到的兜底文本'
+
+        monkeypatch.setattr(cloud_asr, '_concurrency', lambda: 4)
+        monkeypatch.setattr(cloud_asr, 'transcribe_file', slow_transcribe)
+
+        def cancel_check():
+            time.sleep(0.05)  # 让分片线程先起来
+            return True
+
+        with pytest.raises(TranscriptionCancelledError):
+            transcribe_audio_cloud(fake_audio, provider='mimo', cancel_check=cancel_check)
+
+        assert seen.get('event') is not None, '共享取消事件没有传给分片任务'
+        assert seen.get('saw_set'), '取消后在飞的分片线程没被告知停止'
+        for cp in chunk_paths:
+            assert not Path(cp).exists(), f'取消后分片未清理: {cp}'
+
+    def test_drain_futures_consumes_exceptions(self, caplog):
+        """收尾必须消费每个 future 的异常，否则线程库在回收时刷噪声日志"""
+        from concurrent.futures import ThreadPoolExecutor
+        caplog.set_level(logging.DEBUG)
+        executor = ThreadPoolExecutor(max_workers=2)
+
+        def boom():
+            raise ValueError('boom')
+
+        futures = [executor.submit(boom), executor.submit(lambda: 'ok')]
+        assert cloud_asr._drain_futures(futures) == 0
+        futures.clear()  # 触发回收：异常未消费就会打 "exception was never retrieved"
+        gc.collect()
+        executor.shutdown()
+        assert not [r for r in caplog.records if 'never retrieved' in r.getMessage()]

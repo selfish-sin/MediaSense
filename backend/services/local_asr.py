@@ -253,6 +253,9 @@ _FIRERED_LOCK = _ENGINE_LOCKS['firered']
 # 记 engine 是因为「本地 ASR」页要显示哪个引擎在下；失败/中断后可重试，重启回 idle
 _download_state: dict = {'status': 'idle', 'engine': '', 'percent': 0, 'message': '', 'error': ''}
 _download_lock = threading.Lock()
+# ★ B5：下载阶段的进程级互斥，跨「模型管理页后台下载」与「转录路径按需下载」共用。
+#   两者抢同一个 *.tar.bz2.part 并发写会得到损坏的 tar（838MB 白费）。
+_ensure_lock = threading.Lock()
 _download_cancel = threading.Event()
 _download_thread: Optional[threading.Thread] = None
 
@@ -581,41 +584,63 @@ def _ensure_engine_ready(key: str, progress_callback=None, cancel_check=None) ->
 
     全就位时零开销直接返回。**兜底链路绝不调用本函数**——只有用户显式选择该引擎且
     模型缺失时才触发下载（避免"回退"变成隐性 1GB 下载）。
+
+    ★ B5 修复（2026-10-13）：下载阶段加模块级互斥 `_ensure_lock`。此前 `_download_lock`
+    只保护后台下载的状态字典，**转录路径完全不查"是否已在下载"**——用户在模型管理页点
+    下载（后台线程）与一个显式选 firered 的任务启动同时发生时，两边都判定
+    `engine_ready() == False`，两个线程交错写同一个 `FIRERED_MODEL_DIR.tar.bz2.part`，
+    `tmp.replace(dest)` 得到**损坏的 tar**，838MB 下载白费。
+    转录路径现在会等待在跑的下载完成（可被 cancel_check 中断），而不是并行写。
     """
     if engine_ready(key):
         return
     spec = LOCAL_ENGINES[key]
     if progress_callback:
         progress_callback(1, f'{spec.name} 模型未就绪，开始按需下载（{spec.size_hint or "仅首次"}）...')
-    logger.info(f'{key} 模型不完整，开始下载（{len(spec.archives)} 个包）')
 
-    total_archives = max(len(spec.archives), 1)
-    for idx, arc in enumerate(spec.archives):
-        dest = arc.dest()
-        if _archive_satisfied(arc):
-            continue
-        if arc.kind == 'tar' and dest.exists():
-            # 目录在但内容不齐：不擅自删除（可能是用户手动放置的第三方/更大版本导出）
+    if not _ensure_lock.acquire(blocking=False):
+        # 已有下载在跑：等待（而不是并行写同一个 .part）
+        if progress_callback:
+            progress_callback(1, f'{spec.name} 模型正在下载中，等待完成...')
+        logger.info(f'{key} 模型下载已被其它线程占用，等待中')
+        while not _ensure_lock.acquire(timeout=0.5):
+            if cancel_check and cancel_check():
+                raise TranscriptionCancelledError('用户取消，模型下载等待中止')
+    try:
+        # 等锁期间可能已被另一个线程下完：再判定一次，避免重复下载
+        if engine_ready(key):
+            logger.info(f'{key} 模型已由其它下载完成，跳过重复下载')
+            return
+        logger.info(f'{key} 模型不完整，开始下载（{len(spec.archives)} 个包）')
+        total_archives = max(len(spec.archives), 1)
+        for idx, arc in enumerate(spec.archives):
+            dest = arc.dest()
+            if _archive_satisfied(arc):
+                continue
+            if arc.kind == 'tar' and dest.exists():
+                # 目录在但内容不齐：不擅自删除（可能是用户手动放置的第三方/更大版本导出）
+                raise Exception(
+                    f'模型目录已存在但关键文件不完整：{dest}。'
+                    f'请先删除该目录（或手动补全所需文件）后再点下载'
+                )
+            base = _PROGRESS_MODEL_MAX * idx / total_archives
+            span = _PROGRESS_MODEL_MAX / total_archives
+            if arc.kind == 'file':
+                _download_file(arc.urls, dest, arc.label, progress_callback, cancel_check, base, span)
+            else:
+                archive = dest.parent / f'{dest.name}.tar.bz2'
+                _download_file(arc.urls, archive, arc.label,
+                               progress_callback, cancel_check, base, span, hint_target=dest)
+                _extract_archive(archive, dest, arc.label)
+
+        if not engine_ready(key):
+            missing = [p['label'] for p in engine_part_status(key) if not p['ready']]
             raise Exception(
-                f'模型目录已存在但关键文件不完整：{dest}。'
-                f'请先删除该目录（或手动补全所需文件）后再点下载'
+                f'模型下载完成但完整性校验未通过（缺失：{"、".join(missing) or "未知"}），'
+                f'请检查磁盘空间或手动放置模型到 {spec.removable[0]()}'
             )
-        base = _PROGRESS_MODEL_MAX * idx / total_archives
-        span = _PROGRESS_MODEL_MAX / total_archives
-        if arc.kind == 'file':
-            _download_file(arc.urls, dest, arc.label, progress_callback, cancel_check, base, span)
-        else:
-            archive = dest.parent / f'{dest.name}.tar.bz2'
-            _download_file(arc.urls, archive, arc.label,
-                           progress_callback, cancel_check, base, span, hint_target=dest)
-            _extract_archive(archive, dest, arc.label)
-
-    if not engine_ready(key):
-        missing = [p['label'] for p in engine_part_status(key) if not p['ready']]
-        raise Exception(
-            f'模型下载完成但完整性校验未通过（缺失：{"、".join(missing) or "未知"}），'
-            f'请检查磁盘空间或手动放置模型到 {spec.removable[0]()}'
-        )
+    finally:
+        _ensure_lock.release()
 
 
 def _ensure_model_ready(progress_callback=None, cancel_check=None) -> None:
@@ -752,31 +777,39 @@ def transcribe_chunk_text(audio_path: str, language: Optional[str] = None) -> st
     与完整转录同一管线（ffmpeg→VAD→识别→标点），模型每次重建（加载 ~5s，
     补录是低频路径，不值得为此常驻 1.3GB 内存）。
     失败上抛，由调用方决定是否放弃该分片。
-    """
-    sherpa = _load_sherpa()
-    recognizer = _create_recognizer(sherpa)
-    vad = _create_vad(sherpa)
-    punct = _create_punct(sherpa)
 
-    wav_tmp = _to_wav_16k_mono(audio_path)
-    try:
-        samples, sr = _read_wav_samples(wav_tmp)
-        if len(samples) == 0:
-            return ''
-        raw = _detect_speech_segments(vad, samples, sr)
-        speech_ranges = _pad_vad_boundaries(raw, len(samples), sr)
-        parts: List[str] = []
-        for seg_start, seg_end in speech_ranges:
-            seg_samples = samples[int(seg_start * sr):int(seg_end * sr)]
-            stream = recognizer.create_stream()
-            stream.accept_waveform(sr, seg_samples)
-            recognizer.decode_stream(stream)
-            text = (stream.result.text or '').strip()
-            if text:
-                parts.append(punct.add_punctuation(text))
-        return ''.join(parts)
-    finally:
-        Path(wav_tmp).unlink(missing_ok=True)
+    ★ B6 修复（2026-10-13）：补录入口现在也取**同一把引擎锁** `_FIRERED_LOCK`。
+    此前补录直接 `_create_recognizer`，既不加锁也不更新忙碌状态 →
+    `engine_busy('firered')` 在补录期返回 False，`remove_engine` 会在补录进行中
+    `shutil.rmtree` 掉模型目录，UI「正在转录中，请等待」这层保护形同虚设；
+    同时补录的 1.3GB 模型与完整转录的模型可能同时在内存里（峰值翻倍）。
+    锁是非重入的：调用方只有 cloud_asr._rescue_failed_chunks（不持锁），不会自死锁。
+    """
+    with _FIRERED_LOCK:
+        sherpa = _load_sherpa()
+        recognizer = _create_recognizer(sherpa)
+        vad = _create_vad(sherpa)
+        punct = _create_punct(sherpa)
+
+        wav_tmp = _to_wav_16k_mono(audio_path)
+        try:
+            samples, sr = _read_wav_samples(wav_tmp)
+            if len(samples) == 0:
+                return ''
+            raw = _detect_speech_segments(vad, samples, sr)
+            speech_ranges = _pad_vad_boundaries(raw, len(samples), sr)
+            parts: List[str] = []
+            for seg_start, seg_end in speech_ranges:
+                seg_samples = samples[int(seg_start * sr):int(seg_end * sr)]
+                stream = recognizer.create_stream()
+                stream.accept_waveform(sr, seg_samples)
+                recognizer.decode_stream(stream)
+                text = (stream.result.text or '').strip()
+                if text:
+                    parts.append(punct.add_punctuation(text))
+            return ''.join(parts)
+        finally:
+            Path(wav_tmp).unlink(missing_ok=True)
 
 
 def transcribe_audio_firered(

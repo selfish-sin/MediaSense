@@ -2,8 +2,12 @@
 transcriber 纯逻辑函数测试
 """
 import os
+import subprocess
 import sys
 import pytest
+from types import SimpleNamespace
+
+from services import transcriber
 from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -799,3 +803,69 @@ class TestChunkCheckpoints:
 
         assert not cp.exists()                    # 本任务的检查点被清掉
         assert other.exists()                     # 别的任务的不误删
+
+
+# ============ B7：ffmpeg 超时/异常也必须清理 sample wav（2026-10-13） ============
+# 回归症状：subprocess.run(..., timeout=120) 在 try 之外，抛异常时还没进负责
+# sample_wav.unlink() 的 finally。补录路径对**每个**失败分片都调本函数，一次云端抖动
+# 可能留下 N 个 *_cloud_NNN_sample.wav。
+
+class TestSampleWavCleanup:
+
+    @pytest.fixture
+    def sample_src(self, tmp_path):
+        src = tmp_path / 'xxx_cloud_000.mp3'
+        src.write_bytes(b'\x00' * 64)
+        return src
+
+    def test_ffmpeg_timeout_leaves_no_sample(self, sample_src, monkeypatch):
+        def boom(cmd, **kw):
+            # 真实场景：ffmpeg 已落了个半截 wav，随后被 timeout 杀掉
+            Path(cmd[-1]).write_bytes(b'RIFF' + b'\x00' * 16)
+            raise subprocess.TimeoutExpired(cmd='ffmpeg', timeout=120)
+
+        monkeypatch.setattr(transcriber.subprocess, 'run', boom)
+        with pytest.raises(subprocess.TimeoutExpired):
+            transcriber.transcribe_audio_sample(str(sample_src))
+        assert list(sample_src.parent.glob('*_sample.wav')) == [], 'ffmpeg 超时留下 sample wav'
+
+    def test_ffmpeg_failure_output_leaves_no_sample(self, sample_src, monkeypatch):
+        """ffmpeg 报错但已落了个空 sample.wav：失败分支也必须清掉"""
+        def fake_run(cmd, **kw):
+            Path(cmd[-1]).write_bytes(b'')
+            return subprocess.CompletedProcess(cmd, 1, b'', b'boom')
+
+        monkeypatch.setattr(transcriber.subprocess, 'run', fake_run)
+        with pytest.raises(Exception, match='ffmpeg 截取音频开头失败'):
+            transcriber.transcribe_audio_sample(str(sample_src))
+        assert list(sample_src.parent.glob('*_sample.wav')) == [], 'ffmpeg 失败留下 sample wav'
+
+    def test_success_path_still_cleans_sample(self, sample_src, monkeypatch):
+        """成功路径的清理不回退（回归保护）"""
+        def fake_run(cmd, **kw):
+            Path(cmd[-1]).write_bytes(b'RIFF' + b'\x00' * 32)
+            return subprocess.CompletedProcess(cmd, 0, b'', b'')
+
+        seg = SimpleNamespace(text=' 你好 ')
+        monkeypatch.setattr(transcriber.subprocess, 'run', fake_run)
+        monkeypatch.setattr(transcriber, '_select_model', lambda size: ('base', 0, False))
+        monkeypatch.setattr(
+            transcriber, '_get_whisper_model',
+            lambda *a, **k: SimpleNamespace(transcribe=lambda *a, **k: ([seg], {})))
+        assert transcriber.transcribe_audio_sample(str(sample_src), language='zh') == '你好'
+        assert list(sample_src.parent.glob('*_sample.wav')) == []
+
+    def test_transcribe_failure_still_cleans_sample(self, sample_src, monkeypatch):
+        def fake_run(cmd, **kw):
+            Path(cmd[-1]).write_bytes(b'RIFF' + b'\x00' * 32)
+            return subprocess.CompletedProcess(cmd, 0, b'', b'')
+
+        def boom(*a, **k):
+            raise RuntimeError('模型加载失败')
+
+        monkeypatch.setattr(transcriber.subprocess, 'run', fake_run)
+        monkeypatch.setattr(transcriber, '_select_model', lambda size: ('base', 0, False))
+        monkeypatch.setattr(transcriber, '_get_whisper_model', boom)
+        with pytest.raises(RuntimeError):
+            transcriber.transcribe_audio_sample(str(sample_src))
+        assert list(sample_src.parent.glob('*_sample.wav')) == []

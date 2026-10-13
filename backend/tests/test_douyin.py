@@ -2,7 +2,9 @@
 
 网络请求全部 mock，不发真网请求；签名函数（douyin_abogus）只做冒烟。
 """
+import httpx
 import pytest
+from pathlib import Path
 from unittest.mock import patch
 
 from services.douyin import (
@@ -303,3 +305,122 @@ class TestDownloadRetry:
                 await dy.download_douyin_video(
                     "https://www.douyin.com/video/7345493142857338146", tmp_path)
         assert "抖音下载失败" in str(ei.value)
+
+
+# ============ B1：直链下载必须先写 .part 再原子改名（2026-10-13） ============
+# 回归症状：断流重试 2 次都失败后，job_dir 里留下一个几 MB 的**截断 mp4**；
+# main._acquire_audio 的断点续传扫描只按「后缀 + size>1000」捞文件（.mp4 在白名单、
+# 截断文件 mtime 最新）→ 当成「已有完整音频」跳过下载 → 云端 ASR 对半截音频跑出
+# **静默截断的转录并标 completed**。
+
+class _FakeStream:
+    """httpx.stream 的替身：先吐若干块，再按需抛网络错误（模拟中途断流）。"""
+
+    def __init__(self, chunks, error=None, status_code=200, content_length='1024'):
+        self._chunks = list(chunks)
+        self._error = error
+        self.status_code = status_code
+        self.headers = {'content-length': content_length}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def iter_bytes(self, _size=None):
+        for c in self._chunks:
+            yield c
+        if self._error is not None:
+            raise self._error
+
+
+def _meta(aweme_id='7345493142857338146'):
+    return {
+        'aweme_id': aweme_id,
+        'title': '测试标题',
+        'author': '作者',
+        'play_url': 'https://v.test/play.mp4',
+        'duration_ms': 60000,
+    }
+
+
+class TestStreamDownloadPartFile:
+    def test_success_renames_part_to_final(self, tmp_path, monkeypatch):
+        from services import douyin
+        dest = tmp_path / '测试标题.mp4'
+        monkeypatch.setattr(
+            douyin.httpx, 'stream',
+            lambda *a, **k: _FakeStream([b'abc', b'def']))
+
+        prog = {'done': 0, 'total': 0}
+        douyin._stream_download_sync('https://v.test/play.mp4', dest, prog)
+
+        assert dest.read_bytes() == b'abcdef'
+        assert not (tmp_path / '测试标题.mp4.part').exists(), '半截文件未被清理'
+        assert prog['total'] == 1024 and prog['done'] == 6
+
+    def test_broken_stream_leaves_no_mp4(self, tmp_path, monkeypatch):
+        from services import douyin
+        dest = tmp_path / '测试标题.mp4'
+        monkeypatch.setattr(
+            douyin.httpx, 'stream',
+            lambda *a, **k: _FakeStream([b'x' * 4096], error=httpx.ReadError('boom')))
+
+        with pytest.raises(httpx.ReadError):
+            douyin._stream_download_sync('https://v.test/play.mp4', dest, None)
+
+        assert not dest.exists(), '断流后仍留下截断 mp4（会被断点续传误当完整音频）'
+        assert not (tmp_path / '测试标题.mp4.part').exists()
+
+    def test_empty_body_leaves_no_mp4(self, tmp_path, monkeypatch):
+        from services import douyin
+        dest = tmp_path / '空标题.mp4'
+        monkeypatch.setattr(douyin.httpx, 'stream', lambda *a, **k: _FakeStream([]))
+        with pytest.raises(douyin.DouyinError):
+            douyin._stream_download_sync('https://v.test/play.mp4', dest, None)
+        assert not dest.exists()
+
+
+class TestDownloadDouyinVideoNoTruncatedFile:
+
+    @pytest.mark.asyncio
+    async def test_both_attempts_fail_leaves_no_mp4(self, tmp_path, monkeypatch):
+        """两次直链都失败 → 抛异常，且 job_dir 里既无 .mp4 也无 .mp4.part"""
+        from services import douyin
+
+        async def fake_meta(url, refresh=False):
+            return _meta()
+
+        monkeypatch.setattr(douyin, 'fetch_video_meta', fake_meta)
+        monkeypatch.setattr(douyin, '_FFMPEG_BIN', tmp_path / 'no_ffmpeg')
+        monkeypatch.setattr(
+            douyin.httpx, 'stream',
+            lambda *a, **k: _FakeStream([b'y' * 8192], error=httpx.ReadError('boom')))
+
+        with pytest.raises(Exception, match='抖音下载失败'):
+            await douyin.download_douyin_video('https://v.douyin.com/x/', tmp_path)
+
+        assert list(tmp_path.glob('*.mp4')) == [], '失败后仍留下截断 mp4'
+        assert list(tmp_path.glob('*.part')) == [], '失败后残留半截文件'
+
+    @pytest.mark.asyncio
+    async def test_success_produces_complete_mp4(self, tmp_path, monkeypatch):
+        from services import douyin
+
+        async def fake_meta(url, refresh=False):
+            return _meta()
+
+        monkeypatch.setattr(douyin, 'fetch_video_meta', fake_meta)
+        monkeypatch.setattr(douyin, '_FFMPEG_BIN', tmp_path / 'no_ffmpeg')
+        monkeypatch.setattr(
+            douyin.httpx, 'stream',
+            lambda *a, **k: _FakeStream([b'z' * 100]))
+
+        path, title, platform = await douyin.download_douyin_video(
+            'https://v.douyin.com/x/', tmp_path)
+
+        assert platform == '抖音' and title == '测试标题'
+        assert path.endswith('.mp4') and not path.endswith('.part')
+        assert Path(path).read_bytes() == b'z' * 100
+        assert list(tmp_path.glob('*.part')) == []
