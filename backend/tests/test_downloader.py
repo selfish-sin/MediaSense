@@ -2,7 +2,10 @@
 downloader 下载服务纯逻辑函数测试
 """
 import asyncio
+import io
 import subprocess
+import sys
+import threading
 import time
 import pytest
 from types import SimpleNamespace
@@ -1340,8 +1343,13 @@ class TestFrozenYtdlpTimeout:
 
     def test_hanging_main_raises_timeout_expired(self, monkeypatch):
         def slow_main(args):
-            time.sleep(30)  # 模拟 yt-dlp 卡死
-            print('never')
+            # 模拟 yt-dlp 卡死。★ 输出必须写在超时**之前**：本用例留下的僵尸线程
+            # （Python 线程不可杀）会活过本用例，而 pytest 在用例之间会替换 sys.stdout，
+            # 僵尸醒来后写的那一句会落进**下一条**用例的 capsys 缓冲（已实测复现，
+            # 与被测实现无关）。hang 由 30s 收到 3s：仍远大于 timeout=1，同时不让
+            # 下一条用例为等这把锁白等近 30s。
+            print('[download] 正在下载…')
+            time.sleep(3)  # 模拟 yt-dlp 卡死
 
         self._install_fake_yt_dlp(monkeypatch, slow_main)
         started = time.time()
@@ -1369,6 +1377,95 @@ class TestFrozenYtdlpTimeout:
         self._install_fake_yt_dlp(monkeypatch, bad_main)
         with pytest.raises(RuntimeError, match='yt-dlp 内部炸了'):
             downloader._run_ytdlp(['--skip-download', 'https://x'], timeout=30)
+
+
+# ============ P0-3：frozen 超时后进程级 stdout 被永久损坏（2026-10-13） ============
+# 回归症状：锁由调用方持有，TimeoutExpired 的 raise 在 with 块内 → 锁先于僵尸释放，
+# 而僵尸仍在 _yt_dlp.main() 里、仍把 sys.stdout 指向自己的 wrapper。紧接着的第二次
+# 调用会与僵尸交错：捕获到僵尸的 wrapper 当 old_out；僵尸结束时把 sys.stdout 顶回真实
+# stdout → 第二次调用的重定向被顶掉（缓冲不完整）；第二次调用结束又把 sys.stdout 指回
+# 已 detach 的僵尸 wrapper → 此后进程内任何 print() 永久 ValueError。
+# 现在锁由 worker 自己持有，调用方只等一个 per-call 完成事件，拿不到锁就干净超时。
+
+class TestFrozenYtdlpStdoutIntegrity:
+    """超时 → 立即再调一次 → 僵尸在中途结束：缓冲完整 + 进程 stdout 仍可写。"""
+
+    @staticmethod
+    def _install_fake_yt_dlp(monkeypatch, fake_main):
+        import types
+        mod = types.ModuleType('yt_dlp')
+        mod.main = fake_main
+        monkeypatch.setitem(sys.modules, 'yt_dlp', mod)
+        monkeypatch.setattr(downloader.sys, 'frozen', True, raising=False)
+
+    def test_timeout_then_retry_never_corrupts_process_stdout(self, monkeypatch, capsys):
+        entry_stdout = sys.stdout
+        second_inside = threading.Event()   # 第二次调用已进入 fake_main（stdio 已接管）
+        release_zombie = threading.Event()  # 放卡死的第一次调用退出
+        b_printed = threading.Event()       # 第二次调用的标记内容已写出
+        state = {'n': 0}
+
+        def fake_main(args):
+            state['n'] += 1
+            if state['n'] == 1:
+                print('[yt-dlp] A1')
+                # 卡死：等 sequencer 放行；最多挂 2 秒，保证两种实现下都不会死锁
+                release_zombie.wait(2.0)
+                return
+            # 第二次调用：先通知「我已接管 stdio」，等僵尸退出后（它会还原
+            # sys.stdout 并 detach 自己的 wrapper）再打印 —— 这正是危险的交错窗口。
+            second_inside.set()
+            time.sleep(0.2)
+            for mark in ('B1', 'B2', 'B3'):
+                print(f'[yt-dlp] {mark}')
+            b_printed.set()
+            raise SystemExit(0)
+
+        def sequencer():
+            # 旧实现：第二次调用立刻拿到锁并接管 sys.stdout → 此时放僵尸退出。
+            # 新实现：第二次调用卡在等锁（没接管 stdio），本线程等满 5 秒不做事，
+            # 由僵尸自己在 2 秒上限后退出。
+            second_inside.wait(5.0)
+            time.sleep(0.05)
+            release_zombie.set()
+
+        self._install_fake_yt_dlp(monkeypatch, fake_main)
+        threading.Thread(target=sequencer, name='sequencer', daemon=True).start()
+        try:
+            # 第一次调用：卡死 → 必须抛标准超时异常
+            with pytest.raises(subprocess.TimeoutExpired):
+                downloader._run_ytdlp(['--skip-download', 'https://x/1'], timeout=1)
+
+            # 紧接着立即再调一次（僵尸此刻仍在跑）
+            result = downloader._run_ytdlp(['--skip-download', 'https://x/2'], timeout=30)
+
+            # (a) 第二次调用返回的 stdout 缓冲完整：三条标记都在、顺序不变
+            out = result.stdout
+            assert b_printed.is_set(), '第二次调用未真正跑完'
+            assert out.count(b'[yt-dlp] B') == 3, f'yt-dlp 输出不完整: {out!r}'
+            assert b'B1' in out and b'B2' in out and b'B3' in out
+            assert out.index(b'B1') < out.index(b'B2') < out.index(b'B3')
+            # 输出没有漏进进程 stdout（漏出去说明重定向被僵尸顶掉了）
+            assert capsys.readouterr().out == ''
+
+            # (b) 进程级 stdout 仍可写：既没被换掉，也没停在已 detach 的 wrapper 上
+            assert sys.stdout is entry_stdout, 'sys.stdout 被僵尸/第二次调用留在了别的对象上'
+            sys.stdout.write('[probe-stdout-alive]')
+            sys.stdout.flush()
+
+            # 哨兵 wrapper：write()+flush() 必须不抛 ValueError（底层 buffer 已 detach 时会抛）
+            sentinel = io.BytesIO()
+            wrapper = io.TextIOWrapper(sentinel, encoding='utf-8')
+            try:
+                wrapper.write('[sentinel-ok]')
+                wrapper.flush()
+            except ValueError as exc:
+                raise AssertionError(f'哨兵 wrapper 不可写（stdio 已损坏）: {exc}')
+            assert '[sentinel-ok]' in sentinel.getvalue().decode('utf-8')
+        finally:
+            release_zombie.set()
+            sys.stdout = entry_stdout  # 防止旧实现下损坏态污染后续测试输出
+            time.sleep(0.05)
 
 
 # ============ B8：临时 cookie 文件在异常/取消路径也必须删除（2026-10-13） ============

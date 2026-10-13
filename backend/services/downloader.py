@@ -245,49 +245,68 @@ def _run_ytdlp(args: list, timeout: int = 120):
                 self.stderr = err
 
         box: dict = {}
+        # per-call 完成事件：worker 真正走完（含还原 stdio + detach + 读缓冲）才置位
+        done = threading.Event()
 
         def _invoke() -> None:
-            # yt-dlp.main() 是同步阻塞调用且写进程级 stdio，放独立线程跑，主线程
-            # 负责 join(timeout)。
-            buf_out, buf_err = _io.BytesIO(), _io.BytesIO()
-            old_out, old_err = sys.stdout, sys.stderr
-            rc = 0
-            # ★ 局部持有 wrapper 引用并在还原后 detach()：否则 wrapper 被回收时会连带
-            #   关闭底层 BytesIO，后面 getvalue() 直接 ValueError（读不到 yt-dlp 输出）。
-            tw_out = _io.TextIOWrapper(buf_out, encoding='utf-8', errors='replace')
-            tw_err = _io.TextIOWrapper(buf_err, encoding='utf-8', errors='replace')
             try:
-                sys.stdout, sys.stderr = tw_out, tw_err
-                try:
-                    _yt_dlp.main(full_args)
-                except SystemExit as e:
-                    rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
-                except BaseException as e:  # 原样带回调用线程抛出，不吞错
-                    box['exc'] = e
-            finally:
-                for buf in (tw_out, tw_err):
+                # ★ 锁由 worker 自己持有（2026-10-13 P0-3 修复）：锁的持有期必须完整覆盖
+                #   「接管进程级 stdio → 调 main → 还原 sys.stdout → detach」全过程。
+                #   此前锁在**调用方**手上，调用方超时 raise 时锁先释放，而 worker 仍在
+                #   main() 里且仍把 sys.stdout 指向自己的 wrapper；下一次调用于是会与它
+                #   交错夺取 sys.stdout（捕获到僵尸 wrapper 当 old_out，僵尸结束时又把
+                #   sys.stdout 顶回真实 stdout），最终把进程 stdout 永久留在已 detach 的
+                #   wrapper 上 → 此后任何 print() 永久抛 ValueError。
+                #   现在锁在 worker 内，卡死的僵尸会一直占着锁，后续调用拿不到锁就
+                #   干净超时（调用方不碰 stdio），结构上不可能再交错。
+                with _YTDLP_STDIO_LOCK:
+                    # yt-dlp.main() 是同步阻塞调用且写进程级 stdio，放独立线程跑，
+                    # 调用方只负责 join(timeout)。
+                    buf_out, buf_err = _io.BytesIO(), _io.BytesIO()
+                    old_out, old_err = sys.stdout, sys.stderr
+                    rc = 0
+                    # ★ 局部持有 wrapper 引用并在还原后 detach()：否则 wrapper 被回收时会连带
+                    #   关闭底层 BytesIO，后面 getvalue() 直接 ValueError（读不到 yt-dlp 输出）。
+                    tw_out = _io.TextIOWrapper(buf_out, encoding='utf-8', errors='replace')
+                    tw_err = _io.TextIOWrapper(buf_err, encoding='utf-8', errors='replace')
                     try:
-                        buf.flush()
-                    except Exception:
-                        pass
-                sys.stdout, sys.stderr = old_out, old_err
-                tw_out.detach()
-                tw_err.detach()
-            box['rc'] = rc
-            box['out'] = buf_out.getvalue()
-            box['err'] = buf_err.getvalue()
+                        sys.stdout, sys.stderr = tw_out, tw_err
+                        try:
+                            _yt_dlp.main(full_args)
+                        except SystemExit as e:
+                            rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+                        except BaseException as e:  # 原样带回调用线程抛出，不吞错
+                            box['exc'] = e
+                    finally:
+                        for buf in (tw_out, tw_err):
+                            try:
+                                buf.flush()
+                            except Exception:
+                                pass
+                        sys.stdout, sys.stderr = old_out, old_err
+                        tw_out.detach()
+                        tw_err.detach()
+                    box['rc'] = rc
+                    box['out'] = buf_out.getvalue()
+                    box['err'] = buf_err.getvalue()
+            finally:
+                done.set()
 
-        with _YTDLP_STDIO_LOCK:
-            worker = threading.Thread(target=_invoke, name='yt-dlp-frozen', daemon=True)
-            worker.start()
-            worker.join(timeout if timeout and timeout > 0 else None)
-            if worker.is_alive():
-                # 无法中断已在跑的 yt-dlp（Python 线程不可杀）：放弃等待并抛标准超时异常，
-                # 让调用点走既有的超时分支。已知边界：僵尸线程可能继续往已还原的 stdio 写，
-                # 最多污染日志排版，不会阻塞任务流（daemon 线程不挡进程退出）。
-                logger.error(f'yt-dlp(frozen) 超时({timeout}s)，已放弃等待：{" ".join(full_args[:6])}...')
-                raise subprocess.TimeoutExpired(
-                    cmd=['yt_dlp(frozen)'] + full_args, timeout=timeout)
+        worker = threading.Thread(target=_invoke, name='yt-dlp-frozen', daemon=True)
+        worker.start()
+        worker.join(timeout if timeout and timeout > 0 else None)
+        if not done.is_set():
+            # worker 还在跑，或正卡在等上一个卡死调用的锁。此刻它持有/即将持有进程级
+            # stdio，调用方**绝不能碰 stdio**，只能干净抛标准超时异常让调用点走既有分支。
+            # Python 线程不可杀：僵尸会一直占锁，后续 yt-dlp 调用同样干净超时——
+            # 明确告知需重启应用，比静默损坏整个进程可诊断得多。
+            logger.error(
+                f'yt-dlp(frozen) 调用卡死未退出({timeout}s)，本次已跳过：'
+                f'{" ".join(full_args[:6])}...；该调用无法强制中断，'
+                f'请重启应用后再试（本次未影响其它任务的输出）'
+            )
+            raise subprocess.TimeoutExpired(
+                cmd=['yt_dlp(frozen)'] + full_args, timeout=timeout)
         if 'exc' in box:
             raise box['exc']
         return _R(box.get('rc', 1), box.get('out', b''), box.get('err', b''))
