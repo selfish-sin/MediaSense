@@ -10,17 +10,29 @@ YouTube Tool V2 - 深度研究模式处理器
 研究段落由用户自己选的 AI 模型（_call_ai）撰写，与搜索后端解耦。
 """
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from config import DEFAULT_MODEL
 from db.model_repo import get_model_by_key
 from services import web_search as web_search_service
-from services.ai_processor import _call_ai
+from services.ai_processor import _call_ai, _record_token_usage
 
 logger = logging.getLogger(__name__)
 
 # 每个研究主题检索条数（比追问多取一些，便于展开 800-1500 字）
 RESEARCH_SEARCH_RESULTS = 6
+# 检索摘要截断上限：沿用 web_search 的 strict 500 / broad 900 既有口径（routers/chat.py 同源）——
+# 深度研究要把网页正文喂给模型写 800-1500 字的论证段落，属 broad 档，故取 900。
+# （旧代码传的是签名里不存在的 content_size="high"，每主题必抛 TypeError。）
+RESEARCH_SNIPPET_LIMIT = 900
+
+
+def _add_usage(usage: Optional[Dict[str, int]], in_tok: int, out_tok: int) -> None:
+    """把一次 `_call_ai` 的真实 usage 累加进累计器（可选出参，调用方不传则只统计不回写）。"""
+    if usage is None:
+        return
+    usage['input'] = usage.get('input', 0) + (in_tok or 0)
+    usage['output'] = usage.get('output', 0) + (out_tok or 0)
 
 
 # ============ 主题提取 ============
@@ -28,8 +40,13 @@ RESEARCH_SEARCH_RESULTS = 6
 async def _extract_topics(
     text: str, title: str, model_cfg: Dict,
     sio=None, job_id: str = '', bypass_cache: bool = False,
+    usage: Optional[Dict[str, int]] = None,
 ) -> List[str]:
-    """从转录文本提取 3-8 个研究主题"""
+    """从转录文本提取 3-8 个研究主题
+
+    ★ usage（可选出参，2026-10-13）：真实 usage 累加进去——本函数此前丢弃 `_call_ai`
+      的 token，导致深度研究整条最贵路径在统计里恒记 0。失败路径（哨兵串）同样计入。
+    """
     if sio:
         from socket_handlers import emit_log
         await emit_log(sio, job_id, '🔬 深度研究：正在提取研究主题...')
@@ -52,11 +69,12 @@ async def _extract_topics(
 3. 每个主题简短精准，不超过 15 个字
 4. 只输出列表，不要解释"""
 
-    content, _, _ = await _call_ai(
+    content, in_tok, out_tok = await _call_ai(
         model_cfg, prompt, timeout=120.0,
         sio=sio, job_id=job_id, round_label='提取主题',
         bypass_cache=bypass_cache,
     )
+    _add_usage(usage, in_tok, out_tok)
     if content.startswith('[处理失败'):
         return ['核心内容分析', '背景知识扩展', '关键概念解析']
 
@@ -73,14 +91,18 @@ async def _extract_topics(
 async def _expand_topic(
     topic: str, transcript_snippet: str,
     model_cfg: Dict, sio=None, job_id: str = '', bypass_cache: bool = False,
+    usage: Optional[Dict[str, int]] = None,
 ) -> str:
     """对一个主题做联网检索，并交给用户所选模型写成研究段落。
 
     搜索后端由 `services/web_search` 统一决定（Ollama → Tavily → Firecrawl → DDGS），本函数只负责拼提示词；
     检索失败时如实告知（日志 + 提示词内注明），不假装有资料。
+
+    ★ usage（可选出参）：同上，累加本次撰写的真实 usage（失败哨兵同样计入）。
     """
     outcome = await web_search_service.web_search_collect(
-        topic, max_results=RESEARCH_SEARCH_RESULTS, content_size="high",
+        topic, max_results=RESEARCH_SEARCH_RESULTS,
+        snippet_limit=RESEARCH_SNIPPET_LIMIT,
     )
 
     if sio:
@@ -120,11 +142,12 @@ async def _expand_topic(
 3. 保留思辨性，不要写成百科词条
 4. 用中文"""
 
-    content, _, _ = await _call_ai(
+    content, in_tok, out_tok = await _call_ai(
         model_cfg, prompt, timeout=180.0,
         sio=sio, job_id=job_id, round_label=f'扩展·{topic[:15]}',
         bypass_cache=bypass_cache,
     )
+    _add_usage(usage, in_tok, out_tok)
     if not content or content.startswith('[处理失败'):
         return f'### {topic}\n\n（该主题研究扩展暂不可用）'
     return content
@@ -167,9 +190,15 @@ async def research_process(
         await emit_log(sio, job_id, f'🔬 搜索方式: {search_label}')
         await emit_log(sio, job_id, f'🔬 AI 模型: {model}')
 
+    # ★ token 累计（2026-10-13 修复 P1-5）：深度研究是单任务最贵路径（1 次提取主题 +
+    #   N 次扩展写作），此前全程丢弃 `_call_ai` 的 usage 并 `return article_md, 0, 0`，
+    #   结果页/统计页显示「零消耗」。失败路径（哨兵串）同样已烧 token，一并计入——
+    #   口径与 ai_process 一致：花了钱就要可见。
+    usage = {'input': 0, 'output': 0}
+
     # Step 1: 提取主题
     topics = await _extract_topics(text, title, model_cfg, sio, job_id,
-                                   bypass_cache=bypass_cache)
+                                   bypass_cache=bypass_cache, usage=usage)
 
     if sio:
         from socket_handlers import emit_log
@@ -188,7 +217,7 @@ async def research_process(
 
         section = await _expand_topic(
             topic, transcript_snippet, model_cfg, sio=sio, job_id=job_id,
-            bypass_cache=bypass_cache,
+            bypass_cache=bypass_cache, usage=usage,
         )
         expanded_sections.append(section)
 
@@ -220,4 +249,8 @@ async def research_process(
         await emit_progress(sio, job_id, 'ai', 100, '🔬 深度研究完成！')
         await emit_log(sio, job_id, f'🔬 深度研究完成: {len(article_md)} 字符')
 
-    return article_md, 0, 0
+    # 记账口径与 ai_process 相同：按**本次请求的模型 key** 记总账（与 generate_tags 记
+    # 实际使用模型不同——research 用的是固定单模型 _call_ai，无换模型信息可用）。
+    _record_token_usage(model, usage['input'], usage['output'], job_id)
+
+    return article_md, usage['input'], usage['output']
