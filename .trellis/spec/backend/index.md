@@ -140,10 +140,15 @@
 ### 批量端点上限（2026-10-13）
 
 - 任何按 `job_ids` 列表工作的端点都要先调 `routers.jobs.assert_batch_size`
-  （上限 `MAX_BATCH_JOB_IDS`=200）。`/api/export/batch` 与 `/batch-disk-info` 都会
+  （上限 `MAX_BATCH_JOB_IDS`）。`/api/export/batch` 与 `/batch-disk-info` 都会
   **逐条把完整 result_text 读进内存**（前者）或逐条递归统计磁盘（后者），
   全在一次请求内同步完成——无上限时是一次长时间阻塞的请求，内存峰值随选中数量线性增长。
 - 超限要**显式报错并给分批建议**，不做静默截断。
+- ★ **上限必须与前端 `HistoryView.SELECT_ALL_CAP` 对齐**（当前两侧都是 2000，
+  `test_routers.py::test_limit_constant_is_sane` 直接读前端源码断言两侧相等）。
+  前端「全选当前筛选」刻意以 2000 为安全上限并承诺「可跨页批量操作」，后端若取更小的
+  值，用户全选 500 条后点批量删除就会被凭空多出来的限制挡住。改任一侧必须同步改另一侧。
+  日后真成为性能问题，正确方向是服务端流式出 ZIP，而不是压低上限。
 
 ### AI 失败契约（2026-10-13 补充）
 
