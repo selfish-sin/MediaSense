@@ -361,3 +361,31 @@ class TestProxyBypass:
         monkeypatch.setattr(m.config, 'PROXY_BYPASS_HOSTS', [])
         m.apply_proxy_bypass_hosts()
         assert os.environ['NO_PROXY'] == 'localhost'
+
+
+class TestTokenUsageHistoryLimit:
+    """`/api/token-usage/history` 的 limit 必须有上下界（2026-10-13 修复 P1-7）。
+
+    此前签名是裸 `int`，而 SQLite 的 `LIMIT -1` **等于无上限**——`?limit=-1`
+    会把整张 token_usage 表拉进内存并全量返回（实测 SQLite 语义确认）。
+    全仓其它分页端点（list_jobs / search_transcripts）都用 Query(ge/le) 限住，
+    这里此前是唯一例外。
+    """
+
+    @pytest.fixture
+    def http_client(self):
+        from fastapi.testclient import TestClient
+        from main import app
+        # 不用 with 上下文：跳过 startup（DB 恢复/清理任务），路由 import 期已注册完
+        return TestClient(app, client=('127.0.0.1', 50000))
+
+    @pytest.mark.parametrize("bad", [-1, 0, 10_000_000])
+    def test_rejects_out_of_range(self, http_client, bad):
+        r = http_client.get("/api/token-usage/history", params={"limit": bad})
+        assert r.status_code == 422, f"limit={bad} 必须被 422 拒绝"
+
+    def test_accepts_default_and_valid_limits(self, http_client):
+        """加上界不能把正常调用挡掉。"""
+        assert http_client.get("/api/token-usage/history").status_code == 200
+        assert http_client.get("/api/token-usage/history", params={"limit": 1}).status_code == 200
+        assert http_client.get("/api/token-usage/history", params={"limit": 500}).status_code == 200

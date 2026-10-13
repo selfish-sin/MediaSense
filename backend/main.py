@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Dict, Any
 
 import socketio
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from starlette.middleware.cors import CORSMiddleware
@@ -286,16 +286,26 @@ def _read_log_tail(lines: int) -> list:
 
 
 @app.get("/api/logs", tags=["system"])
-async def get_logs(lines: int = 300):
+async def get_logs(lines: int = Query(300, ge=1, le=5000)):
     """返回后端日志文件最近 N 行（尾部窗口；不返回全文件行数——
-    前端以旧窗口末行为锚点做尾部同步，见 useBackendLogs.fetchLogs）"""
+    前端以旧窗口末行为锚点做尾部同步，见 useBackendLogs.fetchLogs）
+
+    ★ 上界必须给（2026-10-13）：负数会经 `all_lines[-lines:]` 反向切片成
+      `all_lines[|lines|:]`，语义变成「丢弃前 N 行、返回其余全部」。
+    """
     return {"lines": _read_log_tail(lines)}
 
 
 # ============ Token 统计接口（直接挂在 main，不单独建 router） ============
 @app.get("/api/token-usage/history", tags=["token"])
-async def get_token_usage_history(limit: int = 30):
-    """获取 Token 使用历史（按每次任务记录）"""
+async def get_token_usage_history(limit: int = Query(30, ge=1, le=500)):
+    """获取 Token 使用历史（按每次任务记录）
+
+    ★ 上界必须给（2026-10-13）：此前是裸 `int`，而 SQLite 的 `LIMIT -1`
+      等于「无上限」——`?limit=-1` 会把整张 token_usage 表拉进内存并全量返回。
+      全仓其它分页端点（list_jobs / search_transcripts）都用 Query(ge/le) 限住，
+      这里此前是唯一的例外。
+    """
     conn = get_connection()
     rows = conn.execute("""
         SELECT tu.id, tu.job_id, tu.model_key, tu.input_tokens, tu.output_tokens,

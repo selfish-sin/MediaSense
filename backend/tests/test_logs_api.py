@@ -67,7 +67,9 @@ class TestLogsApiContract:
         # 5000 行 × ~100B ≈ 500KB，窗口只覆盖尾部 ~256KB
         rows = [f"row{i}_" + "y" * 90 for i in range(1, 5001)]
         _write_log(monkeypatch, tmp_path, "\n".join(rows))
-        r = client.get("/api/logs", params={"lines": 100000})
+        # 请求量取参数上界 5000（2026-10-13 起 lines 有 le=5000 上界），
+        # 仍远大于 256KB 窗口能容纳的行数，窗口语义照常被验证。
+        r = client.get("/api/logs", params={"lines": 5000})
         lines = r.json()["lines"]
         # 末行是文件真实最后一行
         assert lines[-1] == rows[-1]
@@ -76,3 +78,19 @@ class TestLogsApiContract:
         # 每行都是完整行（被切在中间的半行必须被丢弃，不能混进响应）
         pat = re.compile(r"^row\d+_y{90}$")
         assert all(pat.match(x) for x in lines), lines[0]
+
+    @pytest.mark.parametrize("bad", [-1, 0, 10_000_000])
+    def test_lines_param_rejects_out_of_range(self, client, bad):
+        """lines 必须有上下界（2026-10-13 修复 P1-7）。
+
+        此前是裸 `int`：负数会经 `all_lines[-lines:]` 反向切片成
+        `all_lines[|lines|:]`，语义悄悄变成「丢弃前 N 行、返回其余全部」。
+        """
+        r = client.get("/api/logs", params={"lines": bad})
+        assert r.status_code == 422, f"lines={bad} 必须被 422 拒绝"
+
+    def test_lines_param_accepts_boundary_values(self, client, monkeypatch, tmp_path):
+        """加上界不能把正常调用挡掉（1 与上界都必须放行）。"""
+        _write_log(monkeypatch, tmp_path, "\n".join(f"l{i}" for i in range(1, 11)))
+        assert client.get("/api/logs", params={"lines": 1}).json()["lines"] == ["l10"]
+        assert client.get("/api/logs", params={"lines": 5000}).status_code == 200
