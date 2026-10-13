@@ -33,6 +33,7 @@ import config
 from db.database import init_db, get_connection
 from db.job_repo import get_job, update_job, finish_job, fail_interrupted_jobs
 from db.model_repo import get_default_model_key
+from services.naming import derived_sibling as _derived_sibling
 from socket_handlers import emit_log, register_socket_events
 
 # ============ 日志配置 ============
@@ -814,6 +815,19 @@ _VIDEO_EXTS = ('.mp4', '.mkv', '.avi', '.mov')
 _CHUNK_WAV_RE = re.compile(r'_chunk\d{3}\.wav$', re.IGNORECASE)
 
 
+def _ffprobe_available() -> bool:
+    """ffprobe 是否可用（PATH 或项目自带 bin/）。
+
+    ★ 续传有效性校验的**前提**：环境里根本没有 ffprobe 时，`media_duration_seconds`
+      对任何文件都返回 None，若照单全收会把所有正常文件误判成截断、每次重试都
+      白白重下一遍。所以「工具不可用」必须降级为「跳过校验」，而不是「判定损坏」。
+    """
+    import shutil
+    if shutil.which('ffprobe'):
+        return True
+    return (Path(__file__).resolve().parent.parent / 'bin' / 'ffprobe.exe').exists()
+
+
 async def _acquire_audio(input_url, job_dir, sio, job_id, options, files, *,
                          title='', platform=''):
     """获取待转录音频（唯一出口）：断点续传复用 → 按 options 下载。
@@ -824,19 +838,36 @@ async def _acquire_audio(input_url, job_dir, sio, job_id, options, files, *,
     返回 (file_path, title, platform)。
     """
     from services.downloader import download_video
+    from services.transcriber import media_duration_seconds
 
     file_path = None
     if options.get('_retry', False):
         # 搜索 job_dir 下已有音频/视频文件（重试场景）
         audio_exts = ('.m4a', '.mp3', '.wav', '.opus', '.aac', '.webm', '.mp4', '.mkv')
+        # ★ 2026-10-13：续传不能只看「后缀 + size > 1000」——下载中断留下的半截文件
+        #   同样满足这两个条件。抖音直链下载曾直接往最终 `.mp4` 写（现已改为 `.part`
+        #   + 原子改名），但升级前遗留的坏文件仍会被捡起 → 跳过下载 → 送进云端 ASR
+        #   → **静默产出截断转录并标记 completed**，用户全程无感知。
+        #   这里对**选中的那一个**候选做 ffprobe 有效性校验（每次重试只多一次
+        #   ~100ms 探测，不在逐候选循环里做）；不可解码就换下一个候选，
+        #   全都不可用则退回重新下载——重新下载永远比拿截断素材凑出假结果安全。
+        _probe_ok = _ffprobe_available()
         for f in sorted(job_dir.glob('*'), key=lambda x: x.stat().st_mtime, reverse=True):
-            if f.suffix.lower() in audio_exts and f.stat().st_size > 1000 \
-                    and not _CHUNK_WAV_RE.search(f.name):
-                file_path = f
-                title = title or f.stem
-                files['video' if f.suffix.lower() in _VIDEO_EXTS else 'audio'] = str(f)
-                await emit_log(sio, job_id, f'🔁 断点续传：发现已有文件 {f.name}（{f.stat().st_size//1024}KB），跳过下载')
-                break
+            if f.suffix.lower() not in audio_exts or f.stat().st_size <= 1000 \
+                    or _CHUNK_WAV_RE.search(f.name):
+                continue
+            if _probe_ok:
+                _dur = await asyncio.to_thread(media_duration_seconds, str(f))
+                if not _dur or _dur <= 0:
+                    logger.warning(f"续传候选 {f.name} 无法解析时长（疑似下载中断的截断文件），跳过")
+                    await emit_log(sio, job_id,
+                                   f'⚠ 断点续传：{f.name} 疑似下载不完整（{f.stat().st_size//1024}KB），已跳过')
+                    continue
+            file_path = f
+            title = title or f.stem
+            files['video' if f.suffix.lower() in _VIDEO_EXTS else 'audio'] = str(f)
+            await emit_log(sio, job_id, f'🔁 断点续传：发现已有文件 {f.name}（{f.stat().st_size//1024}KB），跳过下载')
+            break
 
     if file_path is None:
         update_job(job_id, status='downloading', progress_msg='开始下载')
@@ -1112,7 +1143,7 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                 raw_text = await _read_text(txt_path)
                 if raw_text.strip():
                     # 备份原文
-                    raw_backup = txt_path.replace('.txt', '.raw.txt')
+                    raw_backup = _derived_sibling(txt_path, suffix='.raw')
                     with open(raw_backup, 'w', encoding='utf-8') as f:
                         f.write(raw_text)
                     result['files']['txt_raw'] = raw_backup
@@ -1323,7 +1354,9 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                 raise Exception('AI 未返回任何内容（模型可能只输出了思考过程），任务按失败处理；可重新总结并换模型重试')
 
             # 保存结果到文件
-            result_md_path = txt_path.replace('.txt', f'__{summary_type}.md')
+            result_md_path = _derived_sibling(
+                txt_path, stem_suffix=f'__{summary_type}', extension='.md',
+            )
             with open(result_md_path, 'w', encoding='utf-8') as f:
                 f.write(result_text)
             result['files']['result_md'] = str(result_md_path)
@@ -1331,9 +1364,15 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
             result['token_usage'] = {'input': in_tok, 'output': out_tok}
 
             # 自动打标签
+            #   ★ 契约（2026-10-13）：generate_tags 返回 None = 调用失败（兜底环全挂），
+            #     返回 [] = 调用成功但没解析出标签。标签是锦上添花，失败不拖垮主流程，
+            #     但必须可见——否则用户看到"任务成功"却没有任何标签，也无从判断原因。
             tags = await generate_tags(text_content, model=model, sio=sio, job_id=job_id,
                                        bypass_cache=_bypass_cache)
-            if tags:
+            if tags is None:
+                logger.warning(f"任务 {job_id} 自动打标签失败（模型全部候选不可用）")
+                await emit_log(sio, job_id, '⚠ 自动打标签失败：模型全部候选不可用，本次结果不含标签（不影响总结内容）')
+            elif tags:
                 result['tags'] = tags
                 await emit_log(sio, job_id, f'标签: {", ".join(tags)}')
 
@@ -1374,18 +1413,24 @@ async def _process_job_impl(job_id: str, sem: asyncio.Semaphore = None, sem_stat
                    tags=result.get('tags', []),
                    result_text=result.get('result_text', ''))
 
-        # ★ 首次总结保存到 summary_history (v1)
+        # ★ 总结保存到 summary_history（2026-10-13 修复 P0）
+        #   版本号在事务内由 MAX(version)+1 推导——此前硬编码 `version=1`，
+        #   任务重试成功会用本次结果覆盖用户归档的 v1，并把 summary_version 打回 1。
         if result.get('result_text'):
-            from db.job_repo import save_summary_version
-            save_summary_version(
-                job_id=job_id, version=1,
+            from db.job_repo import append_summary_version
+            _saved_version = append_summary_version(
+                job_id=job_id,
                 summary_type=summary_type, model=model,
                 result_text=result['result_text'],
                 tags=result.get('tags', []),
                 token_usage=result.get('token_usage', {}),
                 files=result.get('files', {}),
             )
-            update_job(job_id, summary_version=1)
+            if _saved_version is None:
+                # 存档失败不回滚任务结果，但要可见（否则版本指针会与历史表脱节）
+                logger.warning(f"任务 {job_id} 总结存档失败，历史版本指针保持原值")
+            else:
+                update_job(job_id, summary_version=_saved_version)
 
         await emit_log(sio, job_id, '✅ 任务处理完成！')
         await _safe_emit('done', {

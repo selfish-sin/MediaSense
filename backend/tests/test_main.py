@@ -291,7 +291,7 @@ class TestTokenEndpoints:
 
     def test_history(self, app):
         from fastapi.testclient import TestClient
-        c = TestClient(app)
+        c = TestClient(app, client=('127.0.0.1', 50000))
         mc = MagicMock()
         mc.execute.return_value.fetchall.return_value = []
         with patch("main.get_connection", return_value=mc):
@@ -300,7 +300,7 @@ class TestTokenEndpoints:
 
     def test_usage(self, app):
         from fastapi.testclient import TestClient
-        c = TestClient(app)
+        c = TestClient(app, client=('127.0.0.1', 50000))
         mc = MagicMock()
         mcur = MagicMock()
         mc.cursor.return_value = mcur

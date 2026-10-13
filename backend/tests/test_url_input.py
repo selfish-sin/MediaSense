@@ -28,6 +28,14 @@ def _enter_bili_common(stack: ExitStack):
         patch('socket_handlers.check_cancelled', return_value=False))
     stack.enter_context(patch('main.emit_log', new_callable=AsyncMock))
     stack.enter_context(patch('main.update_job'))
+    # ★ 2026-10-13：_acquire_audio 的断点续传新增 ffprobe 有效性校验（拦截下载中断
+    #   留下的半截文件——它们同样满足「后缀在白名单 + size > 1000」）。本文件用
+    #   b'x' * 4096 造合成文件，真实 ffprobe 必然解析不出时长，那样会把**所有**
+    #   候选判成截断。这些用例验的是「续传复用逻辑」而非「媒体有效性」，故统一
+    #   打桩成可解码；截断拦截本身由 TestResumeRejectsTruncatedMedia 单独覆盖。
+    stack.enter_context(patch('main._ffprobe_available', return_value=True))
+    stack.enter_context(
+        patch('services.transcriber.media_duration_seconds', return_value=123.0))
 
 
 class TestBilibiliPaths:
@@ -590,3 +598,101 @@ class TestPlatformSubtitleCache:
         m_store.assert_called_once()
         assert m_store.call_args.args[0] == 'youtube:cachetest11'
         assert m_store.call_args.kwargs.get('subtitle_from') == 'youtube'
+
+
+# ============ 续传拦截截断媒体（2026-10-13 P0）============
+# 回归背景：抖音直链下载曾直接往最终 .mp4 写，中断后留下半截文件；断点续传扫描
+# 只看「后缀 + size>1000」会把它当完整音频复用 → 跳过下载 → 送进云端 ASR →
+# **静默产出截断转录并标记 completed**，用户全程无感知。
+# 治本在 douyin.py（.part + 原子改名），这里是兜底：识别历史遗留的坏文件。
+class TestResumeRejectsTruncatedMedia:
+    def _probe(self, stack, duration):
+        """duration=None 表示 ffprobe 解析不出时长（= 截断/不可解码）。"""
+        stack.enter_context(patch('main._ffprobe_available', return_value=True))
+        stack.enter_context(
+            patch('services.transcriber.media_duration_seconds', return_value=duration))
+
+    async def test_truncated_mp4_is_skipped_and_redownloaded(self, tmp_path):
+        from main import _handle_url_input
+        # 半截 mp4：后缀在白名单、大小 >1000，但解析不出时长
+        (tmp_path / 'half.mp4').write_bytes(b'x' * 4096)
+
+        with ExitStack() as stack:
+            _enter_bili_common(stack)
+            stack.enter_context(
+                patch('services.downloader.extract_bilibili_subtitles', new_callable=AsyncMock,
+                      return_value={'success': False, 'message': 'no_subtitle'}))
+            m_dl = stack.enter_context(
+                patch('services.downloader.download_video', new_callable=AsyncMock,
+                      return_value=(str(tmp_path / 'fresh.m4a'), '标题', '哔哩哔哩')))
+            stack.enter_context(
+                patch('services.transcriber.transcribe_audio', new_callable=AsyncMock,
+                      return_value=('t.srt', 't.txt', 2)))
+            self._probe(stack, None)
+
+            _srt, _txt, _seg, _title, _platform, files, _meta = await _handle_url_input(
+                BILI_URL, tmp_path, MagicMock(), 'j1', _opts(_retry=True), 'base', False, 'zh')
+
+        # ★ 截断文件不得被复用，必须重新下载
+        m_dl.assert_called_once()
+        assert files['audio'] == str(tmp_path / 'fresh.m4a')
+        assert files['audio'] != str(tmp_path / 'half.mp4')
+
+    async def test_good_file_after_truncated_one_is_reused(self, tmp_path):
+        """按 mtime 倒序遇到截断文件时，要继续往下找，不能就此放弃。"""
+        from main import _handle_url_input
+        (tmp_path / 'half.mp4').write_bytes(b'x' * 4096)
+        good = tmp_path / 'good.m4a'
+        good.write_bytes(b'x' * 4096)
+
+        def _dur(path):
+            return None if 'half' in str(path) else 300.0
+
+        with ExitStack() as stack:
+            _enter_bili_common(stack)
+            stack.enter_context(
+                patch('services.downloader.extract_bilibili_subtitles', new_callable=AsyncMock,
+                      return_value={'success': False, 'message': 'no_subtitle'}))
+            m_dl = stack.enter_context(patch('services.downloader.download_video',
+                                             new_callable=AsyncMock))
+            stack.enter_context(
+                patch('services.transcriber.transcribe_audio', new_callable=AsyncMock,
+                      return_value=('t.srt', 't.txt', 2)))
+            stack.enter_context(patch('main._ffprobe_available', return_value=True))
+            stack.enter_context(
+                patch('services.transcriber.media_duration_seconds', side_effect=_dur))
+
+            _srt, _txt, _seg, _title, _platform, files, _meta = await _handle_url_input(
+                BILI_URL, tmp_path, MagicMock(), 'j1', _opts(_retry=True), 'base', False, 'zh')
+
+        m_dl.assert_not_called()
+        assert files['audio'] == str(good)
+
+    async def test_ffprobe_missing_skips_validation(self, tmp_path):
+        """环境没有 ffprobe 时必须降级为「跳过校验」，不能把所有文件都判成截断。"""
+        from main import _handle_url_input
+        existing = tmp_path / 'prev_audio.m4a'
+        existing.write_bytes(b'x' * 4096)
+
+        with ExitStack() as stack:
+            _enter_bili_common(stack)
+            stack.enter_context(
+                patch('services.downloader.extract_bilibili_subtitles', new_callable=AsyncMock,
+                      return_value={'success': False, 'message': 'no_subtitle'}))
+            m_dl = stack.enter_context(patch('services.downloader.download_video',
+                                             new_callable=AsyncMock))
+            stack.enter_context(
+                patch('services.transcriber.transcribe_audio', new_callable=AsyncMock,
+                      return_value=('t.srt', 't.txt', 2)))
+            # ffprobe 完全不可用 → 探测函数对本就不该被调用
+            stack.enter_context(patch('main._ffprobe_available', return_value=False))
+            m_probe = stack.enter_context(
+                patch('services.transcriber.media_duration_seconds',
+                      side_effect=AssertionError('ffprobe 不可用时不应探测')))
+
+            _srt, _txt, _seg, _title, _platform, files, _meta = await _handle_url_input(
+                BILI_URL, tmp_path, MagicMock(), 'j1', _opts(_retry=True), 'base', False, 'zh')
+
+        m_probe.assert_not_called()
+        m_dl.assert_not_called()
+        assert files['audio'] == str(existing)

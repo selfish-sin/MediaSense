@@ -13,6 +13,7 @@
 - 空结果不编造名字：由调用方经 ``fallback`` / ``export_basename`` 兜底。
 """
 import re
+from pathlib import Path
 
 # Windows 保留字符 + ASCII 控制符 + DEL
 _ILLEGAL_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f\x7f]')
@@ -52,6 +53,25 @@ def extract_video_id(url) -> str:
     if match:
         return match.group(1)
     return ''
+
+
+def derived_sibling(path, *, stem_suffix: str = '', suffix: str = '', extension: str | None = None) -> str:
+    """在同目录派生一个新文件名（原文件不动）。
+
+    - ``stem_suffix``：追加到主干后面（``a`` → ``a__summary``）
+    - ``suffix``：追加到完整文件名后面、扩展名之前（``a.txt`` → ``a.raw.txt``）
+    - ``extension``：替换扩展名（``a.txt`` → ``a__summary.md``）；**不传则保留原扩展名**
+
+    ★ 禁止用 ``path.replace('.txt', ...)`` 干这件事（2026-10-13 修复）：
+      ``str.replace`` 是**全串替换**，而媒体文件名来自 yt-dlp 的 ``%(title)s``
+      （见 ``services/downloader.py`` 的 ``output_template``），标题里只要含 ``.txt``
+      （如「Python.txt 教程」），每一处都会被替换掉，产出 ``Python__md 教程__md``
+      这种错乱名；文件名再长一点还会撞 Windows 的 ENAMETOOLONG 让整个任务失败。
+    """
+    p = Path(str(path))
+    stem = p.stem + stem_suffix
+    ext = p.suffix if extension is None else extension
+    return str(p.with_name(stem + suffix + ext))
 
 
 def export_basename(job, *, max_len: int = DEFAULT_MAX_LEN) -> str:

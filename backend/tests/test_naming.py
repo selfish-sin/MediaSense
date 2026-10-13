@@ -3,13 +3,14 @@
 验收口径：导出与下载的文件名必须「视频名优先、保留可读标点」，不再出现
 `AI总结_<job_id>`（零信息量）或磁盘名（audio.m4a / bilibili_subtitle.srt）。
 """
+from pathlib import Path
 from urllib.parse import unquote
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from services.naming import export_basename, extract_video_id, safe_basename
+from services.naming import export_basename, extract_video_id, safe_basename, derived_sibling
 
 
 # ============ 纯函数 ============
@@ -86,7 +87,7 @@ def app():
 
 @pytest.fixture
 def client(app):
-    return TestClient(app)
+    return TestClient(app, client=('127.0.0.1', 50000))
 
 
 class TestExportFilename:
@@ -167,3 +168,67 @@ class TestDownloadFilename:
 
         assert resp.status_code == 200
         assert 'bilibili_subtitle.srt' in unquote(resp.headers['content-disposition'])
+
+
+
+
+# ============ derived_sibling（2026-10-13）============
+# 回归背景：main.py / jobs_ai.py 曾用 txt_path.replace('.txt', ...) 派生文件名。
+# str.replace 是**全串替换**，而媒体文件名来自 yt-dlp 的 %(title)s，
+# 标题里只要含 ".txt"（如「Python.txt 教程」）每一处都会被替换掉，产出错乱名，
+# 再长一点还会撞 Windows ENAMETOOLONG 让整个任务失败。
+# 用 tmp_path 构造真实路径，避免硬编码分隔符（Windows 下 Path 会归一化 / -> \）。
+class TestDerivedSibling:
+    def test_stem_suffix_and_extension(self, tmp_path):
+        got = derived_sibling(str(tmp_path / "a.txt"),
+                              stem_suffix="__summary", extension=".md")
+        assert got == str(tmp_path / "a__summary.md")
+
+    def test_suffix_before_extension(self, tmp_path):
+        got = derived_sibling(str(tmp_path / "a.txt"), suffix=".raw")
+        assert got == str(tmp_path / "a.raw.txt")
+
+    def test_title_containing_dot_txt_is_not_mangled(self, tmp_path):
+        """★ 核心回归：标题里本来就含 .txt 时，只能改末尾那个扩展名。"""
+        src = tmp_path / "Python.txt 教程.txt"
+        got = derived_sibling(str(src), stem_suffix="__summary", extension=".md")
+        assert got == str(tmp_path / "Python.txt 教程__summary.md")
+        assert got.endswith(".md")
+        assert got.count(".md") == 1
+
+    def test_title_containing_multiple_dot_txt(self, tmp_path):
+        got = derived_sibling(str(tmp_path / "a.txt.b.txt"),
+                              stem_suffix="__s", extension=".md")
+        assert got == str(tmp_path / "a.txt.b__s.md")
+
+    def test_str_replace_would_have_been_wrong(self, tmp_path):
+        """把被替换掉的旧写法钉在测试里，说明为什么不能用 replace。"""
+        src = str(tmp_path / "Python.txt 教程.txt")
+        broken = src.replace(".txt", "__summary.md")
+        correct = derived_sibling(src, stem_suffix="__summary", extension=".md")
+        assert broken != correct
+
+    def test_directory_part_untouched(self, tmp_path):
+        sub = tmp_path / "data.txt"
+        sub.mkdir()
+        got = derived_sibling(str(sub / "b.txt"), extension=".md")
+        assert got == str(sub / "b.md")
+        assert got.startswith(str(tmp_path / "data.txt"))
+
+    def test_no_args_returns_same_path(self, tmp_path):
+        src = str(tmp_path / "a.txt")
+        assert derived_sibling(src) == src
+
+    def test_extensionless_path(self, tmp_path):
+        got = derived_sibling(str(tmp_path / "audio"), extension=".md")
+        assert got == str(tmp_path / "audio.md")
+
+    def test_result_is_writable_filename(self, tmp_path):
+        """派生名要能真的落盘（旧的错乱名在 Windows 上会 ENAMETOOLONG/非法字符）。"""
+        src = tmp_path / "Python.txt 教程.txt"
+        src.write_text("原文", encoding="utf-8")
+        out = Path(derived_sibling(str(src), stem_suffix="__summary", extension=".md"))
+        out.write_text("正文", encoding="utf-8")
+        assert out.is_file()
+        assert src.exists(), "原文件必须保持不动"
+        assert src.read_text(encoding="utf-8") == "原文"

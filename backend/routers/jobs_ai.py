@@ -10,9 +10,11 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
 from models.schemas import SuccessResponse
-from db.job_repo import get_job, update_job, save_summary_version, get_summary_history, get_summary_version
+from db.job_repo import (get_job, update_job, save_summary_version, get_summary_history,
+                         get_summary_version, append_summary_version)
 from db.model_repo import get_default_model_key
 from config import DEFAULT_MODEL
+from services.naming import derived_sibling
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -51,7 +53,9 @@ async def resummarize_job(job_id: str, body: dict):
         if get_model_by_key('deepseek-v4-flash'):
             model = 'deepseek-v4-flash'
             logger.info(f'Resummarize: long text ({len(text_content)} chars), auto-switched model: {model}')
-    opts = body.get('options', job.get('options', {}))
+    # ★ 键存在但值为 null 时 dict.get 会返回 None（默认值只在键缺失时生效），
+    #   直接 `opts.get(...)` 会抛 AttributeError → 500。加 `or` 兜底。
+    opts = body.get('options') or job.get('options') or {}
     # ★ 模块化提示词：优先使用请求体中的 dimensions，其次原始 job 的 options.dimensions
     dimensions = body.get('dimensions') or opts.get('dimensions')
 
@@ -67,19 +71,37 @@ async def resummarize_job(job_id: str, body: dict):
     }
 
     # ★ 保存当前版本到 summary_history（覆盖前先存档）
+    #   2026-10-13 修复：指针可能与历史表脱节（重新总结失败/取消只改状态不写历史），
+    #   直接拿 current_version 做 INSERT OR REPLACE 会覆盖掉别的已归档版本。
+    #   指针命中已有行 → 幂等刷新同一版本（内容本就是同一份）；
+    #   指针是孤儿（历史非空但没有这一版）→ 改用追加，绝不覆盖。
     current_version = job.get('summary_version', 1)
     if job.get('result_text'):
-        saved = save_summary_version(
-            job_id=job_id, version=current_version,
-            summary_type=job.get('summary_type', 'summary'),
-            model=job.get('model', ''),
-            result_text=job['result_text'],
-            tags=job.get('tags', []),
-            token_usage=job.get('token_usage', {}),
-            files=job.get('files', {}),
-        )
-        if saved:
-            logger.info(f"任务 {job_id} v{current_version} 已存档到 summary_history")
+        _history = get_summary_history(job_id)
+        _hit = any(h.get('version') == current_version for h in _history)
+        if _history and not _hit:
+            _archived = append_summary_version(
+                job_id=job_id,
+                summary_type=job.get('summary_type', 'summary'),
+                model=job.get('model', ''),
+                result_text=job['result_text'],
+                tags=job.get('tags', []),
+                token_usage=job.get('token_usage', {}),
+                files=job.get('files', {}),
+            )
+            logger.info(f"任务 {job_id} 版本指针 v{current_version} 与历史脱节，已改为追加存档为 v{_archived}")
+        else:
+            saved = save_summary_version(
+                job_id=job_id, version=current_version,
+                summary_type=job.get('summary_type', 'summary'),
+                model=job.get('model', ''),
+                result_text=job['result_text'],
+                tags=job.get('tags', []),
+                token_usage=job.get('token_usage', {}),
+                files=job.get('files', {}),
+            )
+            if saved:
+                logger.info(f"任务 {job_id} v{current_version} 已存档到 summary_history")
 
     # 更新job状态
     update_job(job_id, status='summarizing', progress_msg='重新AI处理中...',
@@ -105,20 +127,29 @@ async def resummarize_job(job_id: str, body: dict):
         if not str(result_text or '').strip():
             raise Exception('AI 未返回任何内容（模型可能只输出了思考过程），请换模型重试')
 
-        # 保存新结果文件
-        result_md_path = txt_path.replace('.txt', f'__{summary_type}.md')
+        # 保存新结果文件（派生文件名走 naming 单点，勿用 str.replace('.txt', ...)）
+        result_md_path = derived_sibling(
+            txt_path, stem_suffix=f'__{summary_type}', extension='.md',
+        )
         with open(result_md_path, 'w', encoding='utf-8') as f:
             f.write(result_text)
 
         # 自动打标签
+        #   ★ 契约（2026-10-13）：generate_tags 返回 None = 调用失败（兜底环全挂），
+        #     返回 [] = 调用成功但没解析出标签。失败时**保留任务原有标签**——
+        #     此前一律当 [] 写库，用户点一次「生成标签」就把已有标签清空了。
+        tags = None
         try:
             tags = await generate_tags(text_content, model=model, sio=sio, job_id=job_id,
                                        bypass_cache=True)
-        except Exception:
-            tags = []
+        except Exception as e:
+            logger.warning(f"任务 {job_id} 自动打标签异常: {e}")
+            tags = None
+        if tags is None:
+            tags = list(job.get('tags') or [])
+            logger.warning(f"任务 {job_id} 自动打标签失败，已保留原有标签（{len(tags)} 个）")
 
         # 更新job
-        new_version = current_version + 1
         new_files = dict(files)
         new_files['result_md'] = result_md_path
         update_job(job_id, status='completed',
@@ -128,18 +159,23 @@ async def resummarize_job(job_id: str, body: dict):
                    files=new_files,
                    token_usage={'input': in_tok, 'output': out_tok},
                    tags=tags,
-                   summary_version=new_version,
                    error=None)
 
-        # ★ 保存新版本到 summary_history
-        save_summary_version(
-            job_id=job_id, version=new_version,
+        # ★ 保存新版本到 summary_history：版本号在事务内推导（append_summary_version），
+        #   不再由调用方 `current_version + 1` 计算——并发「重新总结」会算出同一个
+        #   版本号互相覆盖，且 current_version 可能与历史表脱节。
+        new_version = append_summary_version(
+            job_id=job_id,
             summary_type=summary_type, model=model,
             result_text=result_text,
             tags=tags,
             token_usage={'input': in_tok, 'output': out_tok},
             files=new_files,
         )
+        if new_version is None:
+            logger.error(f"任务 {job_id} 新总结版本存档失败，summary_version 指针保持原值")
+        else:
+            update_job(job_id, summary_version=new_version)
 
         logger.info(f"任务 {job_id} 重新总结完成 v{new_version}: type={summary_type}, tokens in={in_tok} out={out_tok}")
         return {
@@ -269,6 +305,15 @@ async def generate_job_tags(job_id: str, body: dict = None):
     except Exception as e:
         logger.error(f"AI 生成标签失败: {e}")
         raise HTTPException(status_code=500, detail=f"AI 生成标签失败: {str(e)}")
+
+    # ★ 2026-10-13：generate_tags 返回 None = 兜底环内全部候选调用失败。
+    #   此前它吞异常返回 []，这里就会把用户已有的标签清空并回「已生成 0 个标签」——
+    #   失败伪装成成功且不可恢复。现在失败不写库，并返回可行动文案。
+    if tags is None:
+        raise HTTPException(
+            status_code=502,
+            detail="AI 生成标签失败：模型全部候选调用均失败，已保留原有标签未改动。请到「模型管理」检查模型可用性后重试。",
+        )
 
     update_job(job_id, tags=tags)
     logger.info(f"任务 {job_id} 标签已生成: {tags}")
