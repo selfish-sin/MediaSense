@@ -12,7 +12,7 @@ from db.job_repo import (
     get_jobs_by_batch, get_batch_summary,
     update_job, delete_job, finish_job,
     _row_to_dict, find_job_by_url, clear_jobs, clear_jobs_by_status,
-    save_summary_version, get_summary_history, get_summary_version,
+    save_summary_version, get_summary_history, get_summary_version, append_summary_version,
     _now_utc_iso, delete_jobs_batch, claim_staged_upload, update_job_input_file_if_matches,
 )
 
@@ -545,3 +545,55 @@ class TestJobResponseCarriesJsonFields:
         r = self._resp()
         assert r.ai_call_chain is None
         assert r.correction_stats is None
+
+
+# ============ 总结版本号（2026-10-13 P0 修复）============
+# 回归背景：main.py 收尾曾硬编码 save_summary_version(version=1)，
+# 任务重试成功会用本次结果 INSERT OR REPLACE 覆盖用户归档的 v1，并把
+# summary_version 打回 1 —— 已归档版本永久丢失、历史列表与指针自相矛盾。
+class TestAppendSummaryVersion:
+    def _job(self):
+        return create_job(input_type="url", input_url="https://example.com")
+
+    def test_first_append_gets_v1(self):
+        jid = self._job()
+        v = append_summary_version(jid, "summary", "m", "正文一")
+        assert v == 1
+        assert get_summary_version(jid, 1)["result_text"] == "正文一"
+
+    def test_never_overwrites_archived_version(self):
+        """★ 核心回归：已有 v1..v3 时再次追加必须是 v4，v1..v3 一字不改。"""
+        jid = self._job()
+        for i in range(1, 4):
+            append_summary_version(jid, "summary", "m", f"原文{i}")
+        v = append_summary_version(jid, "summary", "m", "重跑结果")
+        assert v == 4, f"版本号必须是 4，实际 {v}（硬编码 1 会返回 1 并覆盖 v1）"
+        history = get_summary_history(jid)
+        assert [h["version"] for h in history] == [1, 2, 3, 4]
+        assert get_summary_version(jid, 1)["result_text"] == "原文1"
+        assert get_summary_version(jid, 4)["result_text"] == "重跑结果"
+
+    def test_pointer_does_not_drift_from_history(self):
+        """存档成功后指针指向的版本必须真实存在于历史表里。"""
+        jid = self._job()
+        append_summary_version(jid, "summary", "m", "A")
+        v2 = append_summary_version(jid, "summary", "m", "B")
+        update_job(jid, summary_version=v2)
+        job = get_job(jid)
+        assert job["summary_version"] == 2
+        assert get_summary_version(jid, job["summary_version"])["result_text"] == "B"
+
+    def test_gap_is_filled_from_max_not_from_count(self):
+        """历史有洞（如 v1,v2,v4）时必须取 MAX+1=5，而不是 count+1。"""
+        jid = self._job()
+        for i, text in enumerate(["A", "B", "C", "D"], start=1):
+            save_summary_version(jid, i, "summary", "m", text)
+        v = append_summary_version(jid, "summary", "m", "E")
+        assert v == 5
+
+    def test_empty_text_is_still_archived(self):
+        """分批总结 fail-fast 后仍可能落一份空正文？—— 版本记录本身不应被跳过。"""
+        jid = self._job()
+        v = append_summary_version(jid, "summary", "m", "")
+        assert v == 1
+        assert get_summary_history(jid)[0]["result_text"] == ""

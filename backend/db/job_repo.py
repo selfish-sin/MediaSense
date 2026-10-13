@@ -614,6 +614,55 @@ def save_summary_version(job_id: str, version: int, summary_type: str, model: st
         conn.close()
 
 
+def append_summary_version(job_id: str, summary_type: str, model: str,
+                            result_text: str, tags=None, token_usage=None,
+                            files=None) -> Optional[int]:
+    """追加一个新总结版本，返回实际分配到的版本号（失败返回 None）。
+
+    ★ 为什么不能「调用方算好版本号 + INSERT OR REPLACE」（2026-10-13 P0 修复）：
+      1) 调用方推导的版本号会**覆盖已归档的旧版本**——`main.py` 收尾曾硬编码 `version=1`，
+         任务重试成功后用 RETRY-RUN 覆盖掉用户归档的 v1，且把 `summary_version` 打回 1，
+         历史列表与 `current_version` 自相矛盾（生产库已出现版本号不连续的行）。
+      2) `jobs.summary_version` 与历史表可能**脱节**（重新总结失败/取消只改状态不写历史），
+         拿它 `+1` 推出的版本号同样会撞上已存在的版本。
+      3) 并发「重新总结」两个请求都读到同一个 `summary_version` → 算出同一个 `new_version`
+         → `INSERT OR REPLACE` 互相覆盖，先完成的那一版凭空消失。
+
+    版本号改为在**同一事务内**由 `MAX(version)+1` 推导并写入，三条问题一并消失：
+    已归档版本永不被覆盖；并发调用各自拿到不同版本号；调用方无需知道版本号从哪来。
+
+    `BEGIN IMMEDIATE` 是必需的：SQLite 默认隔离级别下 SELECT 不会隐式开事务，
+    不显式取写锁就会留下「读完 MAX 还没写入」的竞态窗口。
+    """
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) FROM summary_history WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        version = int(row[0]) + 1
+        conn.execute("""
+            INSERT INTO summary_history
+            (job_id, version, summary_type, model, result_text, tags, token_usage, files, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            job_id, version, summary_type, model, result_text,
+            json.dumps(tags or [], ensure_ascii=False),
+            json.dumps(token_usage or {}, ensure_ascii=False),
+            json.dumps(files or {}, ensure_ascii=False),
+            _now_utc_iso(),
+        ))
+        conn.commit()
+        return version
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"追加总结版本失败 job_id={job_id}: {e}")
+        return None
+    finally:
+        conn.close()
+
+
 def get_summary_history(job_id: str) -> List[Dict[str, Any]]:
     """获取某任务的所有总结历史版本（按版本号升序）"""
     conn = get_connection()
