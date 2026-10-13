@@ -542,7 +542,7 @@
           "jobs"
         ],
         "summary": "Retry Job",
-        "description": "重试失败/取消的任务。\n\n默认（force=false）：断点续传模式，保留已有下载/转录文件，从失败步骤继续。\nforce=true：删除 job_dir 下已有文件，完全重新开始。",
+        "description": "重试失败/取消的任务。\n\n默认（force=false）：断点续传模式，保留已有下载/转录文件，从失败步骤继续。\nforce=true：删除 job_dir 下已有文件，完全重新开始。\n\n★ 本机限制（2026-10-13）：force=true 走 shutil.rmtree(job_dir)，\n  媒体/字幕/结果文件全部删除且**不可恢复**——与已受限的任务删除同类破坏，\n  此前唯独它没有 require_local_client（签名里连 request 参数都没有）。\n  纯 force=false 的断点续传不删任何文件，故只对 force=true 生效。",
         "operationId": "retry_job_api_jobs__job_id__retry_post",
         "parameters": [
           {
@@ -1657,7 +1657,7 @@
           "asr-admin"
         ],
         "summary": "Delete Provider Api",
-        "description": "删除云端 provider（内置不可删，可停用/改配置）",
+        "description": "删除云端 provider（内置不可删，可停用/改配置；破坏性：仅本机可发起）",
         "operationId": "delete_provider_api_api_asr_providers__key__delete",
         "parameters": [
           {
@@ -1900,7 +1900,7 @@
           "asr-admin"
         ],
         "summary": "Delete Engine Model",
-        "description": "删除该引擎的模型文件（释放磁盘；下载中 / 转录中一律拒绝）",
+        "description": "删除该引擎的模型文件（释放磁盘；下载中 / 转录中一律拒绝；破坏性：仅本机可发起）",
         "operationId": "delete_engine_model_api_asr_local__engine__delete",
         "parameters": [
           {
@@ -1941,7 +1941,7 @@
           "asr-admin"
         ],
         "summary": "Delete Whisper Model",
-        "description": "删除本地 Whisper 指定档位模型目录（释放磁盘）",
+        "description": "删除本地 Whisper 指定档位模型目录（释放磁盘；破坏性：仅本机可发起）",
         "operationId": "delete_whisper_model_api_asr_local_whisper__size__delete",
         "parameters": [
           {
@@ -2160,7 +2160,7 @@
           "summary"
         ],
         "summary": "Api Reset All Overrides",
-        "description": "清空所有覆盖（恢复全部默认）",
+        "description": "清空所有覆盖（恢复全部默认；破坏性：仅本机可发起）",
         "operationId": "api_reset_all_overrides_api_summary_overrides_delete",
         "responses": {
           "200": {
@@ -2228,7 +2228,7 @@
           "summary"
         ],
         "summary": "Api Delete Override",
-        "description": "删除模块覆盖（恢复代码默认）",
+        "description": "删除模块覆盖（恢复代码默认；破坏性：仅本机可发起）",
         "operationId": "api_delete_override_api_summary_overrides__dimension_key___module_key__delete",
         "parameters": [
           {
@@ -2860,7 +2860,7 @@
           "templates"
         ],
         "summary": "Delete Template",
-        "description": "删除模板",
+        "description": "删除模板（破坏性：仅本机可发起）",
         "operationId": "delete_template_api_templates__template_id__delete",
         "parameters": [
           {
@@ -3046,6 +3046,7 @@
           "chat"
         ],
         "summary": "Delete Session",
+        "description": "删除整个会话（不可逆：用户追问记录随之消失；破坏性：仅本机可发起）",
         "operationId": "delete_session_api_jobs__job_id__chat_sessions__session_id__delete",
         "parameters": [
           {
@@ -3095,6 +3096,7 @@
           "chat"
         ],
         "summary": "Clear Session Messages",
+        "description": "清空该会话全部消息（不可逆；破坏性：仅本机可发起）",
         "operationId": "clear_session_messages_api_jobs__job_id__chat_sessions__session_id__messages_delete",
         "parameters": [
           {
@@ -3344,7 +3346,7 @@
           "chat"
         ],
         "summary": "Delete Chat Message",
-        "description": "单条删除：assistant 且同组有其他变体 → 只删该变体，删的是生效版本则由组内最新接管；\n组删空 → 连同所属 user 行删除（防孤儿提问）。user 行 → 等同整轮删除。",
+        "description": "单条删除：assistant 且同组有其他变体 → 只删该变体，删的是生效版本则由组内最新接管；\n组删空 → 连同所属 user 行删除（防孤儿提问）。user 行 → 等同整轮删除。\n（不可逆：破坏性：仅本机可发起）",
         "operationId": "delete_chat_message_api_jobs__job_id__chat__msg_id__delete",
         "parameters": [
           {
@@ -3394,6 +3396,7 @@
           "chat"
         ],
         "summary": "Delete Chat From Endpoint",
+        "description": "删除该消息及其后续轮次（级联，不可逆；破坏性：仅本机可发起）",
         "operationId": "delete_chat_from_endpoint_api_jobs__job_id__chat_from__msg_id__delete",
         "parameters": [
           {
@@ -3443,7 +3446,7 @@
           "chat"
         ],
         "summary": "Delete Chat Messages",
-        "description": "多选批量删除（单事务）。语义与单删一致但按\"项\"删除、不级联到后续轮次：\n\n- 提问行 → 删该提问整轮（提问 + 其全部回答版本）；\n- 回答行 → 删该回答的全部版本（含历史变体）；该轮回答删空后提问成孤儿 → 一并删除。\n不存在/已删除的 id 静默跳过（幂等），返回实际删除行数。",
+        "description": "多选批量删除（单事务）。语义与单删一致但按\"项\"删除、不级联到后续轮次：\n\n- 提问行 → 删该提问整轮（提问 + 其全部回答版本）；\n- 回答行 → 删该回答的全部版本（含历史变体）；该轮回答删空后提问成孤儿 → 一并删除。\n不存在/已删除的 id 静默跳过（幂等），返回实际删除行数。\n（不可逆：破坏性：仅本机可发起）",
         "operationId": "delete_chat_messages_api_jobs__job_id__chat_messages_delete_post",
         "parameters": [
           {
@@ -3632,7 +3635,7 @@
           "system"
         ],
         "summary": "Get Logs",
-        "description": "返回后端日志文件最近 N 行（尾部窗口；不返回全文件行数——\n前端以旧窗口末行为锚点做尾部同步，见 useBackendLogs.fetchLogs）",
+        "description": "返回后端日志文件最近 N 行（尾部窗口；不返回全文件行数——\n前端以旧窗口末行为锚点做尾部同步，见 useBackendLogs.fetchLogs）\n\n★ 上界必须给（2026-10-13）：负数会经 `all_lines[-lines:]` 反向切片成\n  `all_lines[|lines|:]`，语义变成「丢弃前 N 行、返回其余全部」。",
         "operationId": "get_logs_api_logs_get",
         "parameters": [
           {
@@ -3641,6 +3644,8 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 5000,
+              "minimum": 1,
               "default": 300,
               "title": "Lines"
             }
@@ -3674,7 +3679,7 @@
           "token"
         ],
         "summary": "Get Token Usage History",
-        "description": "获取 Token 使用历史（按每次任务记录）",
+        "description": "获取 Token 使用历史（按每次任务记录）\n\n★ 上界必须给（2026-10-13）：此前是裸 `int`，而 SQLite 的 `LIMIT -1`\n  等于「无上限」——`?limit=-1` 会把整张 token_usage 表拉进内存并全量返回。\n  全仓其它分页端点（list_jobs / search_transcripts）都用 Query(ge/le) 限住，\n  这里此前是唯一的例外。",
         "operationId": "get_token_usage_history_api_token_usage_history_get",
         "parameters": [
           {
@@ -3683,6 +3688,8 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
               "default": 30,
               "title": "Limit"
             }

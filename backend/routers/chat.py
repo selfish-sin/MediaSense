@@ -733,7 +733,10 @@ def rename_session(job_id: str, session_id: str, body: SessionRename):
 
 
 @router.delete("/{job_id}/chat/sessions/{session_id}")
-def delete_session(job_id: str, session_id: str):
+def delete_session(job_id: str, session_id: str, request: Request):
+    """删除整个会话（不可逆：用户追问记录随之消失；破坏性：仅本机可发起）"""
+    from routers.jobs import require_local_client
+    require_local_client(request, what='删除追问会话')
     conn = get_connection()
     try:
         conn.execute("DELETE FROM job_chats WHERE job_id = ? AND session_id = ?", (job_id, session_id))
@@ -745,7 +748,10 @@ def delete_session(job_id: str, session_id: str):
 
 
 @router.delete("/{job_id}/chat/sessions/{session_id}/messages")
-def clear_session_messages(job_id: str, session_id: str):
+def clear_session_messages(job_id: str, session_id: str, request: Request):
+    """清空该会话全部消息（不可逆；破坏性：仅本机可发起）"""
+    from routers.jobs import require_local_client
+    require_local_client(request, what='清空追问会话消息')
     conn = get_connection()
     try:
         conn.execute("DELETE FROM job_chats WHERE job_id = ? AND session_id = ?", (job_id, session_id))
@@ -1150,9 +1156,12 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
 # ============ 单条消息删除 ============
 
 @router.delete("/{job_id}/chat/{msg_id}")
-def delete_chat_message(job_id: str, msg_id: int):
+def delete_chat_message(job_id: str, msg_id: int, request: Request):
     """单条删除：assistant 且同组有其他变体 → 只删该变体，删的是生效版本则由组内最新接管；
-    组删空 → 连同所属 user 行删除（防孤儿提问）。user 行 → 等同整轮删除。"""
+    组删空 → 连同所属 user 行删除（防孤儿提问）。user 行 → 等同整轮删除。
+    （不可逆：破坏性：仅本机可发起）"""
+    from routers.jobs import require_local_client
+    require_local_client(request, what='删除追问消息')
     conn = get_connection()
     try:
         row = conn.execute(
@@ -1206,7 +1215,10 @@ def delete_chat_message(job_id: str, msg_id: int):
 
 
 @router.delete("/{job_id}/chat/from/{msg_id}")
-def delete_chat_from_endpoint(job_id: str, msg_id: int):
+def delete_chat_from_endpoint(job_id: str, msg_id: int, request: Request):
+    """删除该消息及其后续轮次（级联，不可逆；破坏性：仅本机可发起）"""
+    from routers.jobs import require_local_client
+    require_local_client(request, what='删除该轮及其后续轮次')
     _delete_chat_from(job_id, msg_id)
     return {"message": "已删除该消息及其后续"}
 
@@ -1214,13 +1226,16 @@ def delete_chat_from_endpoint(job_id: str, msg_id: int):
 # ============ 多选批量删除 ============
 
 @router.post("/{job_id}/chat/messages/delete")
-def delete_chat_messages(job_id: str, body: MessagesDelete):
+def delete_chat_messages(job_id: str, body: MessagesDelete, request: Request):
     """多选批量删除（单事务）。语义与单删一致但按"项"删除、不级联到后续轮次：
 
     - 提问行 → 删该提问整轮（提问 + 其全部回答版本）；
     - 回答行 → 删该回答的全部版本（含历史变体）；该轮回答删空后提问成孤儿 → 一并删除。
     不存在/已删除的 id 静默跳过（幂等），返回实际删除行数。
+    （不可逆：破坏性：仅本机可发起）
     """
+    from routers.jobs import require_local_client
+    require_local_client(request, what='批量删除追问消息')
     ids = list(dict.fromkeys(body.ids))  # 去重保序
     if not ids:
         raise HTTPException(status_code=400, detail="未选择要删除的消息")

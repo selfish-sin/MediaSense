@@ -1955,22 +1955,32 @@ class TestDestructiveEndpointsRequireLocalhost:
       连 `request: Request` 都没有（本机限制根本无从挂载）。
     """
 
-    @pytest.mark.parametrize("path,method", [
-        ("/api/jobs/clear", "post"),
-        ("/api/jobs/clear/completed", "post"),
-        ("/api/models/gpt-x", "delete"),
+    @pytest.mark.parametrize("path,method,body", [
+        ("/api/jobs/clear", "post", None),
+        ("/api/jobs/clear/completed", "post", None),
+        ("/api/models/gpt-x", "delete", None),
         # —— 第二轮补齐：不可逆破坏 ——
-        ("/api/jobs/abc/retry?force=true", "post"),
-        ("/api/asr/providers/gpt-x", "delete"),
-        ("/api/asr/local/firered", "delete"),
-        ("/api/asr/local/whisper/medium", "delete"),
-        ("/api/templates/7", "delete"),
-        ("/api/summary/overrides", "delete"),
-        ("/api/summary/overrides/dim/mod", "delete"),
+        ("/api/jobs/abc/retry?force=true", "post", None),
+        ("/api/asr/providers/gpt-x", "delete", None),
+        ("/api/asr/local/firered", "delete", None),
+        ("/api/asr/local/whisper/medium", "delete", None),
+        ("/api/templates/7", "delete", None),
+        ("/api/summary/overrides", "delete", None),
+        ("/api/summary/overrides/dim/mod", "delete", None),
+        # —— 追问记录删除（独立复核补：同为不可逆的用户数据销毁，此前既没纳入
+        #    也没写进排除清单，属于「贯彻到底」原则下的无声遗漏）——
+        ("/api/jobs/abc/chat/sessions/s1", "delete", None),
+        ("/api/jobs/abc/chat/sessions/s1/messages", "delete", None),
+        ("/api/jobs/abc/chat/5", "delete", None),
+        ("/api/jobs/abc/chat/from/5", "delete", None),
+        # 该端点需要合法 body：FastAPI 的入参校验先于处理体执行，body 不合法
+        # 会先得 422 而走不到本机限制守卫——测试必须给合法 body 才能验到 403。
+        ("/api/jobs/abc/chat/messages/delete", "post", {"ids": [1, 2]}),
     ])
-    def test_rejects_non_loopback(self, app, path, method):
+    def test_rejects_non_loopback(self, app, path, method, body):
         nonlocal_client = TestClient(app, client=("192.168.1.20", 50000))
-        resp = getattr(nonlocal_client, method)(path)
+        kwargs = {"json": body} if body is not None else {}
+        resp = getattr(nonlocal_client, method)(path, **kwargs)
         assert resp.status_code == 403, f"{method.upper()} {path} 对局域网来源必须 403"
         assert "192.168.1.20" in resp.json()["detail"]
 

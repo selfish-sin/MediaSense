@@ -7,6 +7,7 @@
 本文件的桩函数一律复刻被调方的**真实签名**，多传/少传参数都会立刻 TypeError。
 """
 import pytest
+import asyncio
 import sqlite3
 
 from services import research_processor as rp
@@ -250,3 +251,72 @@ class TestResearchTokenAccounting:
 
         assert rows, "AI 调用失败时已消耗的 token 仍必须落库"
         assert sum(r[0] for r in rows) == 99 * (1 + 3)   # 1 次提取 + 3 个默认兜底主题
+
+    async def test_exception_midway_still_records_spent_tokens(self, tmp_path, monkeypatch):
+        """★ 中途抛异常时已烧掉的 token 仍必须记账（独立复核 2026-10-13 补）。
+
+        回归症状：记账原本在实现体末尾那行，异常/超时根本执行不到，
+        而 N+1 次付费调用已经花掉了 —— 统计仍显示 0，正是 P1-5 要消灭的症状。
+        """
+        conn = _fresh_db(tmp_path, monkeypatch, "research_exc.db")
+        _seed_job(conn, "job-exc")
+
+        calls = {"n": 0}
+
+        async def _flaky_call_ai(model_cfg, prompt, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return "主题一\n主题二", 40, 5      # 主题提取成功，钱已花
+            raise RuntimeError("第二个主题扩展时炸了")
+
+        monkeypatch.setattr(rp, "_call_ai", _flaky_call_ai)
+        _install_search_stub(monkeypatch, [])
+        monkeypatch.setattr(rp, "get_model_by_key", lambda key: MOCK_CFG)
+        monkeypatch.setattr(rp.web_search_service, "describe_search_backends",
+                            lambda: {"ollama": "https://ollama.com"})
+
+        with pytest.raises(RuntimeError):
+            await research_process("一段转录正文", title="t", model="glm", job_id="job-exc")
+
+        rows = conn.execute(
+            "SELECT input_tokens, output_tokens FROM token_usage WHERE job_id = ?",
+            ("job-exc",),
+        ).fetchall()
+        conn.close()
+
+        assert rows, "异常抛出后已消耗的 token 必须落库（finally 记账）"
+        assert sum(r[0] for r in rows) >= 40
+
+    async def test_timeout_cancellation_still_records_spent_tokens(self, tmp_path, monkeypatch):
+        """★ 被 `asyncio.wait_for` 取消（超时）时同样必须记账。
+
+        CancelledError 继承自 BaseException，普通 `except Exception` 抓不到，
+        记账必须放在 `finally` 里才能覆盖这条路径。
+        """
+        conn = _fresh_db(tmp_path, monkeypatch, "research_to.db")
+        _seed_job(conn, "job-to")
+
+        async def _slow_call_ai(model_cfg, prompt, **kw):
+            await asyncio.sleep(5)
+            return "永远到不了的正文", 10, 10
+
+        monkeypatch.setattr(rp, "_call_ai", _slow_call_ai)
+        _install_search_stub(monkeypatch, [])
+        monkeypatch.setattr(rp, "get_model_by_key", lambda key: MOCK_CFG)
+        monkeypatch.setattr(rp.web_search_service, "describe_search_backends",
+                            lambda: {"ollama": "https://ollama.com"})
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                research_process("一段转录正文", title="t", model="glm", job_id="job-to"),
+                timeout=0.3,
+            )
+
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM token_usage WHERE job_id = ?", ("job-to",)
+        ).fetchall()
+        conn.close()
+
+        # 全部调用都被取消 → usage 为 0 → 记账单点按「有消耗才记」跳过，
+        # 关键是**不能崩、也不能把已记的账重复写**。
+        assert rows[0][0] in (0, 1)

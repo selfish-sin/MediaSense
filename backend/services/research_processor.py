@@ -163,11 +163,41 @@ async def research_process(
     job_id: str = '',
     bypass_cache: bool = False,
 ) -> Tuple[str, int, int]:
-    """深度研究模式主流程
+    """深度研究模式主流程（公开入口：负责**无论成败都记账**）。
 
     搜索后端：`services/web_search`（Ollama → Tavily → Firecrawl → DDGS 逐级回退），
     与「用户选的 AI 模型」解耦——搜索 Key 走 config.py / 环境变量，不需要配成模型。
+
+    ★ 记账放在这里而不是实现体末尾（2026-10-13 独立复核补）：深度研究要烧
+      1 次主题提取 + N 次扩展写作，调用方 `main.py` 又用
+      `asyncio.wait_for(..., 3600.0)` 包着它。超时/中途抛错时 N+1 次付费调用
+      已经花掉了，实现体末尾那行 `_record_token_usage` 根本执行不到，
+      统计仍显示 0——正是本次要消灭的症状。`finally` 对 CancelledError
+      （BaseException）同样生效，故超时/取消/异常三种都能记账。
     """
+    usage = {'input': 0, 'output': 0}
+    try:
+        return await _research_process_impl(
+            text, title, model, sio=sio, job_id=job_id,
+            bypass_cache=bypass_cache, usage=usage,
+        )
+    finally:
+        # 记账口径与 ai_process 相同：按**本次请求的模型 key** 记总账
+        #（research 用固定单模型 _call_ai，无换模型信息可用）。
+        if usage['input'] or usage['output']:
+            _record_token_usage(model, usage['input'], usage['output'], job_id)
+
+
+async def _research_process_impl(
+    text: str,
+    title: str = '',
+    model: str = DEFAULT_MODEL,
+    sio=None,
+    job_id: str = '',
+    bypass_cache: bool = False,
+    usage: Optional[Dict[str, int]] = None,
+) -> Tuple[str, int, int]:
+    """实现体：usage 由调用方持有并透传，本函数只负责往里累加。"""
     model_cfg = get_model_by_key(model) or get_model_by_key(DEFAULT_MODEL)
     if not model_cfg:
         raise Exception(f'模型 {model} 不存在')
@@ -193,8 +223,10 @@ async def research_process(
     # ★ token 累计（2026-10-13 修复 P1-5）：深度研究是单任务最贵路径（1 次提取主题 +
     #   N 次扩展写作），此前全程丢弃 `_call_ai` 的 usage 并 `return article_md, 0, 0`，
     #   结果页/统计页显示「零消耗」。失败路径（哨兵串）同样已烧 token，一并计入——
-    #   口径与 ai_process 一致：花了钱就要可见。
-    usage = {'input': 0, 'output': 0}
+    #   口径与 ai_process 一致：花了钱就要可见。累加器由公开入口 research_process
+    #   持有（它负责在 finally 里记账，见该函数 docstring）。
+    if usage is None:
+        usage = {'input': 0, 'output': 0}
 
     # Step 1: 提取主题
     topics = await _extract_topics(text, title, model_cfg, sio, job_id,
@@ -249,8 +281,6 @@ async def research_process(
         await emit_progress(sio, job_id, 'ai', 100, '🔬 深度研究完成！')
         await emit_log(sio, job_id, f'🔬 深度研究完成: {len(article_md)} 字符')
 
-    # 记账口径与 ai_process 相同：按**本次请求的模型 key** 记总账（与 generate_tags 记
-    # 实际使用模型不同——research 用的是固定单模型 _call_ai，无换模型信息可用）。
-    _record_token_usage(model, usage['input'], usage['output'], job_id)
-
+    # 记账不在这里做：由公开入口 research_process 在 finally 里统一落盘，
+    # 否则超时/异常路径烧掉的 token 会整段丢失（独立复核 2026-10-13 补）。
     return article_md, usage['input'], usage['output']
