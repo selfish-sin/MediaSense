@@ -122,6 +122,10 @@ describe('ChatPanel 流式正文渲染', () => {
     })
 
     const wrapper = await mountPanel()
+    // 记录发送前的基线条数：组件挂载时会载入会话历史，不能假设数组是空的
+    const baselineCount = wrapper.vm.messages.length
+    const baselineAssistantCount =
+      wrapper.vm.messages.filter(m => m.role === 'assistant').length
     wrapper.vm.input = '新问题'
     await wrapper.vm.onSend()
     await flushPromises()
@@ -136,6 +140,19 @@ describe('ChatPanel 流式正文渲染', () => {
     handlers.onEvent({ type: 'content', delta: '第二段' })
     await flushPromises()
     expect(wrapper.text()).toContain('第一段第二段')
+
+    // ★ 消息条数断言（2026-10-13 独立复核补的回归锁）：
+    //   只断言文本包含是不够的——onSend 曾把同一个 assistant 对象 push 了两次
+    //   （修响应式代理时多写了一行 push，没删原来那行），多出来的那个是**空对象**，
+    //   不产生任何文本，所以 text() 断言照样通过，而用户每次追问回答上方会多出
+    //   一行空「AI」占位、且 :key 重复，必须刷新页面才消失。
+    //   必须在 onEnd **之前**断言：onEnd 会触发 loadHistory 用会话历史整体替换
+    //   messages 数组，之后再数就数不到这次发送产生的那两条了。
+    const sent = wrapper.vm.messages
+    expect(sent).toHaveLength(baselineCount + 2)
+    expect(sent.filter(m => m.role === 'assistant')).toHaveLength(baselineAssistantCount + 1)
+    const ids = sent.map(m => m.id)
+    expect(new Set(ids).size).toBe(ids.length)
 
     handlers.onEnd(false)
     await flushPromises()

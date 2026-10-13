@@ -607,6 +607,33 @@ async def _run_search(mode: str, question: str, job_title: str = "") -> SearchOu
     return SearchOutcome(sources=sources, text=fmt_sources(sources), provider=provider)
 
 
+def build_stream_payload(model_cfg: dict, model_key: str, messages: list) -> dict:
+    """构造追问流式请求体（抽成纯函数以便直接测行为，而不是 grep 源码字符串）。
+
+    ★ 2026-10-13：`max_tokens` 必须用**真值守卫**，不能用
+      `model_cfg.get("max_tokens", 4096)` —— 后者的默认值只在**键缺失**时生效，
+      而模型表的 max_tokens 允许为 NULL（`ModelConfigCreate.max_tokens` 默认 None
+      且原样落库），键存在值为 None 时会发出 `"max_tokens": null`，
+      OpenAI 兼容网关多以 400 拒绝（max_tokens must be an integer）→
+      追问"莫名其妙失败"。只读查生产库 10 个模型该列全为 NULL，即每次追问都命中。
+      与 `services/ai_processor.py` 的 `if max_tokens:` 守卫对齐：空就不带该字段。
+    """
+    payload = {
+        "model": model_cfg.get("model_id") or model_cfg.get("key") or model_key,
+        "messages": messages,
+        "stream": True,
+    }
+    # temperature 同理：`REAL DEFAULT 0.3` + schema 不允许 None，正常路径取不到 NULL，
+    # 但历史行/迁移遗留的 NULL 会让 dict.get(k, 0.3) 返回 None 并发出 "temperature": null
+    # ——同一个坑，宁可回落到默认值也不要把 null 发给网关。
+    temperature = model_cfg.get("temperature")
+    payload["temperature"] = 0.3 if temperature is None else temperature
+    max_tokens = model_cfg.get("max_tokens")
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
+    return payload
+
+
 def _build_messages(original_ctx, result_ctx, history, question, search_text, regenerate,
                     search_mode="off"):
     ctx = [
@@ -985,20 +1012,7 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
                 search_mode=search_mode,
             )
 
-            payload = {
-                "model": model_cfg.get("model_id") or model_cfg.get("key") or model_key,
-                "messages": messages,
-                "stream": True,
-                "temperature": model_cfg.get("temperature", 0.3),
-            }
-            # ★ 2026-10-13 修复：`dict.get(k, 默认)` 的默认值只在**键缺失**时生效；
-            #   模型表的 max_tokens 允许为 NULL（ModelConfigCreate 默认 None，原样落库），
-            #   键存在值为 None 时会发出 "max_tokens": null，OpenAI 兼容网关多以
-            #   400 拒绝（max_tokens must be an integer）→ 追问"莫名其妙失败"。
-            #   与 services/ai_processor.py 的 `if max_tokens:` 守卫对齐：空就不带该字段。
-            _max_tokens = model_cfg.get("max_tokens")
-            if _max_tokens:
-                payload["max_tokens"] = _max_tokens
+            payload = build_stream_payload(model_cfg, model_key, messages)
             headers = {"Content-Type": "application/json"}
             if model_cfg.get("auth_type") != "none":
                 headers["Authorization"] = f"Bearer {model_cfg.get('api_key', '')}"

@@ -1991,29 +1991,44 @@ class TestChatMaxTokensNotNull:
     （ModelConfigCreate 默认 None 且原样落库），键存在值为 None 时会发 null，
     OpenAI 兼容网关多以 400 拒绝 → 追问"莫名其妙失败"。只读查生产库 10 个模型
     该列全为 NULL，即当前每次追问都命中。
+
+    ★ 这些用例直接调用生产函数 `build_stream_payload`，**不在测试体内重写一遍
+      生产逻辑**——早先的版本把 `if cfg.get('max_tokens')` 抄进测试再断言自己抄的
+      那个字典，删掉整个守卫照样通过，属于证明不了什么的假测试。
     """
 
-    def test_null_max_tokens_field_is_omitted(self):
-        cfg = {"key": "k", "model_id": "m", "endpoint": "http://x", "api_key": "",
-               "max_tokens": None, "auth_type": "bearer"}
-        sent = {}
-        if cfg.get("max_tokens"):
-            sent["max_tokens"] = cfg["max_tokens"]
-        assert "max_tokens" not in sent
+    def _cfg(self, **over):
+        base = {"key": "k", "model_id": "m", "endpoint": "http://x",
+                "api_key": "", "auth_type": "bearer", "temperature": 0.3}
+        base.update(over)
+        return base
 
-    def test_real_max_tokens_is_kept(self):
-        cfg = {"max_tokens": 8192}
-        sent = {}
-        if cfg.get("max_tokens"):
-            sent["max_tokens"] = cfg["max_tokens"]
-        assert sent["max_tokens"] == 8192
+    def test_null_max_tokens_is_omitted(self):
+        """★ 核心回归：NULL 不得出现在请求体里（发出去就是 400）。"""
+        payload = routers_chat.build_stream_payload(self._cfg(max_tokens=None), "k", [])
+        assert "max_tokens" not in payload
 
-    def test_chat_payload_source_uses_truthiness_guard(self):
-        """锁住源码形态：不能再退回 dict.get(k, 默认值) 写法。"""
-        from pathlib import Path
-        src = Path(routers_chat.__file__).read_text(encoding="utf-8")
-        assert 'model_cfg.get("max_tokens", 4096)' not in src
-        assert 'payload["max_tokens"] = _max_tokens' in src
+    def test_missing_key_is_omitted(self):
+        payload = routers_chat.build_stream_payload(self._cfg(), "k", [])
+        assert "max_tokens" not in payload
+
+    @pytest.mark.parametrize("value", [0, "", None])
+    def test_falsy_values_all_omitted(self, value):
+        payload = routers_chat.build_stream_payload(self._cfg(max_tokens=value), "k", [])
+        assert "max_tokens" not in payload
+
+    @pytest.mark.parametrize("value", [4096, 8192])
+    def test_real_max_tokens_is_kept(self, value):
+        payload = routers_chat.build_stream_payload(self._cfg(max_tokens=value), "k", [])
+        assert payload["max_tokens"] == value
+
+    def test_payload_never_contains_json_null(self):
+        """锁住整条契约：请求体里不能出现 Python None（会被 httpx 序列化成 null）。"""
+        payload = routers_chat.build_stream_payload(
+            self._cfg(max_tokens=None, temperature=None), "k", [{"role": "user", "content": "hi"}])
+        assert None not in payload.values()
+        assert payload["model"] == "m"
+        assert payload["stream"] is True
 
 
 class TestTemplatesEmptyUpdateRejected:
@@ -2086,8 +2101,24 @@ class TestBatchSizeLimit:
     """批量端点必须设数量上限：/batch 导出逐条把完整 result_text 读进内存。"""
 
     def test_limit_constant_is_sane(self):
+        """上限必须与前端「全选当前筛选」的安全上限对齐。
+
+        ★ 这才是真正的不变量：前端 HistoryView 的 SELECT_ALL_CAP 刻意取 2000 并
+        承诺「可跨页批量操作」，后端若取更小的值，用户全选 500 条后点批量删除就会
+        被凭空多出来的这条限制挡住。改任一侧都必须同步改另一侧。
+        """
+        import re
+        from pathlib import Path
         from routers.jobs import MAX_BATCH_JOB_IDS
-        assert 0 < MAX_BATCH_JOB_IDS <= 1000
+
+        assert MAX_BATCH_JOB_IDS > 0
+        frontend = Path(__file__).resolve().parents[2] / "frontend" / "src" / "views" / "HistoryView.vue"
+        m = re.search(r"SELECT_ALL_CAP\s*=\s*(\d+)", frontend.read_text(encoding="utf-8"))
+        assert m, "前端 SELECT_ALL_CAP 常量找不到，改动时需人工对齐"
+        assert MAX_BATCH_JOB_IDS == int(m.group(1)), (
+            f"后端上限 {MAX_BATCH_JOB_IDS} 与前端 SELECT_ALL_CAP {m.group(1)} 不一致，"
+            "会凭空多出「全选后批量操作被拒」的失败路径"
+        )
 
     def test_export_batch_rejects_oversized(self, client):
         from routers.jobs import MAX_BATCH_JOB_IDS

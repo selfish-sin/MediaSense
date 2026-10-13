@@ -789,11 +789,12 @@ async function onSend(overrideContent) {
   // 本地消息先打自己的时间戳（服务端 created_at 要等重载后才有）
   const nowIso = new Date().toISOString()
   messages.value.push({ id: uid, role: 'user', content, thinking: '', sources: [], token_usage: null, created_at: nowIso })
-  messages.value.push({ id: aid, role: 'assistant', content: '', thinking: '', sources: [], search: null, token_usage: null, created_at: nowIso })
   // ★ 逐 token 追加必须写**响应式代理**：push 进数组的是裸对象，闭包再持有它就是 raw，
   //   `assistant.content += delta` 不触发视图更新（正文会停在「生成中」直到 onEnd 才整段出现），
   //   与 onRegenerate 不同——那里的 answer 本来就是 computed 里的代理。
   //   同 markDuration / setSearchState / setContextTrim 的坑：push 后从 messages 里取回代理。
+  //   ⚠️ 这里只能 push **一次**：多 push 会在数组里留下一个 id 相同的空 assistant，
+  //     用户看到每次追问回答上方多一行空「AI」占位（且 :key 重复），直到刷新才消失。
   messages.value.push({ id: aid, role: 'assistant', content: '', thinking: '', sources: [], search: null, token_usage: null, created_at: nowIso })
   const assistant = messages.value[messages.value.length - 1]
   activeMsg.value = assistant

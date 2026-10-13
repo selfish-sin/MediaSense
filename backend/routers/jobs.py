@@ -134,9 +134,13 @@ def _resolve_staged_upload(raw_path: Optional[str]) -> Path:
 #   export / chat 等其他路由 `from routers.jobs import assert_batch_size` 复用。
 #   为什么需要：/batch 导出与 /batch-disk-info 都会**逐条把完整 result_text 读进内存**
 #   再打包、再逐条递归统计磁盘，全程在一次请求内同步完成——无上限时内存峰值随选中
-#   数量线性增长，会变成一次长时间阻塞的请求。同项目 chat 的 MAX_BATCH_DELETE=200
-#   已经确立了「批量要设限」的共识，这里此前漏了。
-MAX_BATCH_JOB_IDS = 200
+#   数量线性增长，会变成一次长时间阻塞的请求。
+#   ★ 取值 2000 是**与前端 `HistoryView.SELECT_ALL_CAP` 对齐**，不是随手拍的：
+#     前端「全选当前筛选」刻意以 2000 为安全上限并承诺「可跨页批量操作」，
+#     后端若取更小的值，用户全选 500 条后点批量删除就会被这条新限制挡住——
+#     凭空多出一个此前不存在的失败路径。真要再收紧，必须**前后端一起改**。
+#     若日后确实成为性能问题，正确方向是服务端流式出 ZIP，而不是压低上限。
+MAX_BATCH_JOB_IDS = 2000
 
 
 def assert_batch_size(job_ids: list[str], *, what: str = 'job_ids') -> None:
@@ -187,8 +191,10 @@ def require_local_client(request: Request, *, what: str = '该操作') -> None:
         pass
     raise HTTPException(
         status_code=403,
-        detail=f'{what}仅允许从本机发起（当前来源 {host or "未知"}）。'
-               '本服务无认证，破坏性操作不对局域网开放。',
+        detail=f'{what}仅允许从本机发起（当前请求来源 {host or "未知"}）。'
+               '本服务无认证，破坏性操作不对局域网开放。'
+               '如你在本机操作，请改用 http://localhost:7001 打开页面（用局域网 IP 访问时'
+               '请求来源会被判为非本机）。',
     )
 
 
