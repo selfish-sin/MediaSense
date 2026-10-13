@@ -12,13 +12,13 @@ jobs:
   verify:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
           cache: pip
           cache-dependency-path: backend/requirements*.txt
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm
@@ -35,5 +35,11 @@ jobs:
       - name: Install locked frontend dependencies
         working-directory: frontend
         run: npm ci
+      # bin/ 是 .gitignore 的（110MB ffmpeg.exe 不进仓库），而 cloud_asr._ffmpeg_bin() 是
+      # 「项目 bin/ 优先、PATH 兜底」——runner 上两者都缺，TestExportChunksReal 的 4 个
+      # 实测用例就在 setup 阶段 FileNotFoundError。装 choco 版 ffmpeg（同为 gyan.dev 构建）
+      # 补上 PATH 这一路，保留真实 ffmpeg 覆盖而不是给测试加 skip。
+      - name: Install ffmpeg (backend integration tests shell out to it)
+        run: choco install ffmpeg -y --no-progress
       - name: Verify Python and frontend
         run: backend/venv/Scripts/python.exe verify.py all
