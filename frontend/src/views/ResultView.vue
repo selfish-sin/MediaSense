@@ -52,6 +52,9 @@ const versionLoading = ref(false)
 // 思维导图
 const mindmapLoading = ref(false)
 const mindmapReady = ref(false)
+// 当前已渲染的导图属于哪个总结版本（0 = 最新版）。导图是基于某一版正文生成的，
+//   切版本后旧导图不再对得上 → 必须与 mindmapReady 一起作废，否则标签写着 v1、图却是 v2 的。
+const mindmapVersion = ref(0)
 const mindmapContainer = ref(null)
 
 // ============ 转录文本 tab ============
@@ -176,7 +179,8 @@ async function switchToVersion(version) {
   activeVersionResult.value = null  // 先清空，避免短暂显示旧版本数据
   versionLoading.value = true
   // 思维导图是基于**某个版本正文**生成的：切版本后旧导图已对不上，标记为需重生成
-  mindmapReady.value = false
+  //   （invalidateMindmap 同时作废在飞的导图请求：它回包的是旧版本正文，写进来等于把旧版钉在新版本上）
+  invalidateMindmap()
   // 搜索命中位置是按正文逐字算的下标，换版本后旧下标会指向别的文字 → 清掉重来
   resetSearch()
   // 从后端加载该版本的全文
@@ -314,7 +318,7 @@ watch(() => route.params.jobId, (newId, oldId) => {
     isStreaming.value = false
     streamingText.value = ''
     streamingThinking.value = ''
-    mindmapReady.value = false
+    invalidateMindmap()
     resultTab.value = 'summary'
     // 重置转录状态
     transcriptText.value = ''
@@ -594,6 +598,21 @@ const canResummarize = computed(() => {
 
 // ============ 思维导图 ============
 
+// 作废已渲染的导图：标记为需重生成，**并作废在飞请求**。
+// 复用正文的 versionReqSeq（不另造第二套并发原语）：导图与正文看的是同一份「当前版本」，
+// 任何一次导图作废都意味着当前版本正文变了或换了任务，在飞回包属于旧正文/旧任务——
+// 写进来就是「标签写着正在查看 v1、图却是 v2 的」，比不生成更糟。
+function invalidateMindmap() {
+  mindmapReady.value = false
+  mindmapVersion.value = 0
+  versionReqSeq++
+}
+
+// 在飞导图请求是否已作废（序号或版本对不上：切版本 / 切回最新版 / 换任务）
+function isStaleMindmapReq(reqSeq, reqVersion) {
+  return reqSeq !== versionReqSeq || currentVersionNo.value !== reqVersion
+}
+
 async function generateMindmap() {
   if (mindmapLoading.value) return
   // ★ 无总结结果不发起请求（2026-10-06）：后端会 400，前端先给出可行动提示
@@ -611,8 +630,14 @@ async function generateMindmap() {
   if (!container) { ElMessage.error('思维导图容器未能挂载，请刷新页面重试'); return }
   mindmapLoading.value = true
   mindmapReady.value = false
+  // 记录本次导图基于哪一版正文：回包时据此判断是否已被切版本/换任务作废
+  const reqSeq = versionReqSeq
+  const reqVersion = currentVersionNo.value
   try {
-    const res = await jobsApi.generateMindmap(route.params.jobId, undefined, currentVersionNo.value || undefined)
+    const res = await jobsApi.generateMindmap(route.params.jobId, undefined, reqVersion || undefined)
+    // 作废的回包直接丢弃：不渲染、不置 mindmapReady（容器回到「未生成」占位，
+    // 再点一次思维导图 tab 即按当前版本重生成）；finally 仍复位 loading，用户不会被卡住
+    if (isStaleMindmapReq(reqSeq, reqVersion)) return
     if (!res?.data?.mindmap_md) {
       ElMessage.warning('思维导图生成失败：返回内容为空')
       mindmapLoading.value = false
@@ -620,12 +645,15 @@ async function generateMindmap() {
     }
     // 直接用 markmap-lib 的 Transformer 解析节点树，手写 HTML 渲染
     const { Transformer } = await import('markmap-lib')
+    // 动态 import 期间也可能切了版本/换任务：写 DOM 前再校验一次
+    if (isStaleMindmapReq(reqSeq, reqVersion)) return
     const transformed = new Transformer().transform(res.data.mindmap_md)
     const root = transformed?.root
     if (!root || !root.content) {
       // Transformer 解析失败 → 直接显示原始 markmap markdown
       container.innerHTML = `<pre style="padding:16px;background:#1a1a1a;color:#0f0;overflow:auto;height:100%;">${res.data.mindmap_md.replace(/</g,'&lt;')}</pre>`
       mindmapReady.value = true
+      mindmapVersion.value = reqVersion
       return
     }
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark'
@@ -652,6 +680,7 @@ async function generateMindmap() {
     const html = `<div style="padding:16px;font-family:sans-serif;font-size:14px;background:${bg};color:${text};min-height:400px;overflow:auto;">${renderNode(root, 0)}</div>`
     container.innerHTML = html
     mindmapReady.value = true
+    mindmapVersion.value = reqVersion
   } catch (err) {
     ElMessage.error('思维导图生成失败: ' + (err?.message || String(err)))
   } finally {
