@@ -17,6 +17,11 @@ export function useJobRestore(deps) {
   } = deps
 
   let _routeQueryHandled = false
+  // ★ 首次挂载时 onMounted 与 onActivated 会并发调进来（keep-alive 首次也触发 onActivated）。
+  //   两次并发 → 重复 GET / 重复 router.replace；且两次都判定「没有 query 参数」的那一次
+  //   还会落进 tryRestore()，把 localStorage 里**另一个**仍在跟踪的任务 load 进来，
+  //   覆盖刚回填的配置。_routeQueryHandled 只在末尾置位，挡不住并发 → 在跑时复用同一个 Promise。
+  let _routeQueryRunning = null
 
   function applyJobConfig(job) {
     const options = job?.options && typeof job.options === 'object' ? job.options : {}
@@ -60,6 +65,17 @@ export function useJobRestore(deps) {
   }
 
   async function handleRouteQuery() {
+  // 已在执行：复用同一次执行的 Promise，不并发跑第二遍
+  if (_routeQueryRunning) return _routeQueryRunning
+  _routeQueryRunning = runRouteQuery()
+  try {
+    return await _routeQueryRunning
+  } finally {
+    _routeQueryRunning = null
+  }
+}
+
+async function runRouteQuery() {
     const rerunJobId = route.query.rerun && route.query.rerun !== '1'
       ? route.query.rerun
       : route.query.rerun === '1' ? route.query.restore : null

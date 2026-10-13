@@ -177,11 +177,11 @@ async function saveEdit() {
     jobStore.resultText = editText.value
     editMode.value = false
     ElMessage.success('已保存')
-  } catch {
-    // 即使后端保存失败，也更新前端状态
-    jobStore.resultText = editText.value
-    editMode.value = false
-    ElMessage.warning('前端已更新，但后端保存失败')
+  } catch (err) {
+    // ★ 后端没存上就不能改前端正文：此前失败也照旧写 resultText 并退出编辑，只弹一条 warning，
+    //   结果是刷新 / 导出 / 重新总结拿到的仍是旧文本，且用户以为已经改完了（无恢复入口）。
+    //   改为：保留编辑态与编辑框内容（= 重试入口），本地正文保持不变，失败原因说清。
+    ElMessage.error(`保存失败：${err?.message || '未知错误'}。未保存的内容仍保留在编辑框里，可直接重试或取消`, { duration: 8000 })
   } finally {
     savingEdit.value = false
   }

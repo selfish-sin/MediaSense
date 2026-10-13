@@ -6,7 +6,7 @@ import {
   Search, TriangleAlert,
 } from 'lucide-vue-next'
 import { storageCleanupApi } from '../utils/api'
-import { isDialogCancel } from '../utils/errorNotice'
+import { createFailureNotifier, isDialogCancel } from '../utils/errorNotice'
 
 const policy = reactive({
   staged_ttl_hours: 72,
@@ -90,11 +90,19 @@ function syncState(payload) {
   else stopPolling()
 }
 
+// 轮询失败节流：后端不可达时 1.2s 一次，逐次 ElMessage.error 会把真正的错误刷没
+// （同 useBackendLogs 的处理）。失败原因仍常驻页内可见，不靠弹窗堆叠。
+const statusNotifier = createFailureNotifier('连续读取存储状态失败，请确认后端服务是否正常')
+const statusError = ref('')
+
 async function loadStatus() {
   try {
     syncState(await storageCleanupApi.status())
+    statusNotifier.ok()
+    statusError.value = ''
   } catch (error) {
-    ElMessage.error(`读取存储状态失败：${error.message}`)
+    statusNotifier.fail()
+    statusError.value = `读取存储状态失败：${error.message}`
   }
 }
 
@@ -210,6 +218,7 @@ onBeforeUnmount(stopPolling)
     </section>
 
     <el-alert v-if='state.error' :title='state.error' type='error' :closable='false' show-icon />
+    <el-alert v-if='statusError' :title='statusError' type='warning' :closable='false' show-icon />
 
     <section v-if='state.phase === "running" || state.results?.length' class='progress-section'>
       <div class='section-heading compact'>

@@ -130,19 +130,26 @@ onUnmounted(() => {
   }
 })
 
+// 预览请求序号：连续改维度会有多个 promptPreview 并发在飞，先发后到的会把
+// 后一次选择的预览文本覆盖掉，loading 也被先完成的请求提前复位 → 只采纳最后一次
+let previewSeq = 0
+
 async function loadPreview() {
   if (!Object.keys(selected.value).length) return
+  const seq = ++previewSeq
   previewLoading.value = true
   try {
     const payload = { dimensions: selected.value }
     const customPrompt = settings.buildCustomPrompt()
     if (customPrompt) payload.custom_prompt = customPrompt
     const res = await summaryApi.promptPreview(payload)
+    if (seq !== previewSeq) return  // 已被更新的一次取代，丢弃
     promptPreview.value = res.prompt || ''
   } catch {
+    if (seq !== previewSeq) return
     promptPreview.value = '预览加载失败'
   } finally {
-    previewLoading.value = false
+    if (seq === previewSeq) previewLoading.value = false
   }
 }
 </script>

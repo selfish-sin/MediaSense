@@ -180,7 +180,13 @@ onMounted(async () => {
         // ★ 仅生成字幕等无流式输出的任务没有 ai_token 渐进填充，done 时补拉任务
         //   （result_text=转录文本，结果区/下载素材才有内容；总结任务已有流式文本则跳过）
         if (!jobStore.resultText) {
-          jobStore.loadJob(data.job_id)
+          // loadJob 内部失败会重新抛出：必须挂 catch，否则是悬空 Promise（unhandled rejection）。
+          // 失败时任务已 completed 但 result_text 没补回来，结果区会长期停在「暂无结果」→ 必须可见
+          jobStore.loadJob(data.job_id).catch((err) => {
+            jobStore.addLog(`补拉任务结果失败: ${err?.message || '未知错误'}`)
+            statusCheckNotifier.fail()
+            ElMessage.error(`任务已完成但结果拉取失败，请刷新页面重试：${err?.message || '未知错误'}`, { duration: 8000 })
+          })
         }
         jobStore.addLog('AI处理完成')
         tokenPanelRef.value?.refresh()  // 刷新Token统计

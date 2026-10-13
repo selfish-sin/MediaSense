@@ -789,8 +789,13 @@ async function onSend(overrideContent) {
   // 本地消息先打自己的时间戳（服务端 created_at 要等重载后才有）
   const nowIso = new Date().toISOString()
   messages.value.push({ id: uid, role: 'user', content, thinking: '', sources: [], token_usage: null, created_at: nowIso })
-  const assistant = { id: aid, role: 'assistant', content: '', thinking: '', sources: [], search: null, token_usage: null, created_at: nowIso }
-  messages.value.push(assistant)
+  messages.value.push({ id: aid, role: 'assistant', content: '', thinking: '', sources: [], search: null, token_usage: null, created_at: nowIso })
+  // ★ 逐 token 追加必须写**响应式代理**：push 进数组的是裸对象，闭包再持有它就是 raw，
+  //   `assistant.content += delta` 不触发视图更新（正文会停在「生成中」直到 onEnd 才整段出现），
+  //   与 onRegenerate 不同——那里的 answer 本来就是 computed 里的代理。
+  //   同 markDuration / setSearchState / setContextTrim 的坑：push 后从 messages 里取回代理。
+  messages.value.push({ id: aid, role: 'assistant', content: '', thinking: '', sources: [], search: null, token_usage: null, created_at: nowIso })
+  const assistant = messages.value[messages.value.length - 1]
   activeMsg.value = assistant
   streaming.value = true
   input.value = ''
@@ -953,8 +958,11 @@ async function onDeleteTurn(msg) {
     return
   }
   try {
-    await chatApi.deleteFrom(props.jobId, msg.id)
+    // ★ 必须走批量端点（按项删除，不级联后续轮次）：deleteFrom 会把该条及其之后的
+    //   所有消息一起删掉，与「删除整轮」的确认文案相反，且不可恢复
+    await chatApi.deleteMessages(props.jobId, [msg.id])
     await loadHistory()
+    ElMessage.success('已删除该轮对话')
   } catch (e) {
     ElMessage.error('删除失败: ' + (e?.message || '未知错误'))
   }

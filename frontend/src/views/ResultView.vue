@@ -147,10 +147,15 @@ async function loadSummaryHistory() {
   }
 }
 
+// 版本正文请求序号：快速点 v2 再点 v3 时两个请求并发在飞，只有最后一次的响应可以写入，
+// 否则先发后到的 v2 会把 activeVersion 已是 3 的正文覆盖成 v2（导出/思维导图仍按 v3 生成）。
+let versionReqSeq = 0
+
 // 切换到指定版本
 async function switchToVersion(version) {
   if (!version) {
-    // 切回最新版（job.result_text）
+    // 切回最新版（job.result_text）——同时作废在飞请求，否则旧响应会把历史正文塞回来
+    versionReqSeq++
     activeVersion.value = 0
     activeVersionResult.value = null
     versionLoading.value = false
@@ -159,6 +164,7 @@ async function switchToVersion(version) {
   }
   if (version === job.value?.summary_version && job.value?.result_text) {
     // 就是当前最新版
+    versionReqSeq++
     activeVersion.value = 0
     activeVersionResult.value = null
     versionLoading.value = false
@@ -174,8 +180,11 @@ async function switchToVersion(version) {
   // 搜索命中位置是按正文逐字算的下标，换版本后旧下标会指向别的文字 → 清掉重来
   resetSearch()
   // 从后端加载该版本的全文
+  const reqId = ++versionReqSeq
   try {
     const res = await jobsApi.getSummaryVersion(route.params.jobId, version)
+    // 回包时已经切到别的版本（或切回最新版）→ 丢弃，绝不覆盖用户正在看的正文
+    if (reqId !== versionReqSeq || activeVersion.value !== version) return
     if (res?.result_text) {
       activeVersionResult.value = res
     } else {
@@ -184,10 +193,13 @@ async function switchToVersion(version) {
       activeVersion.value = 0
     }
   } catch (err) {
+    // 失败同理：已被新切换取代就什么都不做，否则也不要把用户从当前版本弹走
+    if (reqId !== versionReqSeq || activeVersion.value !== version) return
     ElMessage.error('加载版本失败: ' + err.message)
     activeVersion.value = 0
   } finally {
-    versionLoading.value = false
+    // 只有最后一次请求才有权复位 loading，避免先完成的请求提前关掉转圈
+    if (reqId === versionReqSeq) versionLoading.value = false
   }
 }
 

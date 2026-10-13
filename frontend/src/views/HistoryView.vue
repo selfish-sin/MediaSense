@@ -29,11 +29,36 @@ const tableRef = ref(null)    // 用于 clearSelection / toggleRowSelection
 const selectAllMode = ref(false)
 const allFilteredJobs = ref([])
 const selectAllLoading = ref(false)
+// ★ 全选集合建立时用的关键词：关键词一变，集合与表格里看到的就不是一回事了
+const selectAllKeyword = ref('')
 const SELECT_ALL_CAP = 2000   // 安全上限，避免误选上万条后一次批量删除/ZIP
 
 // 当前生效的选择集：全选模式优先，否则用表格勾选
 const activeSelection = computed(() =>
   selectAllMode.value ? allFilteredJobs.value : selectedJobs.value)
+
+/** 全选集合是否已与当前关键词脱节（表格内容变了、批量操作却还作用在旧集合上） */
+function isSelectAllStale() {
+  return selectAllMode.value && selectAllKeyword.value !== searchQuery.value.trim()
+}
+
+/**
+ * 让过期的「全选当前筛选」失效（只清全选那套，逐行勾选由 reserve-selection 保留）。
+ * 静默失效会让人以为批量操作仍然作用在整批上，所以必须给可见提示。
+ */
+function invalidateSelectAll(reason) {
+  if (!selectAllMode.value && !allFilteredJobs.value.length) return
+  selectAllMode.value = false
+  allFilteredJobs.value = []
+  ElMessage.warning(reason)
+}
+
+/** 批量操作前的兜底闸门：全选集合过期时拒绝执行，绝不按旧集合删/导出 */
+function guardSelectAllFresh() {
+  if (!isSelectAllStale()) return false
+  invalidateSelectAll('关键词已改变，「全选当前筛选」已失效：请重新全选后再批量操作')
+  return true
+}
 
 async function loadJobs() {
   loading.value = true
@@ -193,6 +218,12 @@ async function doSearch() {
   const q = searchQuery.value.trim()
   if (!q) { return }
   searching.value = true
+  // ★ 改关键词后表格内容就换了，全选集合还是旧关键词的那一批 —— 此时批量操作作用的
+  //   对象与用户看到的完全不是一回事（曾导致按标签理解就删错）→ 关键词一变就失效。
+  //   同关键词重复搜索不算变，不该白白丢掉有效选择。
+  if (selectAllMode.value && selectAllKeyword.value !== q) {
+    invalidateSelectAll('关键词已改变，「全选当前筛选」已失效：如需批量操作请重新全选')
+  }
   try {
     page.value = 1  // ★ 搜索时回到第一页
     await loadJobs()
@@ -206,6 +237,7 @@ async function doSearch() {
 function clearSearch() {
   searchQuery.value = ''
   page.value = 1
+  invalidateSelectAll('筛选已清空，「全选当前筛选」已失效：如需批量操作请重新全选')
   loadJobs()
 }
 
@@ -245,10 +277,24 @@ async function handleCancel(jobId) {
 // ============ 多选 + 批量操作 ============
 function handleSelectionChange(selection) {
   selectedJobs.value = selection
-  // 用户手动改动了表格勾选 → 退出「全选筛选结果」模式（避免两套选择集打架）
-  if (selectAllMode.value && selection.length > 0) {
+  if (!selectAllMode.value) return
+  // 空选择 = clearSelection 的回声，不是用户的操作，直接忽略
+  if (selection.length === 0) return
+  // ★ 全选模式下点行勾选 = 「从全选集合里排除这一行」。
+  //   此前直接退出全选模式并清空 allFilteredJobs：500 项的选择集瞬间塌成 1 项，
+  //   紧接着点批量删除就只删了那一项，且全程无任何提示 —— 绝不能静默替换。
+  for (const row of selection) {
+    allFilteredJobs.value = allFilteredJobs.value.filter(j => j.id !== row.id)
+  }
+  const excluded = selection.length
+  // 表格内部勾选必须同步清掉：它与 allFilteredJobs 是两套状态，留着会变成幽灵选择
+  tableRef.value?.clearSelection()
+  selectedJobs.value = []
+  if (allFilteredJobs.value.length === 0) {
     selectAllMode.value = false
-    allFilteredJobs.value = []
+    ElMessage.info(`已从全选中排除全部 ${excluded} 项，已退出全选模式`)
+  } else {
+    ElMessage.info(`已从全选中排除 ${excluded} 项，剩余 ${allFilteredJobs.value.length} 项；如需恢复请重新点「全选当前筛选」`)
   }
 }
 
@@ -256,6 +302,7 @@ function handleSelectionChange(selection) {
 function resetSelection() {
   selectAllMode.value = false
   allFilteredJobs.value = []
+  selectAllKeyword.value = ''
   selectedJobs.value = []
   tableRef.value?.clearSelection()
 }
@@ -286,6 +333,7 @@ async function handleSelectAllFiltered() {
     tableRef.value?.clearSelection()
     selectedJobs.value = []
     allFilteredJobs.value = collected
+    selectAllKeyword.value = keyword
     selectAllMode.value = true
     if (matched > collected.length) {
       ElMessage.warning(`筛选命中 ${matched} 项，已全选前 ${collected.length} 项（上限 ${SELECT_ALL_CAP}）`)
@@ -309,6 +357,7 @@ function _formatBytes(bytesVal) {
 }
 
 async function handleBatchCancel() {
+  if (guardSelectAllFresh()) return
   const running = activeSelection.value.filter(j => activeStatuses.includes(j.status))
   if (running.length === 0) {
     ElMessage.warning('选中的任务中没有正在运行的')
@@ -336,6 +385,7 @@ async function handleBatchCancel() {
 }
 
 async function handleBatchExport() {
+  if (guardSelectAllFresh()) return
   // 只导出已完成且有结果的任务；其余状态由后端兜底跳过，不会报错
   const exportable = activeSelection.value.filter(j => j.status === 'completed')
   if (exportable.length === 0) {
@@ -351,6 +401,7 @@ async function handleBatchExport() {
 }
 
 async function handleBatchDelete() {
+  if (guardSelectAllFresh()) return
   if (activeSelection.value.length === 0) return
   const ids = activeSelection.value.map(j => j.id)
 
@@ -450,14 +501,14 @@ onMounted(() => {
         <el-button size="small" plain :loading="selectAllLoading" @click="handleSelectAllFiltered">
           全选当前筛选（{{ total }} 项）
         </el-button>
-        <span class="select-all-bar__hint">翻页 / 改筛选都会保留已勾选项，可跨页累加后再批量操作</span>
+        <span class="select-all-bar__hint">逐行勾选可跨页累积；「全选当前筛选」改关键词后失效，需重新全选</span>
       </div>
 
       <!-- 批量操作栏（有任务时常驻，未选中时按钮禁用；若选中才渲染，首次勾选会突然插入把表格顶下去）
            allFilteredJobs 全选模式下当前页可能为空，所以带 activeSelection 条件兜底 -->
       <div v-if="jobs.length > 0 || activeSelection.length > 0" class="batch-toolbar">
         <span class="batch-toolbar__count">
-          已选 {{ activeSelection.length }} 项{{ selectAllMode ? '（当前筛选全部）' : '' }}
+          已选 {{ activeSelection.length }} 项{{ isSelectAllStale() ? '（关键词已改，将失效）' : (selectAllMode ? '（当前筛选全部）' : '') }}
         </span>
         <el-button size="small" type="warning" :disabled="!activeSelection.length" @click="handleBatchCancel">
           批量取消（{{ activeSelection.filter(j => activeStatuses.includes(j.status)).length }}）

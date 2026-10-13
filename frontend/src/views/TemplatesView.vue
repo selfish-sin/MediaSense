@@ -130,13 +130,19 @@ function selectModule(dimKey, moduleKey) {
   doSelect(dimKey, moduleKey)
 }
 
+// 模块加载请求序号：连点不同模块时多个 getOverride 并发在飞，先发后到的响应会把
+// 编辑器内容换成上一个模块的，loading 也被先完成的请求提前复位 → 只采纳最后一次
+let selectSeq = 0
+
 async function doSelect(dimKey, moduleKey) {
   selectedDim.value = dimKey
   selectedModule.value = moduleKey
+  const seq = ++selectSeq
   loading.value = true
   dirty.value = false
   try {
     const res = await summaryApi.getOverride(dimKey, moduleKey)
+    if (seq !== selectSeq) return  // 已被更新的选择取代，丢弃（否则内容会被换回去）
     originalDefault.value = res.default_text || ''
     isCustomized.value = res.is_customized
     isCustomModule.value = !!res.is_custom_module
@@ -144,10 +150,11 @@ async function doSelect(dimKey, moduleKey) {
     backupPrevious.value = res.previous_text || ''
     editingText.value = res.custom_text || res.default_text || ''
   } catch (err) {
+    if (seq !== selectSeq) return
     ElMessage.error('加载模块失败: ' + (err.message || err))
     editingText.value = ''
   } finally {
-    loading.value = false
+    if (seq === selectSeq) loading.value = false
   }
 }
 
