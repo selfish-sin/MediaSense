@@ -393,6 +393,40 @@ yt-dlp 遇 412 重试循环 / 网络半开连接 / ffmpeg 卡住即长期不返�
 后续 `getvalue()` 必然抛 `ValueError`（frozen 下读不到 yt-dlp 输出）——必须局部持有
 引用并用 `detach()` 断开。
 
+### 7.1.1 锁必须由 worker 自己持有，不能挂在调用方（2026-10-13 第二轮修复）
+
+上一条把超时补上后暴露了下一个坑：原来的写法是
+
+```python
+with _YTDLP_STDIO_LOCK:          # ← 锁在**调用方**
+    worker.start(); worker.join(timeout)
+    if worker.is_alive(): raise TimeoutExpired   # ← raise 在 with 块内
+```
+
+`raise` 触发时锁**立即释放**，而 worker 还在 `_yt_dlp.main()` 里、**仍把 `sys.stdout`
+指向自己的 wrapper**。于是下一次调用与僵尸交错：
+
+1. 新调用捕获到的 `old_out` 是**僵尸的 wrapper**（不是真实 stdout）；
+2. 僵尸中途结束，把 `sys.stdout` 顶回真实 stdout → 新调用的重定向被顶掉，
+   它的输出缓冲**不完整**（部分内容漏进真实 stdout）；
+3. 新调用结束时又把 `sys.stdout` 指回**已被 detach 的僵尸 wrapper**。
+
+结果：进程内此后任何 `print()` 永久抛 `ValueError: underlying buffer has been
+detached`。另有一个更轻的症状：超时到僵尸结束之间，全进程的控制台输出被写进僵尸的
+缓冲器后随 `detach()` 丢弃，一条都不出现。
+
+修法（**结构上消除交错，而不是靠时序凑安全**）：锁的 `with` 移进 worker 内部，覆盖
+「接管 stdio → 调 main → 还原 → flush → detach → 读缓冲」全过程；调用方不再持锁，
+只用 per-call `threading.Event`（在 worker 的**外层** finally 置位，即释放锁之后）判断
+是否真正走完。未走完（仍在跑，或卡在等上一个僵尸的锁）就抛 `TimeoutExpired`
+且**绝不碰 stdio**。
+
+⚠️ 两条必须记住的推论：
+- 僵尸永不可杀（Python 线程）→ 它会一直占锁，后续 yt-dlp 调用同样干净超时。这是
+  **刻意接受**的：应用此时已不可用，明确报错要求重启远优于静默损坏整个进程。
+  日志文案必须说清「无法强制中断，请重启应用」。
+- 任何**改用 `with 锁:` 的新写法都会把锁还给调用方**，务必确认 `with` 在 worker 体内。
+
 ### 7.2 云端 ASR 的取消语义（2026-10-13 修复）
 
 `cancel_check` 原先只在 `as_completed` 的迭代点检查，`finally` 里

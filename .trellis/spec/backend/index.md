@@ -110,10 +110,22 @@
   清空任务（`/clear`、`/clear/{status}`）、批量删除（`/batch-delete`）、
   删除单任务（`DELETE /{job_id}`）、删除模型（`DELETE /api/models/{key}`）。
   口径与 `storage_cleanup._require_local` 一致（localhost 或 loopback IP 放行）。
+- **覆盖范围（2026-10-13 第二轮补齐，此前只覆盖了前四项）**：另加
+  `POST /api/jobs/{id}/retry?force=true`、ASR provider 删除、ASR 本地模型删除
+  （`/local/{engine}` 与 `/local/whisper/{size}`）、模板删除、提示词覆盖重置
+  （`/summary/overrides` 与 `/summary/overrides/{dim}/{mod}`）。
+- **判定标准＝「操作是否不可逆销毁用户已有资产」，不是「是不是 DELETE」**。
+  据此**刻意不覆盖**：`/{job_id}/cancel`、`/batch-cancel`（只停止工作，可再次重试；
+  收紧会打断手机端远程取消）、`retry?force=false`（断点续传不删任何文件）。
+  **`retry` 的限制只挂在 `force=true` 分支上**——这是有意差异不是遗漏，改一边必须同步另一边。
 - **不要改绑回 `127.0.0.1`**：手机/平板访问是既有能力，改绑等于砍功能。加端点级限制
   既堵住局域网横向调用，又不动正常访问路径。
 - 新增破坏性端点时同样要加；测试里的 `TestClient` 必须显式传
   `client=('127.0.0.1', 50000)`（默认 host 是 `'testclient'`，本来就不该被放行）。
+- **守卫必须挂在任何 DB/文件操作之前**（先删了再报错＝数据已丢）；`test_routers.py` 的
+  `TestDestructiveEndpointsRequireLocalhost` 用 `mock.assert_not_called()` 钉住这一点。
+- ⚠️ **该测试的 `app` fixture 必须注册 `asr_admin_router`**：漏注册会让 `/api/asr/local/*`
+  等端点返回 404 而**不是** 403，测试变成假绿。fixture 要与 `main.py` 的真实装配保持一致。
 
 ### 总结版本写入（2026-10-13，勿再用 INSERT OR REPLACE 写新版本）
 
