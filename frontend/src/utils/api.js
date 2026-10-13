@@ -27,16 +27,43 @@ api.interceptors.response.use(
     }
     return response.data
   },
-  (error) => {
+  // ★ 必须异步：responseType='blob' 时错误体也是 Blob，
+  //   直接读 error.response.data.detail 恒为 undefined → 只能显示 axios 通用串
+  //   「Request failed with status code 4xx」，后端给的 detail 文案整条丢掉。
+  async (error) => {
     console.error('API Error:', error)
-    const detail = error.response?.data?.detail
-    // FastAPI 422 校验错误 detail 是数组，逐条提取 msg
-    const msg = Array.isArray(detail)
-      ? detail.map((d) => d.msg || JSON.stringify(d)).join('; ')
-      : (detail || error.message || '请求失败')
+    let msg = ''
+    try {
+      msg = await resolveErrorMessage(error)
+    } catch {
+      // 错误体读不出来（blob 读取失败等）→ 回落 axios 通用文案，绝不吞错
+      msg = error.message || '请求失败'
+    }
     return Promise.reject(new Error(msg))
   }
 )
+
+// 后端 detail → 可读文案（FastAPI 422 的 detail 是数组，逐条取 msg）
+function formatDetail(detail) {
+  if (Array.isArray(detail)) return detail.map((d) => d.msg || JSON.stringify(d)).join('; ')
+  return detail || ''
+}
+
+// 错误体可能是 JSON 对象，也可能是包着 JSON 的 Blob（blob 响应），
+// 再兜一层纯文本；都取不到才回落 axios 的通用文案（错误可见、不臆造）
+async function resolveErrorMessage(error) {
+  const data = error.response?.data
+  let detail = data?.detail
+  if (detail === undefined && typeof Blob !== 'undefined' && data instanceof Blob) {
+    const text = await data.text()
+    try {
+      detail = JSON.parse(text)?.detail
+    } catch {
+      detail = text.slice(0, 200)
+    }
+  }
+  return formatDetail(detail) || error.message || '请求失败'
+}
 
 // ============ 任务相关 API ============
 export const jobsApi = {

@@ -80,6 +80,30 @@ describe('api 拦截器', () => {
     await expect(Promise.reject(err).catch(captured.responseError)).rejects.toThrow('请求失败')
   })
 
+  it('错误响应：blob 错误体也能取出后端 detail（导出失败不再只剩 4xx 通用串）', async () => {
+    const err = {
+      response: { data: new Blob([JSON.stringify({ detail: '导出失败：版本 v9 不存在' })]) },
+      message: 'Request failed with status code 404',
+    }
+    await expect(Promise.reject(err).catch(captured.responseError)).rejects.toThrow('导出失败：版本 v9 不存在')
+  })
+
+  it('错误响应：blob 错误体是 422 数组 detail 时逐条拼接', async () => {
+    const err = {
+      response: { data: new Blob([JSON.stringify({ detail: [{ msg: 'version 必填' }] })]) },
+      message: 'Request failed with status code 422',
+    }
+    await expect(Promise.reject(err).catch(captured.responseError)).rejects.toThrow('version 必填')
+  })
+
+  it('错误响应：blob 错误体不是 JSON 时回落 axios 通用文案（不臆造）', async () => {
+    const err = {
+      response: { data: new Blob(['']) },
+      message: 'Request failed with status code 500',
+    }
+    await expect(Promise.reject(err).catch(captured.responseError)).rejects.toThrow('Request failed with status code 500')
+  })
+
   it('错误时 console.error 留痕（不静默吞错）', async () => {
     const err = { response: { data: { detail: 'boom' } } }
     await Promise.reject(err).catch(captured.responseError).catch(() => {})
