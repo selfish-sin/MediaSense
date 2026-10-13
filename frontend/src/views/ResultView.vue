@@ -355,12 +355,23 @@ async function handleExport(format) {
 }
 
 // ============ 一键复制 ============
+// ★ 切版本加载窗口内 displayResult 会回落成最新版（见上面 displayResult 的注释），
+//   而版本标签已经是「正在查看 vN」。正文区有 versionLoading 遮罩，但复制/预览是两条旁路，
+//   不挡就会把最新版正文当成用户正在看的那一版拿走。
 async function handleCopyResult() {
+  if (versionLoading.value) {
+    ElMessage.warning('版本正文加载中，请等加载完成后再复制')
+    return
+  }
   return copyText(displayResult.value)
 }
 
 // ============ HTML 预览 ============
 function handlePreviewHtml() {
+  if (versionLoading.value) {
+    ElMessage.warning('版本正文加载中，请等加载完成后再预览')
+    return
+  }
   const text = displayResult.value
   if (!text) { ElMessage.warning('没有可预览的内容'); return }
   const html = `<!DOCTYPE html>
@@ -941,7 +952,7 @@ async function copyTranscript() {
         <el-button size="small" type="primary" plain @click="goToWorkbench" :disabled="!canContinueInWorkbench && job?.status !== 'completed'">
           到工作台重做
         </el-button>
-        <el-button size="small" type="success" plain @click="handleCopyResult" :disabled="!displayResult">
+        <el-button size="small" type="success" plain @click="handleCopyResult" :disabled="!displayResult || versionLoading">
           一键复制
         </el-button>
         <el-button-group v-if="!isStreaming">
@@ -949,7 +960,7 @@ async function copyTranscript() {
           <el-button size="small" @click="handleExport('pdf')">PDF</el-button>
           <el-button size="small" @click="handleExport('html')">HTML</el-button>
           <el-button size="small" @click="handleExport('txt')">TXT</el-button>
-          <el-button size="small" type="primary" plain @click="handlePreviewHtml" :disabled="!displayResult">预览</el-button>
+          <el-button size="small" type="primary" plain @click="handlePreviewHtml" :disabled="!displayResult || versionLoading">预览</el-button>
         </el-button-group>
         <!-- 导出的是"当前查看的版本"，不是永远最新版：说清楚，免得导完发现不是眼前这份 -->
         <span v-if="activeVersion > 0" style="font-size: 11px; color: var(--app-text-secondary);">
