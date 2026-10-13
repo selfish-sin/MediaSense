@@ -204,7 +204,7 @@
           "jobs"
         ],
         "summary": "Job Queue",
-        "description": "处理队列快照：``running``（占用槽位）+ ``pending``（等待槽位，FIFO）。\n\n单任务也排队：全局信号量上限（``config.MAX_CONCURRENT_JOBS``，默认 1）之外的\n任务停在 pending，前端「任务进度」卡下方展示「正在处理 + 排队中」。\n\n★ 数据源是 DB 任务状态（不另造内存队列）——刷新/切页后队列仍在；\n  但 running 判定要叠加内存的 `RUNNING_JOBS[jid]['status'] == 'processing'`，\n  因为字幕/下载阶段 DB status 还停在 pending（否则正在跑的任务会被误报成排队中）。\n★ 本路由必须注册在 ``GET /{job_id}`` **之前**：它是单段路径，注册晚了会被\n  ``/{job_id}`` 捕获（job_id='queue'）→ 404。与既有的 ``/running`` 同因。",
+        "description": "处理队列快照：``running``（占用槽位）+ ``pending``（等待槽位，FIFO）。\n\n单任务也排队：全局信号量上限（``config.MAX_CONCURRENT_JOBS``，**默认 2**）之外的\n任务停在 pending，前端「任务进度」卡下方展示「正在处理 + 排队中」。\n\n★ 数据源是 DB 任务状态（不另造内存队列）——刷新/切页后队列仍在；\n  但 running 判定要叠加内存的 `RUNNING_JOBS[jid]['status'] == 'processing'`，\n  因为字幕/下载阶段 DB status 还停在 pending（否则正在跑的任务会被误报成排队中）。\n★ 本路由必须注册在 ``GET /{job_id}`` **之前**：它是单段路径，注册晚了会被\n  ``/{job_id}`` 捕获（job_id='queue'）→ 404。与既有的 ``/running`` 同因。",
         "operationId": "job_queue_api_jobs_queue_get",
         "responses": {
           "200": {
@@ -263,7 +263,7 @@
           "jobs"
         ],
         "summary": "Delete Job Api",
-        "description": "删除单个任务（默认连带删除磁盘文件）",
+        "description": "删除单个任务（默认连带删除磁盘文件；破坏性：仅本机可发起）",
         "operationId": "delete_job_api_api_jobs__job_id__delete",
         "parameters": [
           {
@@ -314,7 +314,7 @@
           "jobs"
         ],
         "summary": "Clear All Jobs",
-        "description": "清空所有任务",
+        "description": "清空所有任务（破坏性：仅本机可发起，见 require_local_client）",
         "operationId": "clear_all_jobs_api_jobs_clear_post",
         "responses": {
           "200": {
@@ -334,7 +334,7 @@
           "jobs"
         ],
         "summary": "Clear Jobs By Status Endpoint",
-        "description": "清空指定状态的任务（completed/failed/cancelled）",
+        "description": "清空指定状态的任务（completed/failed/cancelled；破坏性：仅本机可发起）",
         "operationId": "clear_jobs_by_status_endpoint_api_jobs_clear__status__post",
         "parameters": [
           {
@@ -458,7 +458,7 @@
           "jobs"
         ],
         "summary": "Batch Delete Jobs",
-        "description": "批量删除任务（支持 dry_run 预览磁盘文件）",
+        "description": "批量删除任务（支持 dry_run 预览磁盘文件；破坏性：仅本机可发起）",
         "operationId": "batch_delete_jobs_api_jobs_batch_delete_post",
         "requestBody": {
           "content": {
@@ -1309,7 +1309,7 @@
           "models"
         ],
         "summary": "Delete Model Api",
-        "description": "删除模型",
+        "description": "删除模型（破坏性：仅本机可发起，见 routers.jobs.require_local_client）",
         "operationId": "delete_model_api_api_models__key__delete",
         "parameters": [
           {
@@ -1739,7 +1739,7 @@
           "asr-admin"
         ],
         "summary": "Update Settings Api",
-        "description": "更新转录默认设置（只提交要改的字段；非法值显式报错，不静默忽略）",
+        "description": "更新转录默认设置（只提交要改的字段；非法值显式报错，不静默忽略）\n\n★ 2026-10-13 修复（原子性）：此前边校验边写入——`default_engine` 已落库、\n  `whisper_model` 才判非法 → 接口回 400「保存失败」，但默认引擎其实已经改了并对\n  后续转录生效，形成\"报错但配置已变\"的幽灵状态。\n  现在**先集中校验全部字段，全部通过才统一写入**，失败时保证零副作用。\n  （写入仍逐项调用 set_* ——它们各自管一条 app_settings 键，语义不变。）",
         "operationId": "update_settings_api_api_asr_settings_post",
         "requestBody": {
           "content": {
