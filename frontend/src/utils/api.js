@@ -32,7 +32,7 @@ api.interceptors.response.use(
   //   「Request failed with status code 4xx」，后端给的 detail 文案整条丢掉。
   async (error) => {
     console.error('API Error:', error)
-    let msg = ''
+    let msg
     try {
       msg = await resolveErrorMessage(error)
     } catch {
