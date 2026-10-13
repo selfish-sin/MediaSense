@@ -102,6 +102,72 @@
   排序 `created_at ASC, rowid ASC`——`CURRENT_TIMESTAMP` 只有秒级精度，同秒提交必须靠 rowid 保 FIFO）。
   **不新增 socket 事件**：队列是任务状态的投影，前端用既有 `progress`/`log` 事件触发 debounce 刷新 + 断线 10s 轮询。
 
+### 破坏性端点的本机限制（2026-10-13 定稿，勿绕过）
+
+- 本服务**无认证**且 `SERVER_HOST=0.0.0.0`，API 在局域网可达；CORS 白名单只挡浏览器
+  的跨域读取，挡不住同网段其它主机的 curl/脚本。
+- **所有无认证的破坏性端点**必须先调 `routers.jobs.require_local_client(request)`：
+  清空任务（`/clear`、`/clear/{status}`）、批量删除（`/batch-delete`）、
+  删除单任务（`DELETE /{job_id}`）、删除模型（`DELETE /api/models/{key}`）。
+  口径与 `storage_cleanup._require_local` 一致（localhost 或 loopback IP 放行）。
+- **不要改绑回 `127.0.0.1`**：手机/平板访问是既有能力，改绑等于砍功能。加端点级限制
+  既堵住局域网横向调用，又不动正常访问路径。
+- 新增破坏性端点时同样要加；测试里的 `TestClient` 必须显式传
+  `client=('127.0.0.1', 50000)`（默认 host 是 `'testclient'`，本来就不该被放行）。
+
+### 总结版本写入（2026-10-13，勿再用 INSERT OR REPLACE 写新版本）
+
+- **写新总结版本一律走 `db.job_repo.append_summary_version`**：版本号在
+  `BEGIN IMMEDIATE` 事务内由 `MAX(version)+1` 推导并写入，返回实际版本号。
+  三个必须解决的问题：①调用方推导/硬编码的版本号会**覆盖已归档版本**
+  （历史上 `main.py` 硬编码 `version=1`，任务重试成功后用 RETRY-RUN 覆盖用户归档的
+  v1，并把 `summary_version` 打回 1）；②`jobs.summary_version` 与历史表可能**脱节**
+  （重新总结失败/取消只改状态不写历史），拿它 `+1` 推出的版本号同样会撞上已有版本；
+  ③并发「重新总结」两个请求读到同一指针 → 算出同一个 `new_version` 互相覆盖。
+- `save_summary_version`（显式传版本号的 `INSERT OR REPLACE`）**只保留给
+  「幂等刷新同一版本」用**（如重新总结前把当前正文存档到它已有的版本号上）。
+  调用前先看历史表：指针命中已有行才刷新；指针是孤儿（历史非空但无此版）就改用追加。
+
+### 派生文件名（2026-10-13）
+
+- 同目录派生新文件名一律走 `services.naming.derived_sibling(path, stem_suffix=, suffix=, extension=)`
+  （`extension` 不传则保留原扩展名）。
+- **禁止 `path.replace('.txt', ...)`**：`str.replace` 是全串替换，而媒体文件名来自
+  yt-dlp 的 `%(title)s`（见 `downloader.output_template`），标题含 `.txt`
+  （如「Python.txt 教程」）时每一处都会被替换，产出错乱文件名，长了还会撞
+  Windows ENAMETOOLONG 让整个任务失败。
+
+### 批量端点上限（2026-10-13）
+
+- 任何按 `job_ids` 列表工作的端点都要先调 `routers.jobs.assert_batch_size`
+  （上限 `MAX_BATCH_JOB_IDS`=200）。`/api/export/batch` 与 `/batch-disk-info` 都会
+  **逐条把完整 result_text 读进内存**（前者）或逐条递归统计磁盘（后者），
+  全在一次请求内同步完成——无上限时是一次长时间阻塞的请求，内存峰值随选中数量线性增长。
+- 超限要**显式报错并给分批建议**，不做静默截断。
+
+### AI 失败契约（2026-10-13 补充）
+
+- **分批总结必须 fail-fast**：`ai_process` 的分批模式里任一批返回失败哨兵即**抛异常**，
+  不产出「正文中间夹一段 `[处理失败: ...]`」的残缺文档。原因是合并时会加
+  `# 分批处理结果` 标题前缀，调用方（`main.py` / `routers/jobs_ai.py`）的
+  `result_text.lstrip().startswith('[处理失败')` 防线在分批模式下**永远不成立**——
+  任务会被标 completed、残缺文档写进 `jobs.result_text` 与 `summary_history`。
+  抛异常后可由现有 try/except 路由到 `finish_job(False)`，调用方无需改动。
+  抛点必须在 `_record_token_usage` 与 `emit_ai_token(done=True)` 之前。
+- **`generate_tags` 返回值是三态**：`list`=成功有标签；`[]`=调用成功但解析不出；
+  `None`=调用失败（兜底环内全部候选失败）。调用方必须按 `is None` 判定失败并
+  保留原有标签——把失败当 `[]` 写库会**清空用户已有标签**，且失败伪装成成功。
+- **流式失败路径必须返回真实 token**：`_call_ai` 的 `usage_state` 出参在流读取过程中
+  就累计 usage，失败分支（超时/断连/HTTP/兜底全挂）返回真实值而不是 `0, 0`，
+  否则 `token_usage` 表系统性少记，真实账单高于系统显示。
+- **token 记账按实际使用的模型 key**（兜底环换过模型时），与 `generate_mindmap`
+  的 `_on_ok` 一致。
+- **`max_tokens` 等可空请求字段用真值守卫**（`if max_tokens: payload[...] = ...`），
+  不要用 `model_cfg.get(k, 默认值)`：默认值只在键**缺失**时生效，键存在值为 NULL 时
+  会把 `null` 发给 OpenAI 兼容网关被 400 拒绝。模型表该列允许 NULL（生产库普遍为 NULL）。
+- 取消检查要有**时间维度**：`CANCEL_POLL_INTERVAL=1.0`——只在「每 20 个 token」时查，
+  端点连上但不吐字（半死连接）时全程不查取消，用户点了取消最多 8 分钟无响应。
+
 ### 文件命名（2026-09-21 统一）
 
 - 导出/下载的文件名**只能**走 `services/naming.py`（`safe_basename` / `export_basename`），

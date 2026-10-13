@@ -352,6 +352,81 @@ Whisper **base 是链路里最弱一环**（`asr_whisper_model` 未设置时即�
 
 ## 7. 坑点汇总（有解法的才记，全链路适用）
 
+### 7.0 不可信媒体的原子落盘与有效性闸门（2026-10-13 修复，勿回退）
+
+抖音直链下载曾**直接往最终 `{base}.mp4` 写**，中途断流后磁盘上留下一个几 MB 的
+**截断 mp4**。而 `main.py::_acquire_audio` 的断点续传扫描只按「后缀在白名单 +
+`size > 1000`」挑文件，`.mp4` 正在白名单里且截断文件 mtime 最新 → 被当「已有完整
+音频」跳过下载 → 送进云端 ASR → **静默产出截断的转录并标记 completed**，用户全程
+无感知。（yt-dlp 路径不受影响：它写 `*.part`，后缀不匹配扫描表。）
+
+双重修复：
+
+1. **治本**：`services/douyin.py` 的 `_stream_download_sync` / `_download_via_ffmpeg_sync`
+   先写 `{base}.mp4.part`，完整下载并关闭后再 `Path.replace()` **原子改名**，
+   失败路径用 `try/finally` 删掉 `.part`。目录里永远不会留下半截 `.mp4`。
+2. **兜底**：`main.py::_acquire_audio` 对**选中的那一个**续传候选做
+   `services.transcriber.media_duration_seconds()` 的 ffprobe 时长校验（每次重试只
+   多一次 ~100ms，不在逐候选循环里做）；解析不出时长就换下一个候选，全都不可用则
+   退回重新下载——**重新下载永远比拿截断素材凑出假结果安全**。mp4 的 moov 默认在
+   文件尾，截断后 ffprobe 取不到时长，正好被拦下。**前提**：先判
+   `_ffprobe_available()`，环境没有 ffprobe 时降级为「跳过校验」而不是「判定损坏」，
+   否则每次重试都会把所有正常文件误判成截断、白白重下一遍。
+
+### 7.1 打包版（frozen）yt-dlp 必须自己消费 timeout（2026-10-13 修复）
+
+`_run_ytdlp` 在 `getattr(sys, 'frozen', False)` 为真时走 `_yt_dlp.main(full_args)`
+分支，**该分支完全不消费 `timeout` 参数**（只有非 frozen 的
+`subprocess.run(..., timeout=timeout)` 消费它）。项目以 MediaSense.spec 打包发行，
+实际用户跑的就是 frozen 分支。
+
+后果：三个调用点的「下载超时(600s)」「字幕抓取超时(120s)」提示永远不会出现；
+yt-dlp 遇 412 重试循环 / 网络半开连接 / ffmpeg 卡住即长期不返回，任务**一直占着
+并发信号量**（`MAX_CONCURRENT_JOBS=2`，挂两个就整站排队卡死），用户只能重启进程。
+
+修法：frozen 分支把 `_yt_dlp.main()` 放进独立线程 `join(timeout)`，超时抛
+`subprocess.TimeoutExpired`——调用点已有的 `except subprocess.TimeoutExpired`
+自动生效，**不需要改任何调用点**。
+
+⚠️ 该分支还有个坑：它把 `sys.stdout` 换成写 `BytesIO` 的 `TextIOWrapper`，结束后
+还原 `sys.stdout`。如果 wrapper 只是局部变量，**被回收时会连带关闭 BytesIO**，
+后续 `getvalue()` 必然抛 `ValueError`（frozen 下读不到 yt-dlp 输出）——必须局部持有
+引用并用 `detach()` 断开。
+
+### 7.2 云端 ASR 的取消语义（2026-10-13 修复）
+
+`cancel_check` 原先只在 `as_completed` 的迭代点检查，`finally` 里
+`executor.shutdown(wait=False, cancel_futures=True)` 只能取消**未开始**的 future——
+最多 8 个正在跑 `transcribe_file` 的线程不受影响（每次调用 180s 超时 × 3 次重试
+≈ 9 分钟）。且用户取消走的是协作式标志（`request_cancel` 只置标志，从不
+`task.cancel()`），所以任务已标 cancelled 而进程里仍在发**付费**云端请求；这些
+future 的异常无人 `result()` → 日志出现 "Future exception was never retrieved"。
+
+正确做法：`transcribe_file` 接收共享的协作式取消 `Event`，在「每次重试前」和
+「退避 `Event.wait`」处检查并抛 `TranscriptionCancelledError`；`finally` 里先
+`cancel_futures` 取消未开始任务、再置位 Event、再 `_drain_futures()`（有上限，
+`ASR_CLOUD_DRAIN_SECONDS`）消费完每个 future 的异常，**之后才删分片**。
+
+另：`export_chunks` 中途失败时，负责 `unlink` 全部分片的 `finally` 还没进入
+（分片路径在 `transcribe_audio_cloud` 进入 try 之后才登记），约 20MB 分片会滞留
+job_dir——而 job_dir 是可经 `/api/download/file` 对外服务的目录。分片路径必须在
+**导出前**登记，清理放进覆盖导出阶段的 `try/finally`。
+
+### 7.3 本地引擎的下载互斥与补录锁（2026-10-13 修复）
+
+- `_download_lock` 只保护后台下载的状态字典，**转录路径完全不查「是否已在下载」**。
+  用户点模型下载（后台线程）与一个 `firered` 任务启动同时发生时，两边都判定
+  `engine_ready() == False`，同时向同一个 `FIRERED_MODEL_DIR.tar.bz2.part` 写入 →
+  `tmp.replace(dest)` 得到**损坏的 tar** → 解包失败。修法：`_ensure_engine_ready`
+  抢模块级 `_ensure_lock`（等锁期间查 `cancel_check` 可中断，拿到锁后重判
+  `engine_ready`，避免重复下载）。
+- 补录入口 `transcribe_chunk_text` 原先直接 `_create_recognizer`，既不加
+  `_FIRERED_LOCK` 也不更新忙碌状态 → `engine_busy('firered')` 在补录期返回 False，
+  `remove_engine` 会在补录进行中 `shutil.rmtree` 掉模型目录，UI「正在转录中，请等待」
+  这层保护形同虚设。修法：补录入口也取同一把引擎锁。
+
+### 7.4 既有条目
+
 1. silero VAD 必须 512/块分块喂，整段喂只报尾部一段；段首尾 +0.15s padding 防吞字。
 2. `vad.window_size`/`front` 属性与方法易混；`VadModel.create(config)` 不能直接构造。
 3. Windows `tempfile.mkstemp` 句柄先 close 再 unlink，否则 ffmpeg 写入冲突。
