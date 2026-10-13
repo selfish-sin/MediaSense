@@ -132,6 +132,25 @@ function scrollToBatchProgress() {
 // 单任务进度卡隐藏，避免同一时刻两处「任务进度」互相干扰
 const showSingleProgress = computed(() => !(inputType.value === 'batch' && batchResult.value))
 
+// ★ 等待确认的转录预览任务（同一时刻可以有多个）：后端进入 preview 会**释放处理槽位**
+//   （backend/main.py:1195-1200），所以任务 A 停在待确认时，任务 B 照样能跑到预览。
+//   预览卡只跟踪 currentJobId 一个，B 的 preview 事件会把 A 的正文顶掉，A 就再没有确认入口
+//   （结果页无确认、历史页只有取消），只能等后端 1 小时超时自动继续（backend/main.py:1205）。
+//   这里把每个待确认任务都记下来，在预览卡里按任务逐个给确认/取消。
+//   注：批量面板的 confirm-preview 只对批量子任务有效，而批量固定不做预览确认
+//   （backend/routers/jobs_batch.py 强制 preview_before_summary=False），挡不住这里的单任务场景。
+const pendingPreviews = ref([])  // [{ jobId, title, text }]
+
+// 预览卡当前跟踪的那个由 jobStore 呈现，这里只列「别的」仍待确认的任务
+const otherPendingPreviews = computed(() =>
+  pendingPreviews.value.filter(p => p.jobId !== jobStore.currentJobId))
+
+/** 任务已离开 preview 态（确认继续 / 被取消 / 已出结果）→ 不再是待确认项 */
+function dropPendingPreview(jobId) {
+  if (!jobId) return
+  pendingPreviews.value = pendingPreviews.value.filter(p => p.jobId !== jobId)
+}
+
 // ============ 组件挂载 ============
 onMounted(async () => {
     await Promise.all([
@@ -202,6 +221,8 @@ onMounted(async () => {
     if (batchResult.value?.batch_id) {
       refreshBatchStatus()
     }
+    // 任务已离开 preview 态（确认后开始总结 / 被取消 / 已出结果）→ 不再是待确认项
+    dropPendingPreview(data.job_id)
   }))
   socketUnsubs.push(onPreview((data) => {
     // ★ 核心：preview 事件自动切换跟踪到该任务
@@ -213,6 +234,11 @@ onMounted(async () => {
     jobStore.setPreview(data)
     jobStore.isProcessing = true
     jobStore.saveState()
+    // 记下每一个待确认任务（预览卡只跟踪 currentJobId 一个，见 pendingPreviews 注释）
+    pendingPreviews.value = [
+      ...pendingPreviews.value.filter(p => p.jobId !== data.job_id),
+      { jobId: data.job_id, title: data.title || '', text: data.text || '' },
+    ]
     // 滚动到预览区域
     nextTick(() => {
       document.getElementById('preview-section')?.scrollIntoView({ behavior: 'smooth' })
@@ -470,7 +496,9 @@ function handleCancelPreview() {
   }
 }
 
-// ★ 批量子任务的预览确认/取消（从批量进度面板直接操作）
+// ★ 按 jobId 确认某个任务的转录预览（批量子任务从批量面板来，
+//   其它待确认的单任务从预览卡的「另有任务…」行来——两者都按 jobId 取后端 preview_text，
+//   不依赖 currentJobId，因此不会确认到别的任务上）
 async function confirmBatchPreview(jobId) {
   // 先加载该任务的 preview_text
   try {
@@ -490,6 +518,7 @@ async function confirmBatchPreview(jobId) {
     jobStore.jobStatus = 'summarizing'
     jobStore.addLog('用户确认继续AI总结...')
     jobStore.saveState()
+    dropPendingPreview(jobId)
     ElMessage.success('已确认，AI总结进行中...')
     setTimeout(() => refreshBatchStatus(), 1500)
   } catch (err) {
@@ -499,6 +528,7 @@ async function confirmBatchPreview(jobId) {
 function cancelBatchPreview(jobId) {
   cancelPreview(jobId)
   ElMessage.info('已取消该任务')
+  dropPendingPreview(jobId)
   // 如果当前跟踪的就是这个任务，重置
   if (jobStore.currentJobId === jobId) {
     jobStore.reset()
@@ -652,26 +682,42 @@ const tokenPanelRef = ref(null)
     <!-- 系统日志（已拆为 BackendLogPanel 组件） -->
     <BackendLogPanel />
 
-    <!-- 转录预览 -->
-    <el-card v-if="isPreviewState" id="preview-section" class="wb-card" shadow="never">
+    <!-- 转录预览：卡本身只跟踪 currentJobId 一个任务；其它仍待确认的任务在卡内逐个列出，
+         否则它们被后来的 preview 事件顶掉后就只剩「等后端 1 小时超时自动继续」 -->
+    <el-card v-if="isPreviewState || otherPendingPreviews.length" id="preview-section" class="wb-card" shadow="never">
       <template #header>
         <div class="card-head-row">
           <span class="wb-card-title">转录预览</span>
         </div>
       </template>
-      <el-input
-        v-model="jobStore.previewText"
-        type="textarea"
-        :rows="12"
-        placeholder="转录文本"
-        class="input-main"
-      />
-      <div class="submit-row" style="margin-bottom: 0;">
-        <el-button type="primary" class="submit-btn" style="min-width: 180px !important;" @click="handleConfirmPreview">
-          确认继续 AI 总结
-        </el-button>
-        <el-button size="large" @click="handleCancelPreview">取消</el-button>
+      <div v-if="otherPendingPreviews.length" style="margin-bottom: 12px;">
+        <div
+          v-for="p in otherPendingPreviews"
+          :key="p.jobId"
+          style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;"
+        >
+          <span style="font-size: 12px; color: var(--app-text-secondary);">
+            另有任务「{{ p.title || p.jobId }}」也在等待确认转录文本
+          </span>
+          <el-button size="small" type="primary" @click="confirmBatchPreview(p.jobId)">确认继续</el-button>
+          <el-button size="small" @click="cancelBatchPreview(p.jobId)">取消</el-button>
+        </div>
       </div>
+      <template v-if="isPreviewState">
+        <el-input
+          v-model="jobStore.previewText"
+          type="textarea"
+          :rows="12"
+          placeholder="转录文本"
+          class="input-main"
+        />
+        <div class="submit-row" style="margin-bottom: 0;">
+          <el-button type="primary" class="submit-btn" style="min-width: 180px !important;" @click="handleConfirmPreview">
+            确认继续 AI 总结
+          </el-button>
+          <el-button size="large" @click="handleCancelPreview">取消</el-button>
+        </div>
+      </template>
     </el-card>
 
     <!-- 旧的结果展示区已合并到上方固定结果栏 -->
