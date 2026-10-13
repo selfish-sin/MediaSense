@@ -1030,6 +1030,88 @@ class TestAiProcessBatchFailFast:
         assert all('【用户自己写的提示词】' in p and '第 ' in p for p in prompts)
 
 
+# ── P0-2：单批路径静默丢弃转录正文 ──
+@pytest.mark.asyncio
+class TestContentInjectionSinglePoint:
+    """★ 证伪锚点：单批路径此前只有 `prompt_template.replace('{{CONTENT}}', text)`，
+    而 str.replace 对不存在的占位符是静默 no-op —— 用户写的提示词不含占位符时，
+    发给模型的 prompt 里没有任何视频内容，模型凭空写总结，任务照样 completed。
+    前端 `CustomPromptPanel.vue:151` 明文承诺「不写则内容追加在末尾」。"""
+
+    async def test_single_batch_without_placeholder_keeps_transcript(self):
+        """单批（不分批）+ 无占位符：最终 prompt 必须含转录正文关键片段。"""
+        prompts = []
+
+        async def _fake(model, prompt, **kw):
+            prompts.append(prompt)
+            return "总结", 1, 1, 'glm'
+
+        from services import ai_processor as ap
+        with patch("services.ai_processor.get_model_by_key", return_value=MOCK_CFG), \
+             patch("services.ai_processor._call_ai_with_fallback", side_effect=_fake), \
+             patch("services.ai_processor._record_token_usage"):
+            await ap.ai_process(
+                '视频里说过：量子纠缠并非超光速传递信息。',
+                dimensions={'word_count': '500'},
+                summary_options={'edited_prompt': '【用户自己写的提示词】'})
+
+        assert len(prompts) == 1                              # 确认走的是单批路径
+        assert '量子纠缠并非超光速传递信息' in prompts[0]      # 正文没被丢
+        assert '【用户自己写的提示词】' in prompts[0]          # 用户提示词原样保留
+
+    async def test_single_batch_with_placeholder_replaced(self):
+        """含占位符时仍是就地替换，位置不变。"""
+        prompts = []
+
+        async def _fake(model, prompt, **kw):
+            prompts.append(prompt)
+            return "总结", 1, 1, 'glm'
+
+        from services import ai_processor as ap
+        with patch("services.ai_processor.get_model_by_key", return_value=MOCK_CFG), \
+             patch("services.ai_processor._call_ai_with_fallback", side_effect=_fake), \
+             patch("services.ai_processor._record_token_usage"):
+            await ap.ai_process(
+                '正文ABC',
+                dimensions={'word_count': '500'},
+                summary_options={'edited_prompt': '开头\n{{CONTENT}}\n结尾'})
+
+        assert prompts[0] == '开头\n正文ABC\n结尾'
+        assert '【待处理内容】' not in prompts[0]              # 有占位符就不追加
+
+    async def test_legacy_path_without_placeholder_keeps_transcript(self):
+        """非模块化（SUMMARY_PROMPTS）旧路径同样收敛到唯一注入约定。
+        注意不能传 custom_prompt——它会先命中 `summary_type=='custom'` 分支，
+        走不到 edited_prompt 那个注入点，测的就不是这条路径了。"""
+        prompts = []
+
+        async def _fake(model, prompt, **kw):
+            prompts.append(prompt)
+            return "总结", 1, 1, 'glm'
+
+        from services import ai_processor as ap
+        with patch("services.ai_processor.get_model_by_key", return_value=MOCK_CFG), \
+             patch("services.ai_processor._call_ai_with_fallback", side_effect=_fake), \
+             patch("services.ai_processor._record_token_usage"):
+            await ap.ai_process(
+                '旧路径正文XYZ',
+                summary_type='summary',
+                summary_options={'edited_prompt': '旧路径提示词（无占位符）'})
+
+        assert '旧路径提示词（无占位符）' in prompts[0]
+        assert '旧路径正文XYZ' in prompts[0]
+
+
+class TestInjectContent:
+    """单点函数自身：有占位符→替换；无占位符→末尾追加，模板正文原样保留。"""
+
+    def test_placeholder_replaced_in_place(self):
+        from services.ai_processor import _inject_content
+        assert _inject_content('A{{CONTENT}}B', '正文') == 'A正文B'
+        assert _inject_content('A', '正文') == 'A\n\n【待处理内容】\n正文'
+        assert _inject_content('', '正文') == '\n\n【待处理内容】\n正文'
+
+
 # ── ai_process 正常路径不回归 ──
 @pytest.mark.asyncio
 class TestAiProcessBatchSuccess:

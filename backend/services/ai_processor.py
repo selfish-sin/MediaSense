@@ -530,6 +530,29 @@ async def _call_ai_with_fallback(
 
 
 # ============ 标准 AI 处理 ============
+CONTENT_PLACEHOLDER = '{{CONTENT}}'
+
+
+def _inject_content(template: str, body: str) -> str:
+    """把内容注入提示词模板——**唯一**注入约定（2026-10-13 修复 P0-2）。
+
+    约定与前端对用户的承诺一致（`CustomPromptPanel.vue:151`
+    「可用 {{CONTENT}} 标记内容插入位置；不写则内容追加在末尾」）：
+      1. 模板含 `{{CONTENT}}` → 就地替换（多个占位符全替换，同 str.replace 语义）；
+      2. 模板不含 → 正文追加在末尾，形如 `模板\n\n【待处理内容】\n{body}`。
+
+    ★ 修复前单批路径只有 `str.replace()`，而对不存在的占位符它是**静默 no-op**：
+      用户用「提示词覆盖」写了不含占位符的提示词时，发给模型的 prompt 里没有任何
+      视频内容，模型凭空写总结，任务照样 completed、结果写盘入库，用户看不出来。
+      分批路径上一轮已单独补过保护、本次两条路径统一走本函数，
+      消灭「两条路径行为分叉」这个缺陷类别（而不是只补一处）。
+    ★ 本函数只决定**内容怎么注入**；模板正文与拼装段序是用户资产，一个字不动。
+    """
+    if CONTENT_PLACEHOLDER in template:
+        return template.replace(CONTENT_PLACEHOLDER, body)
+    return f'{template}\n\n【待处理内容】\n{body}'
+
+
 async def ai_process(
     text: str,
     summary_type: str = 'summary',
@@ -575,8 +598,8 @@ async def ai_process(
         full_override = opts.get("full_override", "")
         if edited_prompt:
             prompt_template = edited_prompt
-            # 仍需注入 CONTENT
-            prompt = prompt_template.replace('{{CONTENT}}', text)
+            # 仍需注入 CONTENT（统一走 _inject_content：无占位符则追加在末尾）
+            prompt = _inject_content(prompt_template, text)
         else:
             prompt = build_modular_prompt(
                 dimensions=dimensions,
@@ -610,8 +633,8 @@ async def ai_process(
         for var, val in vars_map.items():
             prompt_template = prompt_template.replace(var, val)
 
-        # 替换内容占位符
-        prompt = prompt_template.replace('{{CONTENT}}', text)
+        # 替换内容占位符（统一注入约定：无占位符则追加在末尾）
+        prompt = _inject_content(prompt_template, text)
 
     # ★ full_override 模式：提示词设计为整文处理（如"书记员全文记录"），分块会破坏连贯性
     _has_full_override = bool(opts and isinstance(opts, dict) and str(opts.get("full_override", "")).strip())
@@ -665,15 +688,11 @@ async def ai_process(
                 # ★ 用户编辑过的完整提示词（2026-10-13 修复 A3）：分批复用分支此前
                 #   只认 dimensions/custom_prompt/full_override，把 edited_prompt 丢了——
                 #   长视频上用户改过的文字完全不生效，短视频却生效（行为不一致）。
-                #   这里复用单批路径的注入点（与下方 prompt_template 分支一致）：
-                #   模板正文一个字不动，只把 {{CONTENT}} 换成本批内容。
-                #   编辑版提示词可能不带占位符（build_modular_prompt 也是「无占位则
-                #   追加内容」的注入约定），此时按同一约定把本批内容附在末尾，
-                #   避免整批内容凭空消失。
-                if '{{CONTENT}}' in edited_prompt:
-                    chunk_prompt = edited_prompt.replace('{{CONTENT}}', chunk_body)
-                else:
-                    chunk_prompt = f'{edited_prompt}\n\n【待处理内容】\n{chunk_body}'
+                #   ★ P0-2：注入与单批路径共用 `_inject_content`（有占位符则替换，
+                #   无占位符则按 UI 承诺把本批内容附在末尾）。上一轮此处内联实现并注释
+                #   「与单批路径的注入点一致」，但单批路径当时恰恰没有该保护——注释断言
+                #   是错的；现在两条路径真的走同一个函数。
+                chunk_prompt = _inject_content(edited_prompt, chunk_body)
             elif use_modular:
                 from services.prompt_builder import build_modular_prompt
                 chunk_prompt = build_modular_prompt(
@@ -683,7 +702,7 @@ async def ai_process(
                     full_override=opts.get("full_override", ""),
                 )
             else:
-                chunk_prompt = prompt_template.replace('{{CONTENT}}', chunk_body)
+                chunk_prompt = _inject_content(prompt_template, chunk_body)
         else:
             chunk_prompt = prompt
 
