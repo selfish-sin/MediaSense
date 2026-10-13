@@ -5,6 +5,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -87,23 +88,58 @@ def _active_jobs() -> int:
 
 
 def _read_audit(limit: int = MAX_AUDIT_ENTRIES) -> list[dict[str, Any]]:
+    """读取审计日志尾部 limit 条。
+
+    ★ 2026-10-13：改为**从文件尾部倒序按行读**，不再 `read_text().splitlines()`。
+      审计文件只增不减（每删一个候选追加一行），而 `/status` 是前端高频轮询端点——
+      原实现无论 limit 多小都先把整个文件读进内存再切片，文件越大每次轮询的
+      内存与 IO 成本越高，与该端点「轻量轮询」的设计意图正好相反。
+      文件尾可能是被切断的半行，反向读时逐行校验，坏行直接丢弃。
+    """
     audit_path = Path(DATA_DIR) / 'cleanup_audit.jsonl'
     if not audit_path.is_file():
         return []
+    events: list[dict[str, Any]] = []
     try:
-        lines = audit_path.read_text(encoding='utf-8', errors='replace').splitlines()
+        with audit_path.open('rb') as f:
+            f.seek(0, os.SEEK_END)
+            remaining = f.tell()
+            chunk_size = 8192
+            buf = b''
+            while remaining > 0 and len(events) < limit:
+                step = min(chunk_size, remaining)
+                remaining -= step
+                f.seek(remaining)
+                buf = f.read(step) + buf
+                rows = buf.split(b'\n')
+                # 最后一段可能是不完整的行（还没读到行首），留给下一轮拼接
+                buf = rows.pop(0) if remaining > 0 else b''
+                for raw in reversed(rows):
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line.decode('utf-8', errors='replace'))
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(payload, dict):
+                        events.append(payload)
+                        if len(events) >= limit:
+                            break
+            # 文件以换行结尾时 buf 为空；否则补上最后一条（无换行结尾的最后一行）
+            tail = buf.strip()
+            if tail and len(events) < limit:
+                try:
+                    payload = json.loads(tail.decode('utf-8', errors='replace'))
+                except json.JSONDecodeError:
+                    payload = None
+                if isinstance(payload, dict):
+                    events.append(payload)
     except OSError:
         logger.exception('Unable to read storage cleanup audit log')
-        return []
-    events: list[dict[str, Any]] = []
-    for line in lines[-limit:]:
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            events.append(payload)
-    return events
+        return events
+    # 倒序读出来的是「最新在前」，翻回与旧实现一致的**时间升序**，前端展示顺序不变
+    return list(reversed(events))
 
 
 def _public_state(include_audit: bool = True) -> dict[str, Any]:

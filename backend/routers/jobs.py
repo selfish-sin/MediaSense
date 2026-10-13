@@ -6,10 +6,11 @@ YouTube Tool V2 - 任务路由（核心域：上传/提交/列表/删除/清理/
   共享工具函数（URL 规范化等）保留在本模块，供 db 层与其他路由复用。
 """
 import asyncio
+import ipaddress
 import re
 import logging
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, HTTPException, UploadFile, File, Query, Request
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -129,6 +130,28 @@ def _resolve_staged_upload(raw_path: Optional[str]) -> Path:
     return resolved
 
 
+# ★ 批量端点的 job_ids 数量上限（2026-10-13）。跨域共享的纯校验放核心 jobs.py，
+#   export / chat 等其他路由 `from routers.jobs import assert_batch_size` 复用。
+#   为什么需要：/batch 导出与 /batch-disk-info 都会**逐条把完整 result_text 读进内存**
+#   再打包、再逐条递归统计磁盘，全程在一次请求内同步完成——无上限时内存峰值随选中
+#   数量线性增长，会变成一次长时间阻塞的请求。同项目 chat 的 MAX_BATCH_DELETE=200
+#   已经确立了「批量要设限」的共识，这里此前漏了。
+MAX_BATCH_JOB_IDS = 200
+
+
+def assert_batch_size(job_ids: list[str], *, what: str = 'job_ids') -> None:
+    """校验批量列表长度，超限显式报错并给出分批建议（不做静默截断）。"""
+    if len(job_ids) > MAX_BATCH_JOB_IDS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{what} 数量 {len(job_ids)} 超过单次上限 {MAX_BATCH_JOB_IDS}。"
+                "请分批操作——单次请求会一次性把全部任务的完整结果读进内存，"
+                "数量过大会长时间阻塞并推高内存占用。"
+            ),
+        )
+
+
 def _assert_jobs_deletable(job_ids: list[str]) -> None:
     from main import is_job_running
     active = []
@@ -141,6 +164,33 @@ def _assert_jobs_deletable(job_ids: list[str]) -> None:
             status_code=409,
             detail=f'active jobs must be cancelled before deletion: {", ".join(active)}',
         )
+
+def require_local_client(request: Request, *, what: str = '该操作') -> None:
+    """破坏性操作仅允许本机发起（与存储清理 `_require_local` 同一口径）。
+
+    ★ 为什么加（2026-10-13）：`config.SERVER_HOST = "0.0.0.0"` 让整个 API 在局域网
+      可达，而本项目**没有认证**。CORS 白名单只挡浏览器发起的跨域读取，挡不住同网段
+      其它主机上的 curl / 脚本。存储清理是此前唯一做了本地限制的破坏性端点，
+      而 `POST /api/jobs/clear`（无参、无确认）能直接删光全部任务与磁盘文件。
+      这里把同一道门槛补到其它无认证的破坏性端点上。
+
+    ★ 为什么不改绑回 127.0.0.1：手机/平板访问是既有能力，改绑等于砍功能。
+      加端点级限制既堵住局域网横向调用，又不动正常访问路径。
+    """
+    host = request.client.host if request.client else ''
+    if host == 'localhost':
+        return
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return
+    except ValueError:
+        pass
+    raise HTTPException(
+        status_code=403,
+        detail=f'{what}仅允许从本机发起（当前来源 {host or "未知"}）。'
+               '本服务无认证，破坏性操作不对局域网开放。',
+    )
+
 
 @router.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
@@ -282,7 +332,7 @@ async def running_jobs():
 async def job_queue():
     """处理队列快照：``running``（占用槽位）+ ``pending``（等待槽位，FIFO）。
 
-    单任务也排队：全局信号量上限（``config.MAX_CONCURRENT_JOBS``，默认 1）之外的
+    单任务也排队：全局信号量上限（``config.MAX_CONCURRENT_JOBS``，**默认 2**）之外的
     任务停在 pending，前端「任务进度」卡下方展示「正在处理 + 排队中」。
 
     ★ 数据源是 DB 任务状态（不另造内存队列）——刷新/切页后队列仍在；
@@ -325,8 +375,9 @@ async def get_job_detail(job_id: str):
 
 
 @router.delete("/{job_id}")
-async def delete_job_api(job_id: str, delete_files: bool = Query(True)):
-    """删除单个任务（默认连带删除磁盘文件）"""
+async def delete_job_api(job_id: str, request: Request, delete_files: bool = Query(True)):
+    """删除单个任务（默认连带删除磁盘文件；破坏性：仅本机可发起）"""
+    require_local_client(request, what='删除任务')
     # A worker owns its job directory until cancellation has fully completed.
     _assert_jobs_deletable([job_id])
     success = delete_job(job_id, delete_files=delete_files)
@@ -337,8 +388,9 @@ async def delete_job_api(job_id: str, delete_files: bool = Query(True)):
 
 
 @router.post("/clear")
-async def clear_all_jobs():
-    """清空所有任务"""
+async def clear_all_jobs(request: Request):
+    """清空所有任务（破坏性：仅本机可发起，见 require_local_client）"""
+    require_local_client(request, what='清空全部任务')
     jobs = get_cleanup_jobs()
     _assert_jobs_deletable([job['id'] for job in jobs])
     count = clear_jobs()
@@ -346,8 +398,9 @@ async def clear_all_jobs():
 
 
 @router.post("/clear/{status}")
-async def clear_jobs_by_status_endpoint(status: str):
-    """清空指定状态的任务（completed/failed/cancelled）"""
+async def clear_jobs_by_status_endpoint(status: str, request: Request):
+    """清空指定状态的任务（completed/failed/cancelled；破坏性：仅本机可发起）"""
+    require_local_client(request, what=f'清空 {status} 任务')
     if status not in ("completed", "failed", "cancelled"):
         raise HTTPException(status_code=400, detail=f"不支持的状态: {status}，仅支持 completed/failed/cancelled")
     count = clear_jobs_by_status(status)
@@ -406,14 +459,16 @@ async def batch_cancel_jobs(body: dict):
 
 
 @router.post("/batch-delete")
-async def batch_delete_jobs(body: dict):
-    """批量删除任务（支持 dry_run 预览磁盘文件）"""
+async def batch_delete_jobs(body: dict, request: Request):
+    """批量删除任务（支持 dry_run 预览磁盘文件；破坏性：仅本机可发起）"""
+    require_local_client(request, what='批量删除任务')
     job_ids: list = body.get("job_ids", [])
     dry_run: bool = body.get("dry_run", False)
     delete_files: bool = body.get("delete_files", True)
 
     if not job_ids:
         raise HTTPException(status_code=400, detail="job_ids 不能为空")
+    assert_batch_size(job_ids)
 
     if dry_run:
         # 预览模式：返回每个任务的磁盘信息
@@ -443,6 +498,7 @@ async def batch_disk_info(body: dict):
     job_ids: list = body.get("job_ids", [])
     if not job_ids:
         raise HTTPException(status_code=400, detail="job_ids 不能为空")
+    assert_batch_size(job_ids)
     disk_info = get_jobs_disk_info(job_ids)
     total_bytes = sum(d["size_bytes"] for d in disk_info)
     return {

@@ -31,11 +31,14 @@ class TemplateUpdate(BaseModel):
 async def list_templates():
     """获取所有模板列表"""
     conn = get_connection()
-    rows = conn.execute(
-        "SELECT id, name, summary_type, prompt, options, template_type, is_builtin, created_at, updated_at "
-        "FROM templates ORDER BY is_builtin DESC, updated_at DESC"
-    ).fetchall()
-    conn.close()
+    # ★ try/finally：与其余仓储函数一致，异常路径也要归还连接
+    try:
+        rows = conn.execute(
+            "SELECT id, name, summary_type, prompt, options, template_type, is_builtin, created_at, updated_at "
+            "FROM templates ORDER BY is_builtin DESC, updated_at DESC"
+        ).fetchall()
+    finally:
+        conn.close()
     templates = []
     for r in rows:
         try:
@@ -105,6 +108,14 @@ async def update_template(template_id: int, data: TemplateUpdate):
                 values
             )
             conn.commit()
+        else:
+            # ★ 2026-10-13：空更新此前也回「模板更新成功」，但一条 SQL 都没执行——
+            #   前端弹绿色成功提示、用户以为改动已生效，实则模板纹丝未动。
+            #   明确拒绝并说清原因，别让"假成功"混过去。
+            raise HTTPException(
+                status_code=400,
+                detail="没有可更新的字段：name / summary_type / prompt / options / template_type 至少要提供一项。",
+            )
     finally:
         conn.close()
     return {"message": "模板更新成功"}

@@ -258,7 +258,7 @@ def client():
 
     app = FastAPI()
     app.include_router(export_router, prefix="/api/export")
-    return TestClient(app)
+    return TestClient(app, client=('127.0.0.1', 50000))
 
 
 @pytest.mark.parametrize("fmt", ["docx", "pdf", "html", "txt"])

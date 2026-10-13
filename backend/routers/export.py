@@ -141,6 +141,10 @@ async def export_batch(req: BatchExportRequest):
     job_ids: List[str] = req.job_ids or []
     if not job_ids:
         raise HTTPException(status_code=400, detail="job_ids 不能为空")
+    # 数量上限（跨域共享的纯校验在核心 jobs.py）：逐条把完整 result_text 读进内存
+    # 再打包，无上限时会变成一次长时间阻塞、内存峰值随选中数量线性增长的请求。
+    from routers.jobs import assert_batch_size
+    assert_batch_size(job_ids)
 
     contents: List[tuple] = []  # (展示标题, 文件内容)
     for jid in job_ids:

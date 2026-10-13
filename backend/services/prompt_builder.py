@@ -926,15 +926,34 @@ def _get_module_template(dim_key: str, module_key: str,
     """
     获取某个维度下某个模块的 template 文本
     优先级：DB 覆盖 > 代码默认（自定义模块只存在于覆盖层，天然走第 1 优先级）
+
+    ★ 2026-10-13：解析不出模板时**记 warning 并回退到该维度的 default 档位**，
+      不再静默返回 ''。此前「模块 key 改名/删除后前端仍发旧值」或
+      「模板中心把某个模块 custom_text 存成空串」都会让整段纪律从 prompt 里消失，
+      模型拿到一份"少了一节"的提示词却一切看起来正常——质量退化但完全不可见、
+      不可行动。与本模块既有纪律（_load_override_rows 读失败会 warning）自相矛盾。
     """
     # 1. 先查 DB 覆盖
     if overrides and dim_key in overrides and module_key in overrides[dim_key]:
         return overrides[dim_key][module_key]
     # 2. 回退到代码默认
-    dim = PROMPT_DIMENSIONS.get(dim_key, {})
+    dim = PROMPT_DIMENSIONS.get(dim_key)
+    if dim is None:
+        logger.warning(
+            "提示词维度 key 无法解析：%r（模块 %r）。可用维度：%s。"
+            "该维度的纪律段落将缺失，模型可能不按预期约束输出。",
+            dim_key, module_key, list(PROMPT_DIMENSIONS),
+        )
+        return ""
     for m in dim.get("modules", []):
         if m["key"] == module_key:
             return m.get("template", "")
+    # 自定义模块（模板中心新增）只存在于覆盖层；走到这里说明两层都没有
+    if overrides and dim_key in overrides:
+        logger.warning(
+            "提示词模块 key 在代码与覆盖层均未找到：维度=%r 模块=%r，该段落将缺失。",
+            dim_key, module_key,
+        )
     return ""
 
 

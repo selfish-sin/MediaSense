@@ -189,15 +189,19 @@ async def search_transcripts(
 
     def _scan_sync():
         conn = get_connection()
-        # 只搜有 txt 文件路径的任务（不限状态，失败的任务也可能有部分转录）
-        rows = conn.execute("""
-            SELECT id, title, platform, status, created_at, files
-            FROM jobs
-            WHERE files LIKE '%"txt"%'
-            ORDER BY created_at DESC
-            LIMIT ?
-        """, (limit * 3,)).fetchall()  # 多取一些，过滤掉无文件的
-        conn.close()
+        # ★ try/finally：此前 conn.close() 不在 finally 里，SQL 执行期间抛异常
+        #   （库被锁、JSON 解析失败传播到此处等）连接不归还，句柄累积。
+        try:
+            # 只搜有 txt 文件路径的任务（不限状态，失败的任务也可能有部分转录）
+            rows = conn.execute("""
+                SELECT id, title, platform, status, created_at, files
+                FROM jobs
+                WHERE files LIKE '%"txt"%'
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (limit * 3,)).fetchall()  # 多取一些，过滤掉无文件的
+        finally:
+            conn.close()
 
         results = []
         searched = 0

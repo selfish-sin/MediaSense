@@ -9,7 +9,7 @@ import ssl
 import time
 import asyncio
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from models.schemas import ModelConfigCreate, ModelTestRequest, ModelTestResponse
 from db.model_repo import get_all_models, get_model_by_key, add_model, update_model, delete_model, get_default_model_key, set_default_model, get_default_correct_model_key, set_default_correct_model, get_fallback_chain, set_fallback_chain
@@ -220,8 +220,12 @@ async def add_model_api(model: ModelConfigCreate):
 
 
 @router.delete("/{key}")
-async def delete_model_api(key: str):
-    """删除模型"""
+async def delete_model_api(key: str, request: Request):
+    """删除模型（破坏性：仅本机可发起，见 routers.jobs.require_local_client）"""
+    # 本服务无认证且监听 0.0.0.0，CORS 只挡浏览器不挡同网段 curl；
+    # 删除模型会连带影响兜底环与默认模型，属于不可逆配置改动。
+    from routers.jobs import require_local_client
+    require_local_client(request, what='删除模型')
     success = delete_model(key)
     if not success:
         raise HTTPException(status_code=400, detail="删除失败（内置模型不可删除或key不存在）")

@@ -208,19 +208,38 @@ async def test_provider_api(key: str):
 
 @router.post("/settings")
 async def update_settings_api(body: AsrSettingsUpdate):
-    """更新转录默认设置（只提交要改的字段；非法值显式报错，不静默忽略）"""
+    """更新转录默认设置（只提交要改的字段；非法值显式报错，不静默忽略）
+
+    ★ 2026-10-13 修复（原子性）：此前边校验边写入——`default_engine` 已落库、
+      `whisper_model` 才判非法 → 接口回 400「保存失败」，但默认引擎其实已经改了并对
+      后续转录生效，形成"报错但配置已变"的幽灵状态。
+      现在**先集中校验全部字段，全部通过才统一写入**，失败时保证零副作用。
+      （写入仍逐项调用 set_* ——它们各自管一条 app_settings 键，语义不变。）
+    """
     errors = []
-    if body.default_engine is not None and not asr_repo.set_default_engine(body.default_engine):
+    # ── 第一步：纯校验，不碰数据库 ──
+    if body.default_engine is not None and body.default_engine \
+            and body.default_engine not in asr_repo.VALID_TRANSCRIBE_ENGINES:
         errors.append(f"默认引擎非法：{body.default_engine}"
-                      f"（可选 {' / '.join(asr_repo.VALID_TRANSCRIBE_ENGINES)}）")
-    if body.whisper_model is not None and not asr_repo.set_whisper_model(body.whisper_model):
+                      f"（可选 {' / '.join(asr_repo.VALID_TRANSCRIBE_ENGINES)}；传空串可清除设置）")
+    if body.whisper_model is not None and body.whisper_model not in asr_repo.VALID_WHISPER_SIZES:
         errors.append(f"Whisper 档位非法：{body.whisper_model}"
                       f"（可选 {' / '.join(asr_repo.VALID_WHISPER_SIZES)}）")
-    if body.whisper_device is not None and not asr_repo.set_whisper_device(body.whisper_device):
+    if body.whisper_device is not None and body.whisper_device not in asr_repo.VALID_WHISPER_DEVICES:
         errors.append(f"转录设备非法：{body.whisper_device}"
                       f"（可选 {' / '.join(asr_repo.VALID_WHISPER_DEVICES)}）")
     if errors:
         raise HTTPException(status_code=400, detail='；'.join(errors))
+
+    # ── 第二步：全部合法才写入 ──
+    if body.default_engine is not None and not asr_repo.set_default_engine(body.default_engine):
+        errors.append("默认引擎写入失败")
+    if body.whisper_model is not None and not asr_repo.set_whisper_model(body.whisper_model):
+        errors.append("Whisper 档位写入失败")
+    if body.whisper_device is not None and not asr_repo.set_whisper_device(body.whisper_device):
+        errors.append("转录设备写入失败")
+    if errors:
+        raise HTTPException(status_code=500, detail='；'.join(errors))
     return {
         "success": True,
         "settings": _settings(),

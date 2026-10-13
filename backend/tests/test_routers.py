@@ -44,7 +44,7 @@ def app():
 
 @pytest.fixture
 def client(app):
-    return TestClient(app)
+    return TestClient(app, client=('127.0.0.1', 50000))
 
 
 # ── Jobs ──
@@ -1805,7 +1805,10 @@ class TestChatContextBudget:
         assert routers_chat.HTTPX_TIMEOUT.read == 600.0
         assert routers_chat.HTTPX_TIMEOUT.connect == 15.0
         # 批量侧的 600s 就在同一个仓库里，别让两边悄悄漂开
-        assert "timeout=600.0" in Path(ai_processor.__file__).read_text(encoding="utf-8")
+        # ★ 2026-10-13：改为断言**导出的常量值**而不是 grep 源码文本。
+        #   原断言 `"timeout=600.0" in <源码>` 属于典型的脆性测试：把硬编码 600.0
+        #   提成 DEFAULT_ROUND_TIMEOUT 参数后源码里就没有这个字面量了，测试红但行为没变。
+        assert ai_processor.DEFAULT_ROUND_TIMEOUT == routers_chat.CHAT_MODEL_TIMEOUT
 
     def test_env_float_fallbacks(self, monkeypatch):
         """非法/非正 env 值必须回退默认并 warn，不能让服务起不来"""
@@ -1933,3 +1936,176 @@ class TestAsrStatusRouter:
         self._set_free_cfg(monkeypatch, False)
         self._set_paid_cfg(monkeypatch, False)
         assert client.get("/api/asr/status").json()["recommended_engine"] == "local"
+
+
+# ============ 2026-10-13 代码审查修复的回归测试 ============
+
+class TestDestructiveEndpointsRequireLocalhost:
+    """破坏性端点只允许本机发起。
+
+    背景：config.SERVER_HOST = "0.0.0.0" 让 API 在局域网可达，而本项目**无认证**。
+    CORS 白名单只挡浏览器跨域读取，挡不住同网段其它主机的 curl/脚本。
+    `POST /api/jobs/clear` 无参无确认、可直接删光全部任务与磁盘文件。
+    """
+
+    @pytest.mark.parametrize("path,method", [
+        ("/api/jobs/clear", "post"),
+        ("/api/jobs/clear/completed", "post"),
+        ("/api/models/gpt-x", "delete"),
+    ])
+    def test_rejects_non_loopback(self, app, path, method):
+        nonlocal_client = TestClient(app, client=("192.168.1.20", 50000))
+        resp = getattr(nonlocal_client, method)(path)
+        assert resp.status_code == 403, f"{method.upper()} {path} 对局域网来源必须 403"
+        assert "192.168.1.20" in resp.json()["detail"]
+
+    @pytest.mark.parametrize("path,method", [
+        ("/api/jobs/clear", "post"),
+        ("/api/models/gpt-x", "delete"),
+    ])
+    def test_allows_loopback(self, app, path, method):
+        local = TestClient(app, client=("127.0.0.1", 50000))
+        with patch("routers.jobs.clear_jobs", return_value=0), \
+             patch("routers.jobs.get_cleanup_jobs", return_value=[]), \
+             patch("routers.models.delete_model", return_value=True):
+            resp = getattr(local, method)(path)
+        assert resp.status_code == 200, f"{method.upper()} {path} 本机来源必须放行"
+
+    def test_guard_rejects_before_touching_db(self, app):
+        """拒绝必须发生在任何 DB/文件操作之前，不能先删了再报错。"""
+        nonlocal_client = TestClient(app, client=("192.168.1.20", 50000))
+        with patch("routers.jobs.clear_jobs") as mock_clear, \
+             patch("routers.jobs.delete_job") as mock_del:
+            assert nonlocal_client.post("/api/jobs/clear").status_code == 403
+            assert nonlocal_client.post("/api/jobs/batch-delete",
+                                        json={"job_ids": ["a"]}).status_code == 403
+            assert nonlocal_client.delete("/api/jobs/abc").status_code == 403
+        mock_clear.assert_not_called()
+        mock_del.assert_not_called()
+
+
+class TestChatMaxTokensNotNull:
+    """★ max_tokens 为 NULL 时不得发出 "max_tokens": null。
+
+    dict.get(k, 4096) 的默认值只在**键缺失**时生效；模型表该列允许为 NULL
+    （ModelConfigCreate 默认 None 且原样落库），键存在值为 None 时会发 null，
+    OpenAI 兼容网关多以 400 拒绝 → 追问"莫名其妙失败"。只读查生产库 10 个模型
+    该列全为 NULL，即当前每次追问都命中。
+    """
+
+    def test_null_max_tokens_field_is_omitted(self):
+        cfg = {"key": "k", "model_id": "m", "endpoint": "http://x", "api_key": "",
+               "max_tokens": None, "auth_type": "bearer"}
+        sent = {}
+        if cfg.get("max_tokens"):
+            sent["max_tokens"] = cfg["max_tokens"]
+        assert "max_tokens" not in sent
+
+    def test_real_max_tokens_is_kept(self):
+        cfg = {"max_tokens": 8192}
+        sent = {}
+        if cfg.get("max_tokens"):
+            sent["max_tokens"] = cfg["max_tokens"]
+        assert sent["max_tokens"] == 8192
+
+    def test_chat_payload_source_uses_truthiness_guard(self):
+        """锁住源码形态：不能再退回 dict.get(k, 默认值) 写法。"""
+        from pathlib import Path
+        src = Path(routers_chat.__file__).read_text(encoding="utf-8")
+        assert 'model_cfg.get("max_tokens", 4096)' not in src
+        assert 'payload["max_tokens"] = _max_tokens' in src
+
+
+class TestTemplatesEmptyUpdateRejected:
+    """空更新曾回「模板更新成功」但一条 SQL 都没执行——假成功。"""
+
+    def test_empty_update_returns_400(self, client):
+        with patch("routers.templates.get_connection") as mock_conn:
+            mock = MagicMock()
+            mock.execute.return_value.fetchone.return_value = {"id": 1, "is_builtin": 0}
+            mock_conn.return_value = mock
+            resp = client.put("/api/templates/1", json={"name": None, "prompt": None})
+        assert resp.status_code == 400
+        assert "没有可更新的字段" in resp.json()["detail"]
+
+
+class TestSummarizeOptionsNull:
+    """`{"options": null}` 曾直接 500（键存在值为 None → opts.get 抛 AttributeError）。"""
+
+    def test_null_options_does_not_crash(self, client, tmp_path):
+        txt = tmp_path / "a.txt"
+        txt.write_text("转录内容", encoding="utf-8")
+        job = {"id": "j1", "status": "completed", "files": {"txt": str(txt)},
+               "options": {}, "result_text": "旧正文", "summary_version": 1,
+               "model": "m", "summary_type": "summary", "tags": [], "token_usage": {}}
+        with patch("routers.jobs_ai.get_job", return_value=job), \
+             patch("routers.jobs_ai.update_job"), \
+             patch("routers.jobs_ai.get_summary_history", return_value=[]), \
+             patch("routers.jobs_ai.save_summary_version", return_value=True), \
+             patch("services.ai_processor.ai_process",
+                   new=AsyncMock(return_value=("新正文", 1, 1))), \
+             patch("services.ai_processor.generate_tags", new=AsyncMock(return_value=["标签"])), \
+             patch("routers.jobs_ai.append_summary_version", return_value=2):
+            resp = client.post("/api/jobs/j1/summarize", json={"summary_type": "notes", "options": None})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["result_text"] == "新正文"
+
+
+class TestGenerateTagsFailureKeepsExistingTags:
+    """★ generate_tags 返回 None（兜底环全挂）时不得清空已有标签。
+
+    此前 generate_tags 吞异常返回 []，这里就会把用户标签清空并回「已生成 0 个标签」，
+    失败伪装成成功且不可恢复。
+    """
+
+    def test_returns_502_and_does_not_write(self, client, tmp_path):
+        txt = tmp_path / "a.txt"
+        txt.write_text("转录内容", encoding="utf-8")
+        job = {"id": "j1", "status": "completed", "files": {"txt": str(txt)}, "tags": ["旧标签"]}
+        with patch("routers.jobs_ai.get_job", return_value=job), \
+             patch("routers.jobs_ai.update_job") as mock_update, \
+             patch("services.ai_processor.generate_tags", new=AsyncMock(return_value=None)):
+            resp = client.post("/api/jobs/j1/generate-tags", json={})
+        assert resp.status_code == 502
+        assert "已保留原有标签" in resp.json()["detail"]
+        mock_update.assert_not_called()
+
+    def test_success_path_still_writes(self, client, tmp_path):
+        txt = tmp_path / "a.txt"
+        txt.write_text("转录内容", encoding="utf-8")
+        job = {"id": "j1", "status": "completed", "files": {"txt": str(txt)}, "tags": ["旧标签"]}
+        with patch("routers.jobs_ai.get_job", return_value=job), \
+             patch("routers.jobs_ai.update_job") as mock_update, \
+             patch("services.ai_processor.generate_tags", new=AsyncMock(return_value=["新标签"])):
+            resp = client.post("/api/jobs/j1/generate-tags", json={})
+        assert resp.status_code == 200
+        assert mock_update.call_args.kwargs["tags"] == ["新标签"]
+
+
+class TestBatchSizeLimit:
+    """批量端点必须设数量上限：/batch 导出逐条把完整 result_text 读进内存。"""
+
+    def test_limit_constant_is_sane(self):
+        from routers.jobs import MAX_BATCH_JOB_IDS
+        assert 0 < MAX_BATCH_JOB_IDS <= 1000
+
+    def test_export_batch_rejects_oversized(self, client):
+        from routers.jobs import MAX_BATCH_JOB_IDS
+        resp = client.post("/api/export/batch",
+                           json={"job_ids": [f"j{i}" for i in range(MAX_BATCH_JOB_IDS + 1)]})
+        assert resp.status_code == 400
+        assert "分批" in resp.json()["detail"]
+
+    def test_disk_info_rejects_oversized(self, client):
+        from routers.jobs import MAX_BATCH_JOB_IDS
+        resp = client.post("/api/jobs/batch-disk-info",
+                           json={"job_ids": [f"j{i}" for i in range(MAX_BATCH_JOB_IDS + 1)]})
+        assert resp.status_code == 400
+
+    def test_within_limit_passes_through(self, client):
+        from routers.jobs import MAX_BATCH_JOB_IDS
+        ids = [f"j{i}" for i in range(MAX_BATCH_JOB_IDS)]
+        with patch("routers.jobs.get_jobs_disk_info", return_value=[]) as mock_info:
+            resp = client.post("/api/jobs/batch-disk-info", json={"job_ids": ids})
+        assert resp.status_code == 200
+        mock_info.assert_called_once()

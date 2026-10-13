@@ -990,8 +990,15 @@ async def chat_stream(job_id: str, session_id: str, msg: ChatMessage, request: R
                 "messages": messages,
                 "stream": True,
                 "temperature": model_cfg.get("temperature", 0.3),
-                "max_tokens": model_cfg.get("max_tokens", 4096),
             }
+            # ★ 2026-10-13 修复：`dict.get(k, 默认)` 的默认值只在**键缺失**时生效；
+            #   模型表的 max_tokens 允许为 NULL（ModelConfigCreate 默认 None，原样落库），
+            #   键存在值为 None 时会发出 "max_tokens": null，OpenAI 兼容网关多以
+            #   400 拒绝（max_tokens must be an integer）→ 追问"莫名其妙失败"。
+            #   与 services/ai_processor.py 的 `if max_tokens:` 守卫对齐：空就不带该字段。
+            _max_tokens = model_cfg.get("max_tokens")
+            if _max_tokens:
+                payload["max_tokens"] = _max_tokens
             headers = {"Content-Type": "application/json"}
             if model_cfg.get("auth_type") != "none":
                 headers["Authorization"] = f"Bearer {model_cfg.get('api_key', '')}"

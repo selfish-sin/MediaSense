@@ -11,7 +11,7 @@ def test_socket_app_lifespan_recovers_interrupted_jobs():
     completed = create_job(input_type="text", input_text="已完成")
     update_job(completed, status="completed")
 
-    with TestClient(main.socket_app) as client:
+    with TestClient(main.socket_app, client=('127.0.0.1', 50000)) as client:
         job = get_job(pending)
         assert job["status"] == "failed"
         assert "重启" in job["error"]

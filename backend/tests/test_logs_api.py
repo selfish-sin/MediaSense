@@ -30,7 +30,7 @@ def client(_mock_socketio):
     from main import app
     # 不用 with 上下文：跳过 startup/shutdown（DB 恢复、清理任务等副作用），
     # 路由在 import 期已全部注册，契约不受影响
-    return TestClient(app)
+    return TestClient(app, client=('127.0.0.1', 50000))
 
 
 def _write_log(monkeypatch, tmp_path, content: str):

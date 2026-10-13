@@ -37,7 +37,7 @@ def client():
     from routers.asr_admin import router as asr_admin_router
     app.include_router(asr_router, prefix="/api/asr")
     app.include_router(asr_admin_router, prefix="/api/asr")
-    return TestClient(app)
+    return TestClient(app, client=('127.0.0.1', 50000))
 
 
 def _clear_providers():
@@ -797,3 +797,53 @@ class TestFireredLifecycle:
         with pytest.raises(Exception) as ei:
             la.remove_model_files()
         assert '下载' in str(ei.value)
+
+
+# ============ 默认设置的原子性（2026-10-13）============
+# 回归背景：POST /api/asr/settings 此前边校验边写入——default_engine 已落库、
+# whisper_model 才判非法 → 接口回 400「保存失败」，但默认引擎其实已经改了并对
+# 后续转录生效，形成"报错但配置已变"的幽灵状态。
+class TestSettingsUpdateAtomicity:
+    def _assert_unchanged(self, engine_before, model_before):
+        assert asr_repo.get_default_engine() == engine_before
+        assert asr_repo.get_whisper_model() == model_before
+
+    def test_invalid_second_field_leaves_nothing_written(self, client):
+        asr_repo.set_default_engine("local")
+        asr_repo.set_whisper_model("small")
+        self._assert_unchanged("local", "small")
+
+        resp = client.post("/api/asr/settings", json={
+            "default_engine": "cloud",       # 合法
+            "whisper_model": "huge",          # 非法
+        })
+        assert resp.status_code == 400
+        assert "Whisper 档位非法" in resp.json()["detail"]
+        # ★ 关键断言：合法的那一项也不能落库
+        self._assert_unchanged("local", "small")
+
+    def test_invalid_first_field_blocks_valid_second(self, client):
+        asr_repo.set_whisper_model("medium")
+        resp = client.post("/api/asr/settings", json={
+            "default_engine": "not-an-engine",
+            "whisper_model": "tiny",
+        })
+        assert resp.status_code == 400
+        assert asr_repo.get_whisper_model() == "medium"
+
+    def test_all_valid_applies_everything(self, client):
+        resp = client.post("/api/asr/settings", json={
+            "default_engine": "cloud_free", "whisper_model": "tiny", "whisper_device": "cpu",
+        })
+        assert resp.status_code == 200
+        assert asr_repo.get_default_engine() == "cloud_free"
+        assert asr_repo.get_whisper_model() == "tiny"
+        assert asr_repo.get_whisper_device() == "cpu"
+
+    def test_invalid_device_blocks_all(self, client):
+        asr_repo.set_default_engine("local")
+        resp = client.post("/api/asr/settings", json={
+            "default_engine": "cloud_free", "whisper_device": "gpu",
+        })
+        assert resp.status_code == 400
+        assert asr_repo.get_default_engine() == "local"

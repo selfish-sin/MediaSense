@@ -17,7 +17,7 @@ def client(db_path):
     app = FastAPI()
     from routers.jobs import router as jobs_router
     app.include_router(jobs_router, prefix="/api/jobs")
-    return TestClient(app)
+    return TestClient(app, client=('127.0.0.1', 50000))
 
 
 def _insert(job_id, status, created_at, title=None):
