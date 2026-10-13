@@ -152,14 +152,27 @@ async def resummarize_job(job_id: str, body: dict):
         # 更新job
         new_files = dict(files)
         new_files['result_md'] = result_md_path
-        update_job(job_id, status='completed',
-                   result_text=result_text,
-                   summary_type=summary_type,
-                   model=model,
-                   files=new_files,
-                   token_usage={'input': in_tok, 'output': out_tok},
-                   tags=tags,
-                   error=None)
+        # ★ 必须检查写入结果（2026-10-13 修复 P1-8）：`update_job` 对「已取消」任务有
+        #   终态保护——写入被挡下时返回 False 且 result_text 保持旧值。此前忽略返回值
+        #   继续往下走，于是 append_summary_version 照样存了新版本、summary_version
+        #   指针也照样前移，而 jobs.result_text 还是**上一版正文**。因为
+        #   `GET summary-history/{version}` 在 version == summary_version 时直接返回
+        #   jobs.result_text，用户点最新的那一版，看到的却是旧内容。
+        _written = update_job(job_id, status='completed',
+                              result_text=result_text,
+                              summary_type=summary_type,
+                              model=model,
+                              files=new_files,
+                              token_usage={'input': in_tok, 'output': out_tok},
+                              tags=tags,
+                              error=None)
+        if not _written:
+            logger.warning(
+                f"任务 {job_id} 重新总结写入被拒（任务已被取消），"
+                f"不存档新版本、不前移 summary_version 指针（已生成的 md 未入库: {result_md_path.name}）"
+            )
+            raise HTTPException(status_code=409,
+                                detail="任务已被取消，重新总结结果未写入；如仍需该结果请重新发起")
 
         # ★ 保存新版本到 summary_history：版本号在事务内推导（append_summary_version），
         #   不再由调用方 `current_version + 1` 计算——并发「重新总结」会算出同一个
@@ -187,6 +200,10 @@ async def resummarize_job(job_id: str, body: dict):
             "message": "重新总结完成"
         }
 
+    except HTTPException:
+        # ★ 透传：try 块内部显式抛出的 4xx（如「任务已被取消，拒绝写入」）是有意契约，
+        #   不能被下面的兜底分支改写成 500，也不能连带把任务标成 failed。
+        raise
     except Exception as e:
         from services.ai_processor import TaskCancelledError
         if isinstance(e, TaskCancelledError):

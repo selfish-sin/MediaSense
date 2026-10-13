@@ -525,13 +525,21 @@ def _format_size(bytes_val: int) -> str:
 
 
 @router.post("/{job_id}/retry")
-async def retry_job(job_id: str, force: bool = Query(False, description="强制重试：删除已有文件从头开始")):
+async def retry_job(job_id: str, request: Request,
+                    force: bool = Query(False, description="强制重试：删除已有文件从头开始")):
     """
     重试失败/取消的任务。
 
     默认（force=false）：断点续传模式，保留已有下载/转录文件，从失败步骤继续。
     force=true：删除 job_dir 下已有文件，完全重新开始。
+
+    ★ 本机限制（2026-10-13）：force=true 走 shutil.rmtree(job_dir)，
+      媒体/字幕/结果文件全部删除且**不可恢复**——与已受限的任务删除同类破坏，
+      此前唯独它没有 require_local_client（签名里连 request 参数都没有）。
+      纯 force=false 的断点续传不删任何文件，故只对 force=true 生效。
     """
+    if force:
+        require_local_client(request, what='强制重试（删除已有文件）')
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"任务 {job_id} 不存在")

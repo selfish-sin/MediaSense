@@ -3,7 +3,7 @@ YouTube Tool V2 - 模板管理路由
 CRUD 提示词模板，支持内置模板保护
 """
 import json
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
 from db.database import get_connection
@@ -122,8 +122,10 @@ async def update_template(template_id: int, data: TemplateUpdate):
 
 
 @router.delete("/{template_id}")
-async def delete_template(template_id: int):
-    """删除模板"""
+async def delete_template(template_id: int, request: Request):
+    """删除模板（破坏性：仅本机可发起）"""
+    from routers.jobs import require_local_client
+    require_local_client(request, what=f'删除模板 {template_id}')
     conn = get_connection()
     existing = conn.execute("SELECT * FROM templates WHERE id = ?", (template_id,)).fetchone()
     if not existing:

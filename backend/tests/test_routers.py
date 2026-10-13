@@ -20,6 +20,7 @@ def app():
     from routers.jobs_batch import router as jobs_batch_router
     from routers.models import router as models_router
     from routers.asr import router as asr_router
+    from routers.asr_admin import router as asr_admin_router
     from routers.summary import router as summary_router
     from routers.export import router as export_router
     from routers.bilibili import router as bilibili_router
@@ -32,6 +33,7 @@ def app():
     app.include_router(jobs_batch_router, prefix="/api/jobs")
     app.include_router(models_router, prefix="/api/models")
     app.include_router(asr_router, prefix="/api/asr")
+    app.include_router(asr_admin_router, prefix="/api/asr")
     app.include_router(summary_router, prefix="/api/summary")
     app.include_router(export_router, prefix="/api/export")
     app.include_router(bilibili_router, prefix="/api/bilibili")
@@ -1946,12 +1948,25 @@ class TestDestructiveEndpointsRequireLocalhost:
     背景：config.SERVER_HOST = "0.0.0.0" 让 API 在局域网可达，而本项目**无认证**。
     CORS 白名单只挡浏览器跨域读取，挡不住同网段其它主机的 curl/脚本。
     `POST /api/jobs/clear` 无参无确认、可直接删光全部任务与磁盘文件。
+
+    ★ 2026-10-13 第二轮：上一轮只覆盖了任务删除/清空与模型删除，留下一批同样
+      不可逆却裸奔的端点。最严重的是 `POST /api/jobs/{id}/retry?force=true`
+      ——它走 shutil.rmtree(job_dir)，媒体/字幕/结果全删且不可恢复，而它的签名
+      连 `request: Request` 都没有（本机限制根本无从挂载）。
     """
 
     @pytest.mark.parametrize("path,method", [
         ("/api/jobs/clear", "post"),
         ("/api/jobs/clear/completed", "post"),
         ("/api/models/gpt-x", "delete"),
+        # —— 第二轮补齐：不可逆破坏 ——
+        ("/api/jobs/abc/retry?force=true", "post"),
+        ("/api/asr/providers/gpt-x", "delete"),
+        ("/api/asr/local/firered", "delete"),
+        ("/api/asr/local/whisper/medium", "delete"),
+        ("/api/templates/7", "delete"),
+        ("/api/summary/overrides", "delete"),
+        ("/api/summary/overrides/dim/mod", "delete"),
     ])
     def test_rejects_non_loopback(self, app, path, method):
         nonlocal_client = TestClient(app, client=("192.168.1.20", 50000))
@@ -1970,6 +1985,27 @@ class TestDestructiveEndpointsRequireLocalhost:
              patch("routers.models.delete_model", return_value=True):
             resp = getattr(local, method)(path)
         assert resp.status_code == 200, f"{method.upper()} {path} 本机来源必须放行"
+
+    def test_retry_without_force_stays_open_to_lan(self, app):
+        """force=false 是断点续传，不删任何文件 → 刻意不收紧，保留手机端远程重试。
+
+        这是与 force=true 的**刻意差异**，不是遗漏；任何一边改动都要同步另一边。
+        """
+        nonlocal_client = TestClient(app, client=("192.168.1.20", 50000))
+        with patch("routers.jobs.get_job") as mock_get:
+            mock_get.return_value = None          # 走到 404 即说明没被本机限制拦下
+            resp = nonlocal_client.post("/api/jobs/abc/retry")
+        assert resp.status_code == 404, "force=false 不应被本机限制拦截（不删文件）"
+
+    def test_force_retry_rejected_before_touching_files(self, app):
+        """拒绝必须发生在 rmtree 之前：不能先删了再报错。"""
+        nonlocal_client = TestClient(app, client=("192.168.1.20", 50000))
+        with patch("routers.jobs.get_job") as mock_get, \
+             patch("routers.jobs.retry_job") as mock_retry:
+            resp = nonlocal_client.post("/api/jobs/abc/retry?force=true")
+        assert resp.status_code == 403
+        mock_get.assert_not_called()
+        mock_retry.assert_not_called()
 
     def test_guard_rejects_before_touching_db(self, app):
         """拒绝必须发生在任何 DB/文件操作之前，不能先删了再报错。"""
@@ -2140,3 +2176,117 @@ class TestBatchSizeLimit:
             resp = client.post("/api/jobs/batch-disk-info", json={"job_ids": ids})
         assert resp.status_code == 200
         mock_info.assert_called_once()
+
+
+# ============ 2026-10-13 第二轮审查修复的回归测试 ============
+
+class TestRound2SecretMasking:
+    """P1-6：模型密钥脱敏口径必须与同域 asr.mask_provider 一致。"""
+
+    def test_short_api_key_is_fully_masked(self, client):
+        """≤8 字符的密钥此前**原样返回**给前端。
+
+        `if raw_key and len(raw_key) > 8` 只有一个分支，短密钥走不进脱敏，
+        而同域 asr.mask_provider（asr.py:36-39）对短密钥是全遮蔽的。
+        两个脱敏函数对同一份密钥给出不同安全性 = 纯泄漏路径。
+        """
+        short = "sk-123"
+        with patch("routers.models.get_all_models",
+                   return_value=[{"key": "m1", "name": "短密钥", "api_key": short}]):
+            resp = client.get("/api/models")
+        assert resp.status_code == 200
+        got = resp.json()["models"][0]["api_key"]
+        assert got == "****", f"短密钥必须全遮蔽，实际返回 {got!r}"
+        assert short not in resp.text, "短密钥原文仍出现在响应里"
+
+    def test_eight_char_boundary_is_fully_masked(self, client):
+        """边界值：正好 8 个字符也必须全遮蔽（不是 >8 才遮）。"""
+        eight = "abcdefgh"
+        with patch("routers.models.get_all_models",
+                   return_value=[{"key": "m1", "name": "边界", "api_key": eight}]):
+            resp = client.get("/api/models")
+        got = resp.json()["models"][0]["api_key"]
+        assert got == "****", f"8 字符密钥必须全遮蔽，实际 {got!r}"
+        assert eight not in resp.text
+
+    def test_long_api_key_keeps_prefix_suffix_masking(self, client):
+        """长密钥仍走「前 4 + **** + 后 4」，不因本次修复改变既有形态。"""
+        long_key = "sk-abcdefghijklmnop"
+        with patch("routers.models.get_all_models",
+                   return_value=[{"key": "m1", "name": "长密钥", "api_key": long_key}]):
+            resp = client.get("/api/models")
+        assert resp.json()["models"][0]["api_key"] == "sk-a****mnop"
+
+    def test_empty_key_is_left_alone(self, client):
+        """无密钥的模型不应凭空多出 '****'（前端靠它显示「未配置」）。"""
+        with patch("routers.models.get_all_models",
+                   return_value=[{"key": "m1", "name": "无密钥", "api_key": ""}]):
+            resp = client.get("/api/models")
+        assert resp.json()["models"][0]["api_key"] == ""
+
+
+class TestRound2ResummarizeCancelRace:
+    """P1-8：任务已取消时不得再存档新版本 / 前移 summary_version 指针。
+
+    `GET /summary-history/{version}` 在 version == summary_version 时直接返回
+    jobs.result_text；指针前移而 result_text 还是旧值 ⇒ 用户点最新一版看到的
+    是上一版正文。
+    """
+
+    @staticmethod
+    def _job(txt_path):
+        return {"id": "job1", "status": "completed", "result_text": "旧正文",
+                "summary_version": 1, "summary_type": "summary", "model": "m1",
+                "tags": [], "token_usage": {}, "files": {"txt": str(txt_path)},
+                "input_url": "https://x/y", "options": {}}
+
+    @staticmethod
+    def _update_rejecting_completed(statuses):
+        """模拟终态保护：写 completed 被挡下（返回 False），其余写入成功。"""
+        def fake_update(jid, **kw):
+            if kw.get("status"):
+                statuses.append(kw["status"])
+            return kw.get("status") != "completed"
+        return fake_update
+
+    @staticmethod
+    async def _fake_ai(*a, **kw):
+        return "新正文", 1, 1
+
+    @staticmethod
+    async def _fake_tags(*a, **kw):
+        return ["t"]
+
+    def _run(self, app, tmp_path):
+        import routers.jobs_ai as ja
+        local = TestClient(app, client=("127.0.0.1", 50000))
+        txt = tmp_path / "job1.txt"
+        txt.write_text("转录正文", encoding="utf-8")
+        job = self._job(txt)
+        statuses: list = []
+        archived = {"called": False}
+
+        def fake_append(**kw):
+            archived["called"] = True
+            return 2
+
+        with patch.object(ja, "get_job", lambda jid: job), \
+             patch.object(ja, "get_summary_history", lambda jid: []), \
+             patch.object(ja, "update_job", self._update_rejecting_completed(statuses)), \
+             patch.object(ja, "append_summary_version", fake_append), \
+             patch.object(ja, "derived_sibling", return_value=tmp_path / "x__summary.md"), \
+             patch("services.ai_processor.ai_process", self._fake_ai), \
+             patch("services.ai_processor.generate_tags", self._fake_tags):
+            resp = local.post("/api/jobs/job1/summarize", json={})
+        return resp, archived, statuses
+
+    def test_does_not_archive_new_version(self, app, tmp_path):
+        resp, archived, _ = self._run(app, tmp_path)
+        assert resp.status_code == 409, f"应返回 409（任务已取消），实际 {resp.status_code}"
+        assert archived["called"] is False, "被取消时不得再 append_summary_version 存档新版本"
+
+    def test_not_rewritten_to_500_or_marked_failed(self, app, tmp_path):
+        """4xx 不能被兜底 except 改写成 500，更不能顺手把取消状态覆盖成 failed。"""
+        resp, _, statuses = self._run(app, tmp_path)
+        assert resp.status_code == 409, f"必须保持 409，实际 {resp.status_code}"
+        assert "failed" not in statuses, f"被取消的任务不得被标成 failed（实际写入 {statuses}）"

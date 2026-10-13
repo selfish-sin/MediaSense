@@ -3,7 +3,7 @@ MediaSense - 模块化提示词路由
 9 维度可组合提示词系统：dimensions + recipes + prompt-preview + 模块覆盖 CRUD
 """
 import logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
 
@@ -150,14 +150,18 @@ async def api_restore_override(dimension_key: str, module_key: str, body: Overri
 
 
 @router.delete("/overrides/{dimension_key}/{module_key}")
-async def api_delete_override(dimension_key: str, module_key: str):
-    """删除模块覆盖（恢复代码默认）"""
+async def api_delete_override(dimension_key: str, module_key: str, request: Request):
+    """删除模块覆盖（恢复代码默认；破坏性：仅本机可发起）"""
+    from routers.jobs import require_local_client
+    require_local_client(request, what='删除提示词覆盖')
     deleted = delete_override(dimension_key, module_key)
     return {"success": deleted, "message": "已恢复默认" if deleted else "无覆盖记录"}
 
 
 @router.delete("/overrides")
-async def api_reset_all_overrides():
-    """清空所有覆盖（恢复全部默认）"""
+async def api_reset_all_overrides(request: Request):
+    """清空所有覆盖（恢复全部默认；破坏性：仅本机可发起）"""
+    from routers.jobs import require_local_client
+    require_local_client(request, what='清空全部提示词覆盖')
     count = reset_all_overrides()
     return {"success": True, "deleted_count": count}

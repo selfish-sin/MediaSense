@@ -137,12 +137,17 @@ async def list_models():
     """获取所有模型配置"""
     models = get_all_models()
     for m in models:
-        raw_key = m.get('api_key')
+        raw_key = m.get('api_key') or ''
         # ★ 密钥被星号污染标记：必须在脱敏前用原始值判断——历史 bug 曾把脱敏串存进 DB，
         #   含 **** 的 key 必然失效，前端据此提示用户重新粘贴真实密钥
         m['key_broken'] = bool(raw_key) and '****' in raw_key
-        if raw_key and len(raw_key) > 8:
+        # 脱敏口径与 asr.mask_provider 保持一致（asr.py:36-39）：长度 ≤8 的密钥
+        # **全遮蔽**。此前 models 侧只有 `len > 8` 一个分支，短密钥被原样返回给前端
+        # ——同域两个脱敏函数对同一份密钥给出不同安全性，是纯泄漏路径。
+        if len(raw_key) > 8:
             m['api_key'] = raw_key[:4] + '****' + raw_key[-4:]
+        elif raw_key:
+            m['api_key'] = '****'
     return {"models": models, "default": get_default_model_key(),
             "correct_default": get_default_correct_model_key()}
 

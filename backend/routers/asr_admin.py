@@ -20,7 +20,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from config import LOCAL_MODEL_DIRS
 from db import asr_repo
@@ -118,8 +118,10 @@ async def update_provider_api(key: str, body: AsrProviderUpsert):
 
 
 @router.delete("/providers/{key}")
-async def delete_provider_api(key: str):
-    """删除云端 provider（内置不可删，可停用/改配置）"""
+async def delete_provider_api(key: str, request: Request):
+    """删除云端 provider（内置不可删，可停用/改配置；破坏性：仅本机可发起）"""
+    from routers.jobs import require_local_client
+    require_local_client(request, what=f'删除 provider「{key}」')
     existing = asr_repo.get_provider(key)
     if not existing:
         raise HTTPException(status_code=404, detail=f"provider「{key}」不存在")
@@ -305,8 +307,10 @@ async def cancel_engine_download_api(engine: str):
 
 
 @router.delete("/local/{engine}")
-async def delete_engine_model(engine: str):
-    """删除该引擎的模型文件（释放磁盘；下载中 / 转录中一律拒绝）"""
+async def delete_engine_model(engine: str, request: Request):
+    """删除该引擎的模型文件（释放磁盘；下载中 / 转录中一律拒绝；破坏性：仅本机可发起）"""
+    from routers.jobs import require_local_client
+    require_local_client(request, what=f'删除 {engine} 本地模型文件')
     from services import local_asr
     spec = _require_engine(engine)
     try:
@@ -321,8 +325,10 @@ async def delete_engine_model(engine: str):
 
 
 @router.delete("/local/whisper/{size}")
-async def delete_whisper_model(size: str):
-    """删除本地 Whisper 指定档位模型目录（释放磁盘）"""
+async def delete_whisper_model(size: str, request: Request):
+    """删除本地 Whisper 指定档位模型目录（释放磁盘；破坏性：仅本机可发起）"""
+    from routers.jobs import require_local_client
+    require_local_client(request, what=f'删除 Whisper {size} 模型目录')
     from services.transcriber import remove_local_model
 
     if size not in asr_repo.VALID_WHISPER_SIZES:
